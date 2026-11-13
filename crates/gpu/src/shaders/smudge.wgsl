@@ -100,6 +100,11 @@ struct SmudgeStamp {
     // -1 where the stamp's shape is mirrored on that axis, else 1
     flip_x: f32,
     flip_y: f32,
+    // 颜料混合: how strongly the paint mixes with the layer as a pigment (0..1; 0 without the table)
+    pigment: f32,
+    pigment_pad0: f32,
+    pigment_pad1: f32,
+    pigment_pad2: f32,
 }
 
 // a pass of wet paint's stamps: middle, radius and turn; roundness, pull, mixture and final
@@ -136,6 +141,43 @@ struct WetPass {
 
 fn selected_at(p: vec2<i32>) -> f32 {
     return textureSampleLevel(selected, shape_smp, (vec2<f32>(p) + 0.5) / vec2<f32>(st.size), 0.0).r;
+}
+
+// 颜料混合: `plain`'s colour replaced by `paint` mixed into `under` as a pigment, as far as
+// `coverage` says it was laid and the setting says paint mixes that way; alpha stays `plain`'s
+fn pigment_lay(under: vec4<f32>, paint: vec3<f32>, coverage: f32, plain: vec4<f32>) -> vec4<f32> {
+    if (st.pigment <= 0.0001 || under.a <= 0.0001 || coverage <= 0.0 || plain.a <= 0.0001) {
+        return plain;
+    }
+    // paint that is thicker than a trace mixes as a pigment; over bare paper nothing does
+    let support = smooth01(under.a, 0.02, 0.22);
+    let weight = clamp(st.pigment, 0.0, 1.0) * support;
+    if (weight <= 0.0001) {
+        return plain;
+    }
+    let normal = unpremultiply(plain);
+    let beneath = unpremultiply(under);
+    let amount = clamp(coverage / max(plain.a, 0.0001), 0.0, 1.0);
+    let base = normal + (beneath - normal) * support;
+    let mixed = normal + (pigment_lerp(base, paint, pigment_share(amount)) - normal) * weight;
+    return vec4<f32>(clamp(mixed, vec3<f32>(0.0), vec3<f32>(1.0)) * plain.a, plain.a);
+}
+
+// 颜料混合: `paint` mixed into `carried` as a pigment, as far as `amount` says, premultiplied in
+// and out — what the brush carries taking in the paint it lays, or the layer it picks up
+fn pigment_carry(carried: vec4<f32>, paint: vec4<f32>, amount: f32) -> vec4<f32> {
+    let plain = mix(carried, paint, amount);
+    if (st.pigment <= 0.0001 || carried.a <= 0.0001 || paint.a <= 0.0001 || plain.a <= 0.0001) {
+        return plain;
+    }
+    let weight = clamp(st.pigment, 0.0, 1.0);
+    let normal = unpremultiply(plain);
+    let left = unpremultiply(carried);
+    let right = unpremultiply(paint);
+    // the same share a plain brush's paint takes over what it goes over: the brush's strength says
+    // how much colour it moves, not how much less it mixes
+    let mixed = normal + (pigment_lerp(left, right, pigment_share(amount)) - normal) * weight;
+    return vec4<f32>(clamp(mixed, vec3<f32>(0.0), vec3<f32>(1.0)) * plain.a, plain.a);
 }
 
 fn pixel(x: i32, y: i32) -> vec4<f32> {
@@ -383,7 +425,13 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     let k = u32(p.y) * st.stride + u32(p.x);
     let w = select(unpack4x8unorm(work[k]), unpack4x8unorm(grained[k]), st.laid_apart == 2u);
     // smudging: the grain lets less of what is carried through
-    var out = mix(w, carried(p), m * g);
+    let carried_here = carried(p);
+    var out = mix(w, carried_here, m * g);
+    if (st.mode == 0u) {
+        // 颜料混合: what the brush carries mixes with the layer as a pigment (wet paint mixes at
+        // its own laying, below)
+        out = pigment_lay(w, unpremultiply(carried_here), m * g, out);
+    }
     if (st.mode == 1u) {
         // wet: the stamp's plot mixed in, alpha and all (a stamp can lay bare paper), as far as
         // its weight there
@@ -405,6 +453,11 @@ fn cs_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
             amount[l] = amount[l] + weight * (1.0 - amount[l]);
         }
         out = from_mix(mix(to_mix(w), to_mix(laid), weight));
+        if (st.laid_apart != 2u) {
+            // 颜料混合: the paint mixes with the layer as a pigment where it is laid for good
+            // (paint laid apart mixes once, where cs_synthesize shows it)
+            out = pigment_lay(w, unpremultiply(laid), weight, out);
+        }
     }
     if (st.preserve_alpha == 1u) {
         out = out * (w.a / max(out.a, 1e-6));
@@ -479,6 +532,8 @@ fn cs_synthesize(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         out = mix(kept, vec4<f32>(st.paint.rgb, 1.0), max(a - laid * scale, 0.0));
     }
+    // 颜料混合: the stroke's paint mixes with the layer as it was as a pigment
+    out = pigment_lay(was, st.paint.rgb, a, out);
     if (st.preserve_alpha == 1u) {
         out = out * (was.a / max(out.a, 1e-6));
     }
@@ -578,9 +633,13 @@ fn cs_wet_plots(@builtin(global_invocation_id) id: vec3<u32>) {
     var out = c;
     for (var k = 0u; k < st.count; k++) {
         let w = wet_pass.stamps[k];
-        c = mix(to_mix(layer_at(plot_point(w, t))), c, w.mixing.y);
-        c = mix(c, to_mix(w.paint), w.mixing.z);
-        out = mix(under_first, c, w.mixing.w);
+        // 颜料混合: what the brush picks up and the paint it takes in mix as pigments, so that a
+        // brush carrying yellow and laying blue carries green
+        c = pigment_carry(c, to_mix(layer_at(plot_point(w, t))), 1.0 - w.mixing.y);
+        c = pigment_carry(c, to_mix(w.paint), w.mixing.z);
+        // 颜料混合: the plot put down over the layer as a pigment too, so that piling it on mixes
+        // once as a pigment rather than mixing plain and then mixing it again
+        out = pigment_carry(under_first, c, w.mixing.w);
         carry[2u * CARRIED + k * n * n + id.y * n + id.x] = from_mix(out);
     }
     carry[(1u - st.index) * CARRIED + id.y * n + id.x] = out;

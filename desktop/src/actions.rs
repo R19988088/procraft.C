@@ -179,6 +179,7 @@ enum Slid {
     Stabilization,
     MotionFiltering,
     MotionExpression,
+    PigmentMix,
 }
 
 enum Row {
@@ -423,6 +424,17 @@ fn groups(tab: usize, showing: &Showing, prefs: &Prefs) -> Vec<Vec<Row>> {
                         visibility,
                         SLIDE_HEIGHT,
                         Slid::SelectionVisibility,
+                    ),
+                ],
+                // Painting: its own group, one slider to start with
+                vec![
+                    Heading("Painting"),
+                    Slide(
+                        "Pigment mixing strength",
+                        format!("{:.0}%", prefs.pigment_mix * 100.0),
+                        prefs.pigment_mix,
+                        SLIDE_HEIGHT,
+                        Slid::PigmentMix,
                     ),
                 ],
                 vec![Switch("Size & Opacity sidebar", showing.side_bar, Some(Act::SideBar))],
@@ -701,6 +713,7 @@ impl Actions {
                     Slid::Stabilization => prefs.stabilization = at,
                     Slid::MotionFiltering => prefs.motion_filtering = at,
                     Slid::MotionExpression => prefs.motion_expression = at,
+                    Slid::PigmentMix => prefs.pigment_mix = at,
                 }
                 Some(Act::Prefs)
             }

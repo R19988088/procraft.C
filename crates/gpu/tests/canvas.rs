@@ -12,6 +12,9 @@ use procraft_engine::view::View;
 use procraft_gpu::{Backdrop, Canvas, Gpu, Resample, StrokeStyle, StrokeTool, SurroundGrid, Target, wgpu};
 
 fn gpu() -> Option<Gpu> {
+    // these assert the compositing itself, so paint mixes plainly: 颜料混合 is a preference, and its
+    // own behaviour is what the app is checked for by hand
+    procraft_gpu::set_pigment_mix(0.0);
     match Gpu::headless() {
         Ok(g) => Some(g),
         Err(e) => {

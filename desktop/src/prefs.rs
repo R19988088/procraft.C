@@ -60,6 +60,9 @@ pub const DRAG_IMAGE_FORMATS: [&str; 3] = ["JPEG", "PNG", "TIFF"];
 pub const RAPID_UNDO_MIN_S: f32 = 0.1;
 pub const RAPID_UNDO_MAX_S: f32 = 1.5;
 
+/// 颜料混合强度 as it starts: 90%.
+pub const PIGMENT_MIX_START: f32 = 0.9;
+
 #[derive(Clone, Debug)]
 pub struct Prefs {
     /// The desktop interface language.
@@ -120,6 +123,10 @@ pub struct Prefs {
     pub drag_image_format: usize,
     /// Recolor's Flood, kept from one time to the next.
     pub recolor_threshold: f32,
+    /// 绘画 (Painting): how far the paint laid down mixes with the colour it goes over as a
+    /// pigment rather than as light, 0..1, 90% to start with: the mix follows the pigment table
+    /// (`crates/gpu/assets/PM_lut.bin`), the default way colours mix.
+    pub pigment_mix: f32,
 }
 
 impl Default for Prefs {
@@ -159,6 +166,7 @@ impl Default for Prefs {
             drag_format: 0,
             drag_image_format: 0,
             recolor_threshold: 0.0,
+            pigment_mix: PIGMENT_MIX_START,
         }
     }
 }
@@ -222,6 +230,7 @@ impl Prefs {
                     p.drag_image_format = value.parse::<usize>().map_or(0, |t| t.min(DRAG_IMAGE_FORMATS.len() - 1))
                 }
                 "recolor_threshold" => p.recolor_threshold = unit.unwrap_or(0.0),
+                "pigment_mix" => p.pigment_mix = unit.unwrap_or(PIGMENT_MIX_START),
                 "actions_tab" => p.actions_tab = value.parse::<usize>().map_or(0, |t| t.min(5)),
                 "curve" => {
                     let numbers: Vec<f32> = value.split(',').filter_map(|v| v.parse().ok()).collect();
@@ -275,6 +284,7 @@ impl Prefs {
             format!("drag_format {}", self.drag_format),
             format!("drag_image_format {}", self.drag_image_format),
             format!("recolor_threshold {}", self.recolor_threshold),
+            format!("pigment_mix {}", self.pigment_mix),
         ];
         let lines: Vec<String> = lines.into_iter().chain(self.plugins.kept_lines()).collect();
         crate::files::keep_text("interface", &(lines.join("\n") + "\n"));
@@ -290,6 +300,7 @@ impl Prefs {
         session.use_plugins(Arc::clone(&self.plugins));
         session.set_simplified_undos(self.simplified_undos);
         session.set_speed_distance(self.speed_distance);
+        session.set_pigment_mix_strength(self.pigment_mix);
         session.set_input_settings(
             self.stabilization,
             self.motion_filtering,

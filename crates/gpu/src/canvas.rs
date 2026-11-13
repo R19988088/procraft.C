@@ -18,7 +18,7 @@ use procraft_engine::textures::{self, GrayImage, TEXTURE_SIZE};
 
 use wgpu::util::DeviceExt;
 
-use crate::{Gpu, GpuError};
+use crate::{Gpu, GpuError, pigment};
 
 pub(crate) mod plugin_filter;
 pub(crate) mod plugin_picture;
@@ -40,7 +40,7 @@ const MULTIPLY_MODE: u32 = 1;
 const STROKE_LUMINANCE: u32 = 0x100;
 
 /// The largest uniform block a shader reads.
-const UNIFORM_SIZE: u64 = 128;
+const UNIFORM_SIZE: u64 = 144;
 const _: () = assert!(
     size_of::<LayerUniform>() as u64 <= UNIFORM_SIZE
         && size_of::<StampUniform>() as u64 <= UNIFORM_SIZE
@@ -755,6 +755,11 @@ struct LayerUniform {
     clip_masked: f32,
     /// Pixels a side of the image the grain is read from.
     grain_side: f32,
+    /// 颜料混合: how strongly the stroke's paint mixes with the colour it goes over as a pigment
+    /// (0..1), and 1 when the pigment table was read (0 mixes plainly).
+    pigment: f32,
+    pigment_on: u32,
+    _pad: [f32; 2],
 }
 
 impl Default for LayerUniform {
@@ -786,6 +791,9 @@ impl Default for LayerUniform {
             dual_threshold: -1.0,
             clip_masked: 0.0,
             grain_side: TEXTURE_SIZE as f32,
+            pigment: 0.0,
+            pigment_on: 0,
+            _pad: [0.0; 2],
         }
     }
 }
@@ -999,6 +1007,7 @@ fn smudge_bind(
     spare: &[wgpu::Buffer; 2],
     smudge: &Smudge,
     second: Option<&wgpu::TextureView>,
+    pigment: (&wgpu::TextureView, &wgpu::Sampler),
 ) -> wgpu::BindGroup {
     let uniform = |binding, buffer, size| wgpu::BindGroupEntry {
         binding,
@@ -1027,6 +1036,9 @@ fn smudge_bind(
                 resource: wgpu::BindingResource::TextureView(second.unwrap_or(&before)),
             },
             wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&before) },
+            // 颜料混合: the table wet paint and what the brush carries mix by, and its sampler
+            wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(pigment.0) },
+            wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(pigment.1) },
         ],
     })
 }
@@ -1140,6 +1152,9 @@ fn smudge_uniform(
         burnt: if style.preview { 0.0 } else { style.burnt_edges },
         burnt_blend: style.burnt_blend,
         flip: s.flip,
+        // 颜料混合: the strength every canvas mixes by, 0 where the table isn't in the build
+        pigment: pigment::strength(),
+        pigment_pad: [0.0; 3],
     }
 }
 
@@ -1232,6 +1247,10 @@ struct SmudgeUniform {
     burnt_blend: u32,
     /// −1 where the stamp's shape is mirrored on that axis, else 1.
     flip: [f32; 2],
+    /// 颜料混合: how strongly the paint mixes with the layer as a pigment (0..1; 0 without the
+    /// table), and three floats keeping the struct's size a uniform's.
+    pigment: f32,
+    pigment_pad: [f32; 3],
 }
 
 /// The coarsest mip level of our brush images (256 texels a side) a small stamp reads its shape
@@ -1779,6 +1798,12 @@ pub(crate) struct Pipelines {
     /// groups with it.
     veil_layout: wgpu::BindGroupLayout,
     veil_pipeline_layout: wgpu::PipelineLayout,
+    /// 颜料混合's table: the bands the composite shaders read (after the layer's textures) as a 3D
+    /// texture the hardware filters for them (the view keeps it alive), the sampler it is read with,
+    /// and 1 when it is the file's own (0 mixes paint plainly).
+    pigment_lut: wgpu::TextureView,
+    pigment_sampler: wgpu::Sampler,
+    pigment_on: u32,
 }
 
 /// A canvas's own pipelines for drawing to a window, made for each target format as it comes.
@@ -2141,7 +2166,15 @@ impl Canvas {
             [&shapes_view, &grains_view, &everything],
             [&shape_sampler, &grain_sampler],
         );
-        let stroke_bind = quad_bind(device, &pipelines.quad_layout, [&stroke_view; 7], &grains_view, &grain_sampler);
+        let stroke_bind = quad_bind(
+            device,
+            &pipelines.quad_layout,
+            [&stroke_view; 7],
+            &grains_view,
+            &grain_sampler,
+            &pipelines.pigment_lut,
+            &pipelines.pigment_sampler,
+        );
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("linear"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -2428,6 +2461,8 @@ impl Canvas {
             [&self.stroke_view; 7],
             self.grain_view(),
             &self.grain_sampler,
+            &self.pipelines.pigment_lut,
+            &self.pipelines.pigment_sampler,
         );
     }
 
@@ -5012,6 +5047,7 @@ impl Canvas {
             &self.smudge_spare,
             smudge,
             None,
+            (&self.pipelines.pigment_lut, &self.pipelines.pigment_sampler),
         );
         let full = IRect::from_size(self.width, self.height);
         let mut changed = IRect::EMPTY;
@@ -5120,6 +5156,7 @@ impl Canvas {
             &self.smudge_spare,
             smudge,
             second,
+            (&self.pipelines.pigment_lut, &self.pipelines.pigment_sampler),
         );
         let offset = params.push(&SmudgeUniform {
             mode: 1,
@@ -5167,6 +5204,7 @@ impl Canvas {
             &self.smudge_spare,
             smudge,
             second,
+            (&self.pipelines.pigment_lut, &self.pipelines.pigment_sampler),
         );
         let grain_once = if grain_once(style) { 1.0 } else { 0.0 };
         let modulated = u32::from(smudge.amount.is_some() && style.rendering == Rendering::Gradual);
@@ -5377,10 +5415,29 @@ impl Canvas {
             let quad = |layer: &wgpu::TextureView| {
                 let views = [layer, stroke_view, stroke_view, stroke_view, stroke_view, second, stroke_view];
                 let grain = self.grain_view_of(&stroke.style);
-                quad_bind(device, &self.pipelines.quad_layout, views, grain, &self.grain_sampler)
+                quad_bind(
+                    device,
+                    &self.pipelines.quad_layout,
+                    views,
+                    grain,
+                    &self.grain_sampler,
+                    &self.pipelines.pigment_lut,
+                    &self.pipelines.pigment_sampler,
+                )
             };
             let laid = stroke.style.tool == StrokeTool::Laid;
-            match (stroke.style.tool, laid || locked || stroke.style.blend != 0 || burns || stroke.style.luminance) {
+            // 颜料混合: paint mixed with the colour it goes over as a pigment, which reads the
+            // layer as it was: such a stroke commits through the scratch, as a blend mode's does
+            let pigment = if stroke.style.preview { 0.0 } else { pigment::mix() };
+            // 颜料混合: only a plain paint stroke's (a blend mode is the mixing the user asked for,
+            // and an alpha locked stroke recolours what is there rather than mixing with it)
+            let mixing = pigment > 0.0
+                && self.pipelines.pigment_on != 0
+                && stroke.style.blend == 0
+                && !stroke.style.preserve_alpha
+                && matches!(stroke.style.tool, StrokeTool::Paint);
+            let reads_layer = laid || locked || stroke.style.blend != 0 || burns || stroke.style.luminance || mixing;
+            match (stroke.style.tool, reads_layer) {
                 (StrokeTool::Paint | StrokeTool::Laid, true) => {
                     // recolour where the layer has alpha, or blend by a mode or burn edges (which
                     // read the layer): into scratch, then back
@@ -5393,6 +5450,8 @@ impl Canvas {
                                 _ => STROKE_PAINT,
                             },
                             stroke_opacity: opacity,
+                            pigment: if mixing { pigment } else { 0.0 },
+                            pigment_on: self.pipelines.pigment_on,
                             ..Default::default()
                         }
                         .with_grain(Some(&stroke.style))
@@ -6938,6 +6997,15 @@ impl Canvas {
             clip_masked: if clip_mask_view.is_some() { 1.0 } else { 0.0 },
             masked: if mask_view.is_some() { 1.0 } else { 0.0 },
             stroke_on_mask: if stroke.is_some_and(|s| Some(s.layer) == mask) { 1.0 } else { 0.0 },
+            // 颜料混合 as the stroke is drawn, so that the paint doesn't change as it is committed
+            pigment: if stroke.is_some_and(|s| {
+                s.style.blend == 0 && !s.style.preserve_alpha && matches!(s.style.tool, StrokeTool::Paint)
+            }) {
+                pigment::mix()
+            } else {
+                0.0
+            },
+            pigment_on: self.pipelines.pigment_on,
             ..Default::default()
         }
         .with_grain(stroke.as_ref().map(|s| &s.style))
@@ -8116,6 +8184,8 @@ impl Canvas {
             [a, b, c, d, mask, self.second_view(device), clip_mask],
             self.grain_view(),
             &self.grain_sampler,
+            &self.pipelines.pigment_lut,
+            &self.pipelines.pigment_sampler,
         )
     }
 
@@ -8190,7 +8260,7 @@ pub fn textures_bytes(textures: &[wgpu::Texture]) -> u64 {
 }
 
 impl Pipelines {
-    pub(crate) fn new(device: &wgpu::Device, liquify_format: wgpu::TextureFormat) -> Pipelines {
+    pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue, liquify_format: wgpu::TextureFormat) -> Pipelines {
         let tex_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -8217,6 +8287,61 @@ impl Pipelines {
             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
             count: None,
         };
+        // 颜料混合: the pigment table once for the device — uploaded whole as the 3D texture the
+        // hardware filters for the shaders, the file already being its bytes — and whether it is the
+        // file's own (a canvas with none mixes paint plainly)
+        let pigment = pigment::bytes();
+        let pigment_on = u32::from(pigment.is_some());
+        let shape = if pigment.is_some() { (pigment::WIDTH, pigment::HEIGHT, pigment::DEPTH) } else { (1, 1, 1) };
+        let pigment_table = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("pigment table"),
+            size: wgpu::Extent3d {
+                width: shape.0,
+                height: shape.1,
+                depth_or_array_layers: shape.2,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        if let Some(bits) = pigment {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &pigment_table,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bits,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(pigment::WIDTH * 8),
+                    rows_per_image: Some(pigment::HEIGHT),
+                },
+                wgpu::Extent3d {
+                    width: pigment::WIDTH,
+                    height: pigment::HEIGHT,
+                    depth_or_array_layers: pigment::DEPTH,
+                },
+            );
+        }
+        let pigment_lut = pigment_table.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("pigment table"),
+            dimension: Some(wgpu::TextureViewDimension::D3),
+            ..Default::default()
+        });
+        let pigment_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("pigment table"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         let quad_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("layer, stroke, clip, backdrop, grains"),
             entries: &[
@@ -8229,6 +8354,18 @@ impl Pipelines {
                 tex_entry(6),
                 tex_entry(7),
                 tex_entry(8),
+                // 颜料混合's table, a 3D texture the hardware filters between its slices
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                sampler_entry(10),
             ],
         });
         let brush_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -8293,8 +8430,14 @@ impl Pipelines {
         };
         let stamp_module =
             module("stamp", concat!(include_str!("shaders/blend.wgsl"), include_str!("shaders/stamp.wgsl")));
-        let composite_module =
-            module("composite", concat!(include_str!("shaders/blend.wgsl"), include_str!("shaders/composite.wgsl")));
+        let composite_module = module(
+            "composite",
+            concat!(
+                include_str!("shaders/blend.wgsl"),
+                include_str!("shaders/pigment.wgsl"),
+                include_str!("shaders/composite.wgsl")
+            ),
+        );
         let display_module = module("display", include_str!("shaders/display.wgsl"));
         let surround_module = module("surround", include_str!("shaders/surround.wgsl"));
         let backdrop_module = module("backdrop", include_str!("shaders/backdrop.wgsl"));
@@ -8516,10 +8659,28 @@ impl Pipelines {
                 // a dual brush's second, and the layer as it was (its paint laid in place)
                 compute_texture(6),
                 compute_texture(7),
+                // 颜料混合's table, a 3D texture the hardware filters between its slices
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                sampler_entry(10),
             ],
         });
-        let smudge_module =
-            module("smudge", concat!(include_str!("shaders/blend.wgsl"), include_str!("shaders/smudge.wgsl")));
+        let smudge_module = module(
+            "smudge",
+            concat!(
+                include_str!("shaders/blend.wgsl"),
+                include_str!("shaders/pigment.wgsl"),
+                include_str!("shaders/smudge.wgsl")
+            ),
+        );
         let smudge_pipeline_layout = layout("smudge", &[Some(&smudge_layout), Some(&brush_layout)]);
         let compute = |label, entry| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -8753,6 +8914,9 @@ impl Pipelines {
             backdrop_module,
             veil_layout,
             veil_pipeline_layout,
+            pigment_lut,
+            pigment_sampler,
+            pigment_on,
         }
     }
 }
@@ -9504,6 +9668,8 @@ fn quad_bind(
     views: [&wgpu::TextureView; 7],
     grains: &wgpu::TextureView,
     grain_sampler: &wgpu::Sampler,
+    pigment: &wgpu::TextureView,
+    pigment_sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
     let [a, b, c, d, mask, second, clip_mask] = views;
     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -9519,6 +9685,8 @@ fn quad_bind(
             wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(mask) },
             wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(second) },
             wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(clip_mask) },
+            wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(pigment) },
+            wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::Sampler(pigment_sampler) },
         ],
     })
 }
@@ -9847,9 +10015,12 @@ fn wet_params(device: &wgpu::Device, count: u64) -> wgpu::Buffer {
 }
 
 fn smudge_params(device: &wgpu::Device, count: u64) -> wgpu::Buffer {
+    // a stamp's uniform takes its own count of slots (it is over one slot's 256 bytes since
+    // 颜料混合: pigment strength joined it), as a wet pass's does
+    let slots = SMUDGE_UNIFORM_SIZE.div_ceil(SLOT).max(1);
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("smudge stamps"),
-        size: count.max(1) * SLOT,
+        size: count.max(1) * slots * SLOT,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })

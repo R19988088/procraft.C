@@ -48,6 +48,12 @@ struct LayerUniform {
     clip_masked: f32,
     // pixels a side of the image the grain is read from
     grain_side: f32,
+    // how strongly the stroke's paint mixes with the colour it goes over as a pigment (0..1), and
+    // 1 when the pigment table was read
+    pigment: f32,
+    pigment_on: u32,
+    _pad0: f32,
+    _pad1: f32,
 }
 
 // in stroke_blend: the stroke mixed in by its coverage in squared colour (nearer to light)
@@ -191,7 +197,8 @@ fn with_stroke(c0: vec4<f32>, p: vec2<i32>) -> vec4<f32> {
         } else {
             // painted (1), or recoloured keeping the layer's alpha (3): the blend written once, as
             // Direct3D 12's compiler takes a long while over each copy of its modes
-            let painted = burnt(c0, stroke_into(c, s), px.burn);
+            let plain = stroke_into(c, s);
+            let painted = burnt(c0, pigment_into(c, s, plain, lu.pigment, lu.pigment_on), px.burn);
             c = select(painted, painted * (c.a / max(painted.a, 1e-6)), lu.stroke_mode == 3u);
         }
     }

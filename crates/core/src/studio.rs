@@ -554,6 +554,12 @@ impl CanvasSession {
         self.shared.lock().input.speed_distance = if part.is_finite() { part.clamp(0.25, 1.0) } else { 1.0 };
     }
 
+    /// 颜料混合强度: how strongly paint mixes with the colour it goes over as a pigment (0..1), the
+    /// way colours mix by default, by the pigment table.
+    pub fn set_pigment_mix_strength(&self, strength: f32) {
+        procraft_gpu::set_pigment_mix(strength);
+    }
+
     /// The studio's brush set at random, each setting where a plugin says (Randomise); false if
     /// none says anything.
     pub fn studio_randomise(&self) -> bool {

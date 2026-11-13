@@ -6,6 +6,7 @@
 
 mod canvas;
 mod lighting;
+mod pigment;
 mod scene;
 mod sphere;
 
@@ -21,6 +22,7 @@ pub use canvas::{
     start_reading, textures_bytes,
 };
 pub use lighting::Lighting;
+pub use pigment::{START as PIGMENT_MIX_START, mix as pigment_mix, set_mix as set_pigment_mix};
 pub use scene::{
     GrainLook, Light, MOST_LIGHTS, MaterialLook, MeshView, Orbit, ShownSelection, SurfaceMap, material_source,
 };
@@ -429,8 +431,9 @@ impl Gpu {
     /// The pipelines canvases draw with, made by the first canvas on this device.
     pub(crate) fn canvas_pipelines(&self) -> Arc<canvas::Pipelines> {
         Arc::clone(
-            self.canvas_pipelines
-                .get_or_init(|| Arc::new(canvas::Pipelines::new(&self.device, canvas::liquify_format(&self.adapter)))),
+            self.canvas_pipelines.get_or_init(|| {
+                Arc::new(canvas::Pipelines::new(&self.device, &self.queue, canvas::liquify_format(&self.adapter)))
+            }),
         )
     }
 
