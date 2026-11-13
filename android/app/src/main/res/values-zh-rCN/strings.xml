@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="widget_recent_name">最近的作品</string>
+    <string name="widget_recent_description">打开 ProCraft，显示你上次画的那幅作品。</string>
+</resources>

@@ -118,6 +118,9 @@ android {
     compileSdk = 37
     ndkVersion = "29.0.14206865"
 
+    // The Chinese table is the desktop app's own, one table for both apps (see ui/I18n.kt).
+    sourceSets.getByName("main").assets.srcDir(cargoWorkspaceDir.resolve("desktop/i18n"))
+
     defaultConfig {
         applicationId = "io.github.artcraftandroid.procraft"
         minSdk = minApi

@@ -24,7 +24,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
@@ -48,6 +47,7 @@ import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.keptPlugins
 import io.github.artcraftandroid.procraft.ui.Pc
 import io.github.artcraftandroid.procraft.ui.Switch
+import io.github.artcraftandroid.procraft.ui.Text
 import io.github.artcraftandroid.procraft.ui.fittedInterfaceSize
 
 /**

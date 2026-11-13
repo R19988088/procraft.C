@@ -26,7 +26,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -118,8 +117,8 @@ fun <T : Any> Alert(
             val density = androidx.compose.ui.platform.LocalDensity.current
             val said = message(kept)
             val words = with(density) {
-                val m = if (said.isEmpty()) 0 else measurer.measure(said, androidx.compose.ui.text.TextStyle(fontSize = 16.sp, lineHeight = 20.sp)).size.width
-                val t = measurer.measure(title(kept), androidx.compose.ui.text.TextStyle(fontSize = 26.sp, fontWeight = FontWeight.Bold)).size.width
+                val m = if (said.isEmpty()) 0 else measurer.measure(tr(said), androidx.compose.ui.text.TextStyle(fontSize = 16.sp, lineHeight = 20.sp)).size.width
+                val t = measurer.measure(tr(title(kept)), androidx.compose.ui.text.TextStyle(fontSize = 26.sp, fontWeight = FontWeight.Bold)).size.width
                 maxOf(m.toDp(), t.toDp() + if (icon != null) 32.dp else 0.dp)
             }
             val width = (words + AlertTextSide * 2).coerceIn(need, maxOf(AlertMostWidth, need))

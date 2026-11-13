@@ -29,7 +29,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -1466,10 +1465,12 @@ private fun KeypadKey(label: String, width: Dp, height: Dp = 66.dp, onClick: () 
 @Composable
 private fun FittedLabel(label: String, modifier: Modifier) {
     val measurer = androidx.compose.ui.text.rememberTextMeasurer()
+    // measured as it is drawn: the words once translated, so the size that fits is the Chinese's
+    val shown = tr(label)
     androidx.compose.foundation.layout.BoxWithConstraints(modifier) {
         val room = constraints.maxWidth
-        val size = remember(label, room) {
-            fun wide(sp: Float) = measurer.measure(label, androidx.compose.ui.text.TextStyle(fontSize = sp.sp), maxLines = 1, softWrap = false).size.width
+        val size = remember(shown, room) {
+            fun wide(sp: Float) = measurer.measure(shown, androidx.compose.ui.text.TextStyle(fontSize = sp.sp), maxLines = 1, softWrap = false).size.width
             var sp = 17f
             while (sp > 17f * 0.6f && wide(sp) > room) sp -= 0.5f
             sp

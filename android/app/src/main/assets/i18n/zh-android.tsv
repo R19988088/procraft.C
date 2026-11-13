@@ -1,0 +1,121 @@
+# This app's own Chinese words, besides the desktop's table it also reads (desktop/i18n/zh.tsv).
+# `english<TAB>中文` a line, `#` starting a comment. A line here overrides the desktop's.
+# Strings the app formats itself (counts, sizes, names) have no line: they are drawn as they are.
+
+Done	完成
+Cancel	取消
+Import	导入
+Clear	清除
+Delete	删除
+Duplicate	复制
+Share	分享
+Rename	重命名
+Combine	合并
+Uncombine	拆分
+Search	搜索
+No results	没有结果
+Recent	最近使用
+Plugins	插件
+Adjustments	调整
+Adjust	调整
+Reset	重置
+Additive	叠加
+Opacity	不透明度
+Colors	颜色
+Hexadecimal	十六进制
+History	历史
+Clear history	清除历史
+Set as active	设为当前
+Create new palette	新建调色板
+New from camera	从相机新建
+New from file	从文件新建
+New from photos	从照片新建
+Restore example palettes	恢复示例调色板
+ColorDrop	颜色拖放
+Continue filling	继续填充
+Canvas Info	画布信息
+Available color profiles	可用的颜色配置
+Made by 	作者：
+Name	名字
+Sign here	在此签名
+Custom Canvas	自定义画布
+Background color	背景色
+Image source options	图像来源选项
+Source Library	来源库
+Search Library	搜索图库
+Import Image	导入图像
+Reference	参考图
+Drawing Guides	绘图辅助线
+Tap to create vanishing points	点按以创建灭点
+Length	长度
+Options	选项
+Assisted Drawing	辅助绘图
+Angle	角度
+DPI	DPI
+Rotation	旋转
+Settings	设置
+Gesture controls	手势控制
+Reset to defaults	恢复默认
+Delay	延迟
+Gallery	图库
+Opening…	正在打开…
+Image Format	图像格式
+More Options	更多选项
+Start Gallery Recovery	开始图库恢复
+Tap + to start a new canvas	点 + 新建画布
+Selections	选区
+Copy & Paste	复制与粘贴
+Brush Studio	笔刷工作室
+Drawing Pad	绘图板
+Randomise	随机
+Create new reset point	新建重置点
+Reset brush	重置笔刷
+Last reset point:	上次重置点：
+Preview size	预览大小
+Stylus	触控笔
+3D preview	3D 预览
+Clear drawing pad	清空绘图板
+Reset all brush settings	重置全部笔刷设置
+Combine Mode	合并模式
+Brush cursor visibility	笔刷光标显示
+Brush outline style	笔刷轮廓样式
+Advanced cursor	高级光标
+App Pressure Sensitivity	应用压感
+Pressure & Smoothing	压感与平滑
+Nothing imported yet. Import a .procraft-plugin file to add one.	还没有导入任何插件，导入 .procraft-plugin 文件即可添加。
+Onion skin colors	洋葱皮颜色
+In-between	中间帧
+Lighting Studio	灯光工作室
+Light Settings	灯光设置
+Environment	环境
+Show Environment	显示环境
+Exposure	曝光
+Edit style	编辑样式
+TT	TT
+Locked layer selection	已锁定的图层
+A locked layer can’t be deleted. Unlock it first.	已锁定的图层无法删除，请先解锁。
+Delete these layers?	删除这些图层？
+Undo brings them back.	撤销可以恢复。
+Select All	全选
+Group	建组
+Merge	合并
+Lock	锁定
+Unlock	解锁
+New layer	新建图层
+Layers	图层
+Assisted Reference	辅助参考
+Private	私有
+Channels	通道
+Color	颜色
+Roughness	粗糙度
+Metallic	金属度
+Max	最大
+Shared	共享
+Open	展开
+Close	收起
+Locked	已锁定
+Clipped	剪贴
+Restore default brushes	恢复默认笔刷
+Create new brush	新建笔刷
+Create new set	新建笔刷组
+Import from Files	从文件导入
