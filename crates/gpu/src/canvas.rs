@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, mpsc};
+use std::thread;
 
 use procraft_engine::animation::{self, FrameLook};
 use procraft_engine::brush::{BRUSH_BEHIND, Brush, GRAIN_LINEAR_HEIGHT, GrainMode, Rendering, Source, run_out};
@@ -8295,11 +8296,7 @@ impl Pipelines {
         let shape = if pigment.is_some() { (pigment::WIDTH, pigment::HEIGHT, pigment::DEPTH) } else { (1, 1, 1) };
         let pigment_table = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("pigment table"),
-            size: wgpu::Extent3d {
-                width: shape.0,
-                height: shape.1,
-                depth_or_array_layers: shape.2,
-            },
+            size: wgpu::Extent3d { width: shape.0, height: shape.1, depth_or_array_layers: shape.2 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D3,
@@ -8530,18 +8527,10 @@ impl Pipelines {
             let pipeline_layout = layout("bounds", &[Some(group)]);
             blended_pipeline(device, &pipeline_layout, &bounds_module, fs, ("vs_full", fs), LAYER_FORMAT, None)
         };
-        let (bounds_rows, bounds_columns) =
-            (bounds_pipeline(&bounds_layout, "fs_rows"), bounds_pipeline(&bounds_layout, "fs_columns"));
-        let (changed_rows, changed_columns) = (
-            bounds_pipeline(&changed_layout, "fs_changed_rows"),
-            bounds_pipeline(&changed_layout, "fs_changed_columns"),
-        );
         let flip_module = module("flip", include_str!("shaders/flip.wgsl"));
         let flip_layout = layout("flip", &[Some(&bounds_layout)]);
         let flip_pipeline =
             |fs| blended_pipeline(device, &flip_layout, &flip_module, fs, ("vs_full", fs), LAYER_FORMAT, None);
-        let (flip_across, flip_down) = (flip_pipeline("fs_across"), flip_pipeline("fs_down"));
-        let invert = flip_pipeline("fs_invert");
         let crop_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("crop"),
             entries: &[
@@ -8559,54 +8548,12 @@ impl Pipelines {
             ],
         });
         let crop_module = module("crop", include_str!("shaders/crop.wgsl"));
-        let crop = blended_pipeline(
-            device,
-            &layout("crop", &[Some(&crop_layout)]),
-            &crop_module,
-            "crop",
-            ("vs_full", "fs_crop"),
-            LAYER_FORMAT,
-            None,
-        );
         let filter_module = module("filter", include_str!("shaders/filter.wgsl"));
-        let filters = FILTER_PASSES
-            .iter()
-            .map(|&fs| {
-                let pipeline = blended_pipeline(
-                    device,
-                    &filter_pipeline_layout,
-                    &filter_module,
-                    fs,
-                    ("vs_filter", fs),
-                    LAYER_FORMAT,
-                    None,
-                );
-                (fs, pipeline)
-            })
-            .collect();
         let liquify_module = module("liquify", include_str!("shaders/liquify.wgsl"));
-        let liquify_stamp = blended_pipeline(
-            device,
-            &layout("liquify stamps", &[Some(&uniform_layout)]),
-            &liquify_module,
-            "liquify stamps",
-            ("vs_stamp", "fs_stamp"),
-            LIQUIFY_SUMS_FORMAT,
-            Some(ADD),
-        );
         let liquify_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("liquify step"),
             entries: &[tex_entry(0), tex_entry(1), tex_entry(2)],
         });
-        let liquify_step = blended_pipeline(
-            device,
-            &layout("liquify step", &[Some(&uniform_layout), Some(&liquify_layout)]),
-            &liquify_module,
-            "liquify step",
-            ("vs_step", "fs_step"),
-            liquify_format,
-            None,
-        );
         let surround_pipeline_layout = layout("surround", &[Some(&uniform_layout)]);
         let storage = |binding| wgpu::BindGroupLayoutEntry {
             binding,
@@ -8692,12 +8639,6 @@ impl Pipelines {
                 cache: None,
             })
         };
-        let smudge_carry = compute("smudge carry", "cs_carry");
-        let smudge_blur_down = compute("smudge blur down", "cs_blur_down");
-        let smudge_blur_across = compute("smudge blur across", "cs_blur_across");
-        let smudge_deposit = compute("smudge deposit", "cs_deposit");
-        let smudge_synthesize = compute("smudge synthesize", "cs_synthesize");
-        let smudge_wet_plots = compute("smudge wet plots", "cs_wet_plots");
 
         let overlay_module = module("overlay", include_str!("shaders/overlay.wgsl"));
         let stamp_pipeline = |label, blend| {
@@ -8731,50 +8672,50 @@ impl Pipelines {
                 cache: None,
             })
         };
-        let stamp = stamp_pipeline("stamp", PREMULTIPLIED_OVER);
-        let stamp_max = stamp_pipeline("stamp max", MAXIMUM);
         // stamps adding towards their transfer: the paint (scaled by it) over what is there, kept
         // by what the stamp covers (a second colour out of the shader)
-        let stamp_capped = device.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING).then(|| {
-            let capped_module = module(
-                "stamp capped",
-                concat!(
-                    "enable dual_source_blending;\n",
-                    include_str!("shaders/blend.wgsl"),
-                    include_str!("shaders/stamp.wgsl"),
-                    include_str!("shaders/stamp_capped.wgsl")
-                ),
-            );
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("stamp capped"),
-                layout: Some(&stamp_layout),
-                vertex: wgpu::VertexState {
-                    module: &capped_module,
-                    entry_point: Some("vs_stamp"),
-                    compilation_options: Default::default(),
-                    buffers: &[Some(wgpu::VertexBufferLayout {
-                        array_stride: size_of::<StampInstance>() as u64,
-                        step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &STAMP_ATTRIBUTES,
-                    })],
-                },
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &capped_module,
-                    entry_point: Some("fs_stamp_capped"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: STROKE_FORMAT,
-                        blend: Some(TOWARDS_TRANSFER),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview_mask: None,
-                cache: None,
+        let stamp_capped = || {
+            device.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING).then(|| {
+                let capped_module = module(
+                    "stamp capped",
+                    concat!(
+                        "enable dual_source_blending;\n",
+                        include_str!("shaders/blend.wgsl"),
+                        include_str!("shaders/stamp.wgsl"),
+                        include_str!("shaders/stamp_capped.wgsl")
+                    ),
+                );
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("stamp capped"),
+                    layout: Some(&stamp_layout),
+                    vertex: wgpu::VertexState {
+                        module: &capped_module,
+                        entry_point: Some("vs_stamp"),
+                        compilation_options: Default::default(),
+                        buffers: &[Some(wgpu::VertexBufferLayout {
+                            array_stride: size_of::<StampInstance>() as u64,
+                            step_mode: wgpu::VertexStepMode::Instance,
+                            attributes: &STAMP_ATTRIBUTES,
+                        })],
+                    },
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &capped_module,
+                        entry_point: Some("fs_stamp_capped"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: STROKE_FORMAT,
+                            blend: Some(TOWARDS_TRANSFER),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
             })
-        });
+        };
         let full = |label, entry, blend| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
@@ -8802,31 +8743,186 @@ impl Pipelines {
                 cache: None,
             })
         };
+        // Making a pipeline is the shader compiler running on the CPU — on Direct3D 12 it is FXC
+        // compiling every entry point of every module, which is what makes a canvas's pipelines
+        // take whole seconds — so every one the canvas needs is made at once here, on every core.
+        // A canvas opens once the slowest of these is done, rather than once the last of them is.
+        let made = thread::scope(|scope| {
+            let bounds = scope
+                .spawn(|| (bounds_pipeline(&bounds_layout, "fs_rows"), bounds_pipeline(&bounds_layout, "fs_columns")));
+            let changed = scope.spawn(|| {
+                (
+                    bounds_pipeline(&changed_layout, "fs_changed_rows"),
+                    bounds_pipeline(&changed_layout, "fs_changed_columns"),
+                )
+            });
+            let flips =
+                scope.spawn(|| (flip_pipeline("fs_across"), flip_pipeline("fs_down"), flip_pipeline("fs_invert")));
+            let crop = scope.spawn(|| {
+                blended_pipeline(
+                    device,
+                    &layout("crop", &[Some(&crop_layout)]),
+                    &crop_module,
+                    "crop",
+                    ("vs_full", "fs_crop"),
+                    LAYER_FORMAT,
+                    None,
+                )
+            });
+            let liquify = scope.spawn(|| {
+                (
+                    blended_pipeline(
+                        device,
+                        &layout("liquify stamps", &[Some(&uniform_layout)]),
+                        &liquify_module,
+                        "liquify stamps",
+                        ("vs_stamp", "fs_stamp"),
+                        LIQUIFY_SUMS_FORMAT,
+                        Some(ADD),
+                    ),
+                    blended_pipeline(
+                        device,
+                        &layout("liquify step", &[Some(&uniform_layout), Some(&liquify_layout)]),
+                        &liquify_module,
+                        "liquify step",
+                        ("vs_step", "fs_step"),
+                        liquify_format,
+                        None,
+                    ),
+                )
+            });
+            // 颜料混合's passes, which are the most to compile of any of them
+            let smudge_a = scope.spawn(|| {
+                (
+                    compute("smudge carry", "cs_carry"),
+                    compute("smudge blur down", "cs_blur_down"),
+                    compute("smudge blur across", "cs_blur_across"),
+                )
+            });
+            let smudge_b = scope.spawn(|| {
+                (
+                    compute("smudge deposit", "cs_deposit"),
+                    compute("smudge synthesize", "cs_synthesize"),
+                    compute("smudge wet plots", "cs_wet_plots"),
+                )
+            });
+            let stamps =
+                scope.spawn(|| (stamp_pipeline("stamp", PREMULTIPLIED_OVER), stamp_pipeline("stamp max", MAXIMUM)));
+            let capped = scope.spawn(|| stamp_capped());
+            let composite_a = scope.spawn(|| {
+                (
+                    full("layer", "fs_layer", Some(PREMULTIPLIED_OVER)),
+                    full("blend", "fs_blend", None),
+                    full("solid", "fs_solid", None),
+                )
+            });
+            let composite_b = scope.spawn(|| {
+                (
+                    full("commit paint", "fs_commit", Some(PREMULTIPLIED_OVER)),
+                    full("commit erase", "fs_commit", Some(DESTINATION_OUT)),
+                    full("commit locked", "fs_commit_locked", None),
+                )
+            });
+            let moves = scope.spawn(|| {
+                (
+                    blended_pipeline(
+                        device,
+                        &transform_pipeline_layout,
+                        &transform_module,
+                        "transform",
+                        ("vs_transform", "fs_transform"),
+                        LAYER_FORMAT,
+                        Some(PREMULTIPLIED_OVER),
+                    ),
+                    sampled_pipeline(
+                        device,
+                        &transform_pipeline_layout,
+                        &transform_module,
+                        "transform static",
+                        "vs_transform",
+                        "fs_static",
+                        LAYER_FORMAT,
+                    ),
+                )
+            });
+            let thumb = scope.spawn(|| {
+                sampled_pipeline(
+                    device,
+                    &display_pipeline_layout,
+                    &display_module,
+                    "thumbnail",
+                    "vs_thumb",
+                    "fs_thumb",
+                    LAYER_FORMAT,
+                )
+            });
+            // the adjustment passes' seventeen take longer between them than anything else, so
+            // they are spread over threads of their own rather than left to one
+            let filter_jobs: Vec<_> = FILTER_PASSES
+                .chunks(FILTERS_A_THREAD)
+                .map(|passes| {
+                    let the_layout = &filter_pipeline_layout;
+                    let the_module = &filter_module;
+                    scope.spawn(move || {
+                        passes
+                            .iter()
+                            .map(|&fs| {
+                                (
+                                    fs,
+                                    blended_pipeline(
+                                        device,
+                                        the_layout,
+                                        the_module,
+                                        fs,
+                                        ("vs_filter", fs),
+                                        LAYER_FORMAT,
+                                        None,
+                                    ),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            let filters: HashMap<&'static str, wgpu::RenderPipeline> =
+                filter_jobs.into_iter().flat_map(|job| join(job)).collect();
+            (
+                (join(bounds), join(changed), join(flips), join(crop), join(liquify)),
+                (join(smudge_a), join(smudge_b), join(stamps), join(capped)),
+                (join(composite_a), join(composite_b), join(moves), join(thumb), filters),
+            )
+        });
+        let (
+            (
+                (bounds_rows, bounds_columns),
+                (changed_rows, changed_columns),
+                (flip_across, flip_down, invert),
+                crop,
+                (liquify_stamp, liquify_step),
+            ),
+            (
+                (smudge_carry, smudge_blur_down, smudge_blur_across),
+                (smudge_deposit, smudge_synthesize, smudge_wet_plots),
+                (stamp, stamp_max),
+                stamp_capped,
+            ),
+            (
+                (layer, blend, solid),
+                (commit_paint, commit_erase, commit_locked),
+                (transform, transform_static),
+                thumb,
+                filters,
+            ),
+        ) = made;
         Pipelines {
-            layer: full("layer", "fs_layer", Some(PREMULTIPLIED_OVER)),
-            blend: full("blend", "fs_blend", None),
-            solid: full("solid", "fs_solid", None),
-            commit_paint: full("commit paint", "fs_commit", Some(PREMULTIPLIED_OVER)),
-            commit_erase: full("commit erase", "fs_commit", Some(DESTINATION_OUT)),
-            commit_locked: full("commit locked", "fs_commit_locked", None),
-            transform: blended_pipeline(
-                device,
-                &transform_pipeline_layout,
-                &transform_module,
-                "transform",
-                ("vs_transform", "fs_transform"),
-                LAYER_FORMAT,
-                Some(PREMULTIPLIED_OVER),
-            ),
-            transform_static: sampled_pipeline(
-                device,
-                &transform_pipeline_layout,
-                &transform_module,
-                "transform static",
-                "vs_transform",
-                "fs_static",
-                LAYER_FORMAT,
-            ),
+            layer,
+            blend,
+            solid,
+            commit_paint,
+            commit_erase,
+            commit_locked,
+            transform,
+            transform_static,
             transform_layout,
             bounds_layout,
             bounds_rows,
@@ -8875,15 +8971,7 @@ impl Pipelines {
                 multiview_mask: None,
                 cache: None,
             }),
-            thumb: sampled_pipeline(
-                device,
-                &display_pipeline_layout,
-                &display_module,
-                "thumbnail",
-                "vs_thumb",
-                "fs_thumb",
-                LAYER_FORMAT,
-            ),
+            thumb,
             stamp,
             stamp_max,
             stamp_capped,
@@ -8918,6 +9006,16 @@ impl Pipelines {
             pigment_sampler,
             pigment_on,
         }
+    }
+}
+
+/// What a thread making a canvas's pipelines made, once it is done; a panic of its own comes back
+/// out to the caller that wraps the lot (see `Gpu::prepare_canvases`) as it would have from this
+/// thread, rather than being swallowed and leaving a pipeline the canvas expects missing.
+fn join<T>(job: thread::ScopedJoinHandle<'_, T>) -> T {
+    match job.join() {
+        Ok(made) => made,
+        Err(payload) => std::panic::resume_unwind(payload),
     }
 }
 
@@ -8975,6 +9073,9 @@ const ADD: wgpu::BlendState = wgpu::BlendState {
         operation: wgpu::BlendOperation::Add,
     },
 };
+
+/// How many of the adjustment passes' pipelines one thread makes.
+const FILTERS_A_THREAD: usize = 5;
 
 const FILTER_PASSES: [&str; 17] = [
     "fs_glitch",

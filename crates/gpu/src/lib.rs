@@ -430,11 +430,9 @@ impl Gpu {
 
     /// The pipelines canvases draw with, made by the first canvas on this device.
     pub(crate) fn canvas_pipelines(&self) -> Arc<canvas::Pipelines> {
-        Arc::clone(
-            self.canvas_pipelines.get_or_init(|| {
-                Arc::new(canvas::Pipelines::new(&self.device, &self.queue, canvas::liquify_format(&self.adapter)))
-            }),
-        )
+        Arc::clone(self.canvas_pipelines.get_or_init(|| {
+            Arc::new(canvas::Pipelines::new(&self.device, &self.queue, canvas::liquify_format(&self.adapter)))
+        }))
     }
 
     /// GPU validation errors so far (each one is logged); tests expect none.
