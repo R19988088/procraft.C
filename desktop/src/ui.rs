@@ -458,6 +458,7 @@ impl Interface {
     /// page sees to it, taking it with [`escape`]); one nothing took turns the canvas back upright,
     /// unless it only let go of a field (egui drops the field's keys as the frame begins).
     pub fn show(&mut self, ui: &mut Ui, session: &std::sync::Arc<CanvasSession>, input: &mut Input) {
+        crate::i18n::set(self.prefs.language);
         let typing = self.typing;
         self.show_frame(ui, session, input);
         let ctx = ui.ctx();

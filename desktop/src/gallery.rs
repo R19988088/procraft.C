@@ -625,7 +625,8 @@ impl Gallery {
             }
             SelectAction::Delete => {
                 let n = self.picked.len();
-                let title = if n == 1 { "Delete 1 artwork?".to_owned() } else { format!("Delete {n} artworks?") };
+                let title =
+                    if n == 1 { crate::i18n::counted("Delete % artwork?", 1) } else { crate::i18n::counted("Delete % artworks?", n) };
                 self.alert.open(&title, "This can't be undone.", "Delete", Some(&icons::TRASH));
             }
             SelectAction::More => self.more_open = !self.more_open,

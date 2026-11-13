@@ -100,6 +100,7 @@ pub fn app_dir() -> PathBuf {
 
 /// Shows a passing message with an OK button.
 pub fn say(text: &str) {
+    let text = crate::i18n::say(text);
     MessageDialog::new().set_level(MessageLevel::Info).set_title("ProCraft").set_description(text).show();
 }
 
@@ -161,6 +162,8 @@ pub fn take_pending_brushes() -> Vec<(Vec<u8>, String)> {
 /// Shows a message with an OK button; it reaches the log and the terminal as well, for a system
 /// with no way of showing it.
 pub fn tell(title: &str, text: &str) {
+    let title = crate::i18n::say(title);
+    let text = crate::i18n::say(text);
     log::error!("{title}: {text}");
     eprintln!("{title}: {text}");
     if cfg!(target_os = "linux") && !has_program("zenity") {
@@ -267,8 +270,8 @@ pub fn save_file(bytes: &[u8], name: &str, extension: &str, kind: &str) {
     let safe: String = name.chars().map(|c| if c.is_alphanumeric() || " _-".contains(c) { c } else { '_' }).collect();
     let safe = if safe.trim().is_empty() { "Brush".to_owned() } else { safe };
     let Some(path) = FileDialog::new()
-        .set_title(format!("Share {kind}"))
-        .add_filter(kind, &[extension])
+        .set_title(format!("{} {}", crate::i18n::say("Share"), crate::i18n::say(kind)))
+        .add_filter(crate::i18n::say(kind), &[extension])
         .set_file_name(format!("{safe}.{extension}"))
         .save_file()
     else {

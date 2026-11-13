@@ -674,7 +674,7 @@ fn button_centre(bar: Rect, button: f32, index: usize, count: usize) -> f32 {
 fn segment_width(ui: &Ui, label: &str) -> f32 {
     14.0 + 30.0
         + 2.0
-        + ui.painter().layout_no_wrap(label.into(), Weight::Regular.font(13.0), Color32::WHITE).size().x
+        + ui.painter().layout_no_wrap(crate::i18n::say(label).into(), Weight::Regular.font(13.0), Color32::WHITE).size().x
         + 20.0
 }
 

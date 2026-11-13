@@ -322,7 +322,7 @@ fn row_height(ui: &egui::Ui, row: &Row, width: f32, language: Language) -> f32 {
 fn choice_menu(ui: &egui::Ui, value: Rect, options: &[&str], chosen: usize, close: &mut bool) -> Option<usize> {
     let widest = options
         .iter()
-        .map(|o| ui.painter().layout_no_wrap((*o).into(), Weight::Regular.font(17.0), argb(INK)).size().x)
+        .map(|o| ui.painter().layout_no_wrap(crate::i18n::say(o).into(), Weight::Regular.font(17.0), argb(INK)).size().x)
         .fold(0.0, f32::max);
     let size = vec2((widest + 24.0).max(112.0), 8.0 + 48.0 * options.len() as f32 + 8.0);
     let menu = Rect::from_min_size(value.left_bottom(), size);

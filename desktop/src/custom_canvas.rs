@@ -614,7 +614,7 @@ pub(crate) fn capsule_words<'a>(
 ) -> Option<&'a str> {
     let galleys: Vec<_> = words
         .iter()
-        .map(|w| ui.painter().layout_no_wrap((*w).to_owned(), Weight::Regular.font(17.0), argb(ink)))
+        .map(|w| ui.painter().layout_no_wrap(crate::i18n::say(w).to_owned(), Weight::Regular.font(17.0), argb(ink)))
         .collect();
     let width: f32 = galleys.iter().map(|g| g.size().x + 26.0).sum();
     let capsule = Rect::from_min_size(pos2(right - width, top), vec2(width, 43.0));

@@ -159,7 +159,7 @@ impl Liquify {
         {
             let b = cell(k);
             ui.painter().rect_filled(b, 20, fill);
-            let words = ui.painter().layout_no_wrap(label.into(), Weight::Regular.font(15.0), tint).size().x;
+            let words = ui.painter().layout_no_wrap(crate::i18n::say(label).into(), Weight::Regular.font(15.0), tint).size().x;
             let left = b.center().x - (size + gap + words) / 2.0;
             look.icon(ui, glyph, pos2(left + size / 2.0, b.center().y), size, tint);
             text(

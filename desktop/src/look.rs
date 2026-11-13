@@ -413,7 +413,7 @@ fn tracked_runs(
             extra_letter_spacing: tracking * size,
             ..Default::default()
         };
-        job.append(text, 0.0, format);
+        job.append(crate::i18n::say(text), 0.0, format);
     }
     let galley = painter.layout_job(job);
     let rect = align.anchor_size(at, galley.size());
@@ -437,7 +437,7 @@ pub fn wrapped(
         extra_letter_spacing: TRACKING * size,
         ..Default::default()
     };
-    job.append(text, 0.0, format);
+    job.append(crate::i18n::say(text), 0.0, format);
     job.wrap.max_width = width;
     painter.layout_job(job)
 }
@@ -461,7 +461,7 @@ pub fn wrapped_centred(
         line_height: Some(line_height),
         ..Default::default()
     };
-    job.append(text, 0.0, format);
+    job.append(crate::i18n::say(text), 0.0, format);
     job.wrap.max_width = width;
     job.halign = egui::Align::Center;
     painter.layout_job(job)
@@ -492,7 +492,7 @@ pub fn dragged_by(held: &mut Option<(egui::Id, f32)>, response: &egui::Response)
 pub fn text_width(painter: &Painter, text: &str, size: f32, weight: Weight) -> f32 {
     let mut job = LayoutJob::default();
     let format = TextFormat { font_id: weight.font(size), extra_letter_spacing: TRACKING * size, ..Default::default() };
-    job.append(text, 0.0, format);
+    job.append(crate::i18n::say(text), 0.0, format);
     painter.layout_job(job).size().x
 }
 

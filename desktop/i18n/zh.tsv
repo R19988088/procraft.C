@@ -1,0 +1,838 @@
+# ProCraft 简体中文词条表
+#
+# 格式：每行「英文原文 <TAB> 中文」，英文原文必须与代码中出现的完全一致（含大小写与标点）。
+# 以 # 开头的行是注释，空行忽略。找不到的词条会原样显示英文，所以漏掉的词条不会出错。
+#
+# 这份表被 desktop/src/i18n.rs 用 include_str! 编入程序，改动后重新编译即可生效。
+# 它与上游代码分离：上游新增或改动的英文会原样显示，不会破坏合并。
+
+# ---- 顶部与通用按钮 ----
+Add	添加
+Canvas	画布
+Share	分享
+Video	视频
+Prefs	偏好设置
+Help	帮助
+Actions	操作
+Gallery	画廊
+Done	完成
+Cancel	取消
+Save	保存
+Reset	重置
+Apply	应用
+Undo	撤销
+Redo	重做
+Preview	预览
+Delete	删除
+Duplicate	复制
+Rename	重命名
+Select	选择
+Select All	全选
+Group	成组
+Merge	合并
+Clear	清除
+Lock	锁定
+Unlock	解锁
+Pin	固定
+Unpin	取消固定
+Find	查找
+More	更多
+More Options	更多选项
+Stack	堆叠
+Photo	照片
+Import	导入
+Export	导出
+Settings	设置
+Options	选项
+Next	下一步
+Back	返回
+Search	搜索
+No results	无结果
+None	无
+Max	最大
+Min	最小
+All	全部
+Amount	数量
+Angle	角度
+Size	大小
+Opacity	不透明度
+Pressure	压力
+Rotation	旋转
+Dimensions	尺寸
+Width	宽度
+Height	高度
+Distance	距离
+Velocity	速度
+Strength	力度
+Exposure	曝光
+Intensity	强度
+Delay	延迟
+Length	长度
+Thickness	粗细
+Transition	过渡
+Transparency	透明度
+Fall off	衰减
+Blur	模糊
+Zoom	缩放
+Scale	缩放
+Move	移动
+Fit Canvas	适合画布
+Background	背景
+Foreground	前景
+
+# ---- 操作面板 ----
+Light interface	浅色界面
+Right-hand interface	右手界面
+Brush scaling	画笔缩放
+Screen	屏幕
+Project canvas	项目画布
+Brush cursor	画笔光标
+Advanced cursor settings	高级光标设置
+Pressure and Smoothing	压力和笔触平滑
+Gesture controls	手势控制
+Plugins	插件
+Rapid undo delay	快速撤销延迟
+Selection mask visibility	选区遮罩可见度
+Size & Opacity sidebar	大小和不透明度侧栏
+About ProCraft	关于 ProCraft
+Licences	许可证
+Licenses	许可证
+Keyboard shortcuts	键盘快捷键
+Advanced settings	高级设置
+Relative to canvas	相对于画布
+Relative to screen	相对于屏幕
+Stabilization	稳定
+Motion Filtering	运动滤波
+Motion Filtering Expression	运动滤波表达式
+Tip Attachment	笔尖附着
+App Pressure Sensitivity	应用压感
+Insert a photo	插入照片
+Insert a private photo	插入私有照片
+Paste	粘贴
+Paste Private	粘贴私有
+
+# ---- 偏好设置的页面 ----
+Language	语言
+Canvas Orientation Memory	画布方向记忆
+An artwork opens zoomed and turned as it was left.	打开作品时恢复上次的缩放和旋转状态。
+Fit Canvas Inside Interface	将画布适合在界面内
+A fitted canvas keeps clear of the top bar and the sidebar.	适合后的画布会避开顶部栏和侧边栏。
+Disable Time-lapse	禁用延时摄影
+New artworks don't record their time-lapse.	新作品不记录延时摄影。
+Simplified Undos	简化撤销
+Strokes made in an adjustment undo together once it is left.	离开调整后，其中的笔画会一起撤销。
+Maximum Speed Distance	最大速度距离
+How far the pen moves before a brush's speed dynamics count it as fast.	笔移动多远后，笔刷速度动态才会将其视为快速。
+Drag and Drop export	拖放导出
+Preferred file format	首选文件格式
+Preferred image format	首选图像格式
+Accessibility	辅助功能
+Single Touch Gestures Companion	单指手势助手
+A floating bar of undo, redo, zoom, move and fit for one finger.	为单指提供撤销、重做、缩放、移动和适合等浮动按钮。
+Color Description Notifications	颜色描述通知
+A message names the colour once it stops changing.	颜色停止变化后显示颜色名称。
+Feedback Sounds	反馈声音
+Undo, redo, tools and panels click as they are used.	使用撤销、重做、工具和面板时播放声音。
+Tap Assistance - Initial Touch Location Support	点击辅助 - 支持初始触摸位置
+A tap lands where the finger first touched, even if it drifts before lifting.	即使手指抬起前发生移动，点击也会落在最初触摸的位置。
+
+# ---- 笔刷工作室 ----
+Brush Studio	笔刷工作室
+Stroke path	笔触路径
+Stabilization	稳定
+Taper	笔尖渐隐
+Shape	形状
+Grain	纹理
+Rendering	渲染
+Wet Mix	湿混
+Color dynamics	颜色动态
+Dynamics	动态
+Stylus	触控笔
+Properties	属性
+Materials	材质
+Preview	预览
+About this brush	关于此笔刷
+Stroke properties	笔触属性
+Spacing	间距
+Spacing Jitter	间距抖动
+Jitter Lateral	横向抖动
+Jitter Linear	线性抖动
+Fall off	衰减
+StreamLine	流线
+Amount	数量
+Pressure	压力
+Motion filtering	运动滤波
+Expression	表达式
+Pressure taper	压力渐隐
+Touch taper	触控渐隐
+Taper properties	渐隐属性
+Size	大小
+Opacity	不透明度
+Tip	笔尖
+Tip animation	笔尖动画
+Classic taper	经典渐隐
+Link tip sizes	链接笔尖大小
+Shape Source	形状源
+Input style	输入方式
+Touch only	仅触控
+Azimuth	方位角
+Azimuth and barrel roll	方位角和笔杆旋转
+Relative to stroke	相对于笔触
+Touch properties	触控属性
+Rotation	旋转
+Shape properties	形状属性
+Scatter	散布
+Count	数量
+Count jitter	数量抖动
+Randomized	随机化
+Flip X	翻转 X
+Flip Y	翻转 Y
+Pressure Roundness	压力圆度
+Tilt roundness	倾斜圆度
+Roundness Vertical Jitter	圆度垂直抖动
+Roundness Horizontal Jitter	圆度水平抖动
+Shape filtering	形状滤波
+Grain Source	纹理源
+Grain behavior	纹理行为
+Moving	移动
+Texturized	纹理化
+Movement	移动
+Scale	缩放
+Zoom	缩放
+Depth	深度
+Depth minimum	最小深度
+Depth jitter	深度抖动
+Offset jitter	偏移抖动
+Blend mode	混合模式
+Brightness	亮度
+Contrast	对比度
+Grain filtering	纹理滤波
+3D grain behaviour	3D 纹理行为
+Grain follows camera	纹理跟随相机
+Rendering mode	渲染模式
+Light Glaze	轻度釉化
+Uniformed Glaze	均匀釉化
+Intense Glaze	强烈釉化
+Heavy Glaze	厚重釉化
+Uniform Blending	均匀混合
+Intense Blending	强烈混合
+Blending	混合
+Flow	流量
+Wet edges	湿边
+Burnt edges	烧焦边缘
+Burnt edges mode	烧焦边缘模式
+Luminance blending	亮度混合
+Alpha Threshold	Alpha 阈值
+Threshold Amount	阈值数量
+Classic Normal Combine mode	经典普通合并模式
+Wet mix	湿混
+Dilution	稀释
+Charge	蓄力
+Attack	作用
+Pull	拉力
+Grade	平滑度
+Blur	模糊
+Blur jitter	模糊抖动
+Wetness jitter	湿度抖动
+Stamp color jitter	印章颜色抖动
+Stroke color jitter	笔触颜色抖动
+Color pressure	颜色压力
+Color tilt	颜色倾斜
+Color barrel roll	颜色笔杆旋转
+Hue	色相
+Saturation	饱和度
+Lightness	明度
+Darkness	暗度
+Secondary color	次要颜色
+Secondary Color	次要颜色
+Speed	速度
+Jitter	抖动
+Tilt	倾斜
+Barrel roll	笔杆旋转
+Cursor outline	光标轮廓
+None	无
+Active color	当前颜色
+Hover	悬停
+Estimated pressure	估计压力
+Hover fill	悬停填充
+All	全部
+Brush properties	笔刷属性
+Orient to screen	朝向屏幕
+Smudge Pull	涂抹拉力
+Brush behavior	笔刷行为
+Maximum size	最大大小
+Minimum size	最小大小
+Maximum opacity	最大不透明度
+Minimum opacity	最小不透明度
+3D Materials	3D 材质
+Metallic	金属度
+Metallic Source	金属度源
+Roughness	粗糙度
+Roughness Source	粗糙度源
+Preview render	预览渲染
+Preview properties	预览属性
+Use stamp preview	使用印章预览
+Pressure Minimum	最小压力
+Pressure Scale	压力缩放
+Tilt angle	倾斜角度
+Settings	设置
+Preview size	预览大小
+3D preview	3D 预览
+Clear drawing pad	清除绘图板
+Reset all brush settings	重置所有笔刷设置
+Cancel	取消
+Done	完成
+Randomise	随机化
+Edit	编辑
+Combine Mode	合并模式
+Uncombine	取消合并
+Reset brush	重置笔刷
+Reset	重置
+Import	导入
+Auto repeat	自动重复
+Shape Editor	形状编辑器
+Grain Editor	纹理编辑器
+Metallic Editor	金属度编辑器
+Roughness Editor	粗糙度编辑器
+Image source options	图像来源选项
+Import a photo	导入照片
+Import a file	导入文件
+Source Library	源库
+Paste	粘贴
+Grain scale	纹理缩放
+Rotate	旋转
+Border overlap	边缘重叠
+Mask hardness	蒙版硬度
+Mirror overlap	镜像重叠
+Pyramid blending	金字塔混合
+Sharp	尖锐
+Blunt	钝
+Stamp	印章
+Rolling	滚动
+Follow size	跟随大小
+Cropped	裁剪
+Disabled	禁用
+Maximal	最大
+Soft	柔和
+Hard	坚硬
+Smooth	平滑
+Follow stroke	跟随笔触
+Non-Metallic	非金属
+Glossy	光滑
+Matte	哑光
+Max	最大
+Drawing Pad	绘图板
+Create new reset point	新建重置点
+New reset point?	新建重置点？
+Resetting the brush will bring it back to how it is now. It can't be undone.	重置后笔刷将回到当前状态，且无法撤销。
+Make	创建
+Reset this brush?	重置此笔刷？
+It goes back to its last reset point, or to how it came. It can't be undone.	笔刷将回到上次的重置点或初始状态，且无法撤销。
+Reset	重置
+
+# ---- 图层 ----
+Layers	图层
+Select All	全选
+Group	成组
+Merge	合并
+Share	分享
+Duplicate	复制
+Delete these layers?	删除这些图层？
+Undo brings them back.	撤销即可找回。
+Delete shared layer?	删除共享图层？
+Locked layer selection	图层选择已锁定
+A locked layer can’t be deleted. Unlock it first.	锁定的图层无法删除，请先解锁。
+Unlock	解锁
+Lock	锁定
+Unlock mesh	解锁网格
+Lock mesh	锁定网格
+Show Submesh	显示子网格
+Hide Submesh	隐藏子网格
+Those meshes aren't in the same texture set	这些网格不在同一纹理集
+Replace Material Map Content	替换材质贴图内容
+This picture can't be opened.	无法打开此图片。
+Text rasterized	文字已栅格化
+Assisted Reference	辅助参考
+Shared Reference	共享参考
+Reference	参考
+Shared	共享
+Assisted	辅助
+Private	私有
+Background color	背景颜色
+Color	颜色
+Roughness	粗糙度
+Metallic	金属度
+Layer	图层
+Pencil	铅笔
+Layer is locked	图层已锁定
+Group is selected	已选中组
+Group is empty	组为空
+Mesh is hidden	网格已隐藏
+Mesh is locked	网格已锁定
+Alpha Lock is on	Alpha 锁定已开启
+
+# ---- 颜色 ----
+Colors	颜色
+Colours	颜色
+Palettes	调色板
+Background	背景
+History	历史
+Clear history	清除历史
+Hexadecimal	十六进制
+Color history	颜色历史
+Active palette	当前调色板
+Set as active	设为当前
+Create new palette	新建调色板
+New from file	从文件新建
+New from photos	从照片新建
+Restore example palettes	恢复示例调色板
+New palette from a file	从文件新建调色板
+New palette from a picture	从图片新建调色板
+This picture can't be read.	无法读取此图片。
+Disc	圆盘
+Classic	经典
+Harmony	和谐
+Value	明度
+Compact	紧凑
+Cards	卡片
+Complementary	互补色
+Split Complementary	分裂互补色
+Analogous	类似色
+Triadic	三角配色
+Tetradic	四色配色
+White	白色
+Light Gray	浅灰
+Gray	灰色
+Dark Gray	深灰
+Black	黑色
+ColorDrop	颜色拖放
+Continue filling	继续填充
+
+# ---- 笔刷库 ----
+Brush library	笔刷库
+Erase library	橡皮库
+Smudge library	涂抹库
+Brush Set	笔刷组
+Brushes	笔刷
+Brush	笔刷
+Brush set	笔刷组
+Palette	调色板
+Create new brush	新建笔刷
+Create new set	新建笔刷组
+Import from Files	从文件导入
+Import brushes	导入笔刷
+Restore default brushes	恢复默认笔刷
+Every brush ProCraft comes with is in the library.	ProCraft 自带的笔刷都在库中。
+Delete this set and its brushes?	删除此笔刷组及其笔刷？
+Delete this brush?	删除此笔刷？
+Delete these brushes?	删除这些笔刷？
+It can't be brought back.	无法找回。
+Customize icon	自定义图标
+Combine	合并
+Recent	最近
+No results	无结果
+Sketching	素描
+Inking	勾线
+Painting	绘画
+Airbrushing	喷枪
+Charcoals	炭笔
+Textures	纹理
+Drawing	绘制
+Watercolour	水彩
+Calligraphy	书法
+Spray Paint	喷漆
+Nature	自然
+Effects	效果
+Pixel	像素
+Elements	元素
+Industrial	工业
+Organic	有机
+Abstract	抽象
+Touchups	修饰
+Retro	复古
+Vintage	复古风
+Luminance	明度
+
+# ---- 调整 ----
+Adjustments	调整
+Hue, Saturation, Brightness	色相、饱和度、亮度
+Color Balance	色彩平衡
+Curves	曲线
+Gradient Map	渐变映射
+Gaussian Blur	高斯模糊
+Motion Blur	动感模糊
+Perspective Blur	透视模糊
+Noise	噪点
+Sharpen	锐化
+Bloom	泛光
+Glitch	故障
+Halftone	半调
+Chromatic Aberration	色差
+Liquify	液化
+Clone	仿制
+Plugin	插件
+Flood	填充
+Channel	通道
+Single	单一
+Multi	多重
+Additive	叠加
+Octaves	层数
+Turbulence	湍流
+Gamma	伽马
+Red	红
+Green	绿
+Blue	蓝
+Shadows	阴影
+Midtones	中间调
+Highlights	高光
+Cyan	青色
+Magenta	洋红
+Yellow	黄色
+Artifact	伪影
+Wave	波纹
+Signal	信号
+Diverge	分离
+Clouds	云
+Billows	卷云
+Ridges	脊状
+Full Color	全彩
+Screen Print	丝网印刷
+Newspaper	报纸
+Perspective	透视
+Displace	置换
+Positional	定位
+Directional	方向
+Block Size	块大小
+Amplitude	振幅
+Frequency	频率
+Red shift	红移
+Green shift	绿移
+Blue shift	蓝移
+Burn	烧焦
+Opacity	不透明度
+
+# ---- 液化 ----
+Push	推
+Twirl Right	向右旋转
+Twirl Left	向左旋转
+Pinch	捏合
+Expand	扩张
+Crystals	结晶
+Edge	边缘
+Reconstruct	重建
+Distortion	扭曲
+Momentum	动量
+Liquify Mode	液化模式
+Adjust	调整
+
+# ---- 选区 ----
+Selections	选区
+Automatic	自动
+Freehand	手绘
+Rectangle	矩形
+Ellipse	椭圆
+Add	添加
+Remove	移除
+Invert	反选
+Copy & Paste	拷贝粘贴
+Feather	羽化
+Save & Load	存储与载入
+Color Fill	颜色填充
+X-Ray	X 光
+
+# ---- 变换 ----
+Freeform	自由变形
+Uniform	等比
+Distort	扭曲
+Warp	变形
+Advanced Mesh	高级网格
+Snapping	吸附
+Flip Horizontal	水平翻转
+Flip Vertical	垂直翻转
+Rotate 45°	旋转 45°
+Fit to Canvas	适合画布
+Interpolation	插值
+Magnetics	磁性
+Nearest	最近
+Nearest Neighbor	邻近
+Bilinear	双线性
+Bicubic	双三次
+
+# ---- 文字 ----
+Edit style	编辑样式
+Typeface	字体
+Design	设计
+Font	字体
+Style	样式
+Regular	常规
+Kerning	字距
+Tracking	字符间距
+Leading	行距
+Baseline	基线
+Attributes	属性
+Rasterize this text layer?	要栅格化此文字图层吗？
+Rasterize	栅格化
+Rasterize the text to transform it	需栅格化文字才能变换
+Fonts	字体
+Import fonts	导入字体
+Fonts imported	已导入字体
+Font imported	已导入字体
+
+# ---- 画布信息 ----
+Canvas Info	画布信息
+About this artwork	关于此作品
+Dimensions	尺寸
+Layers	图层
+Color profile	色彩配置
+Video settings	视频设置
+Statistics	统计
+Date created	创建日期
+Date modified	修改日期
+Pixel width	像素宽度
+Pixel height	像素高度
+Physical width	实际宽度
+Physical height	实际高度
+DPI	DPI
+Maximum layers	最大图层数
+Layers used	已用图层
+Layers available	可用图层
+Assisted layers	辅助图层
+Clipping layers	剪辑图层
+Layer masks	图层蒙版
+Layer groups	图层组
+Current color profile	当前色彩配置
+Available color profiles	可用色彩配置
+Video length	视频长度
+Video quality	视频质量
+Video resolution	视频分辨率
+Video file size	视频文件大小
+Video codec	视频编码
+Total strokes made	总笔画数
+Tracked time	记录时长
+Total file size	文件总大小
+Name	名称
+Sign here	在此签名
+Change color profile?	更改色彩配置？
+Its colours keep their values and look as the new profile shows them, in the time-lapse recording too.	颜色的数值不变，但会按新配置显示，延时摄影记录同样如此。
+Change	更改
+Don't change	不更改
+The photo couldn't be kept.	照片未能保存。
+The signature couldn't be kept.	签名未能保存。
+Made by	制作人
+
+# ---- 自定义画布 ----
+Custom Canvas	自定义画布
+Canvas properties	画布属性
+Time-lapse settings	延时摄影设置
+Untitled Canvas	未命名画布
+Millimeters	毫米
+Centimeters	厘米
+Inches	英寸
+Pixels	像素
+Maximum Layers	最大图层数
+Low quality	低质量
+Good quality	良好质量
+Studio quality	工作室质量
+Lossless	无损
+Background hidden	隐藏背景
+HEVC	HEVC
+RGB	RGB
+CMYK	CMYK
+Backspace	退格
+
+# ---- 裁剪 ----
+Crop and Resize	裁剪与调整大小
+Resample canvas	重采样画布
+Rotation	旋转
+
+# ---- 辅助线 ----
+Drawing Guides	绘图辅助线
+Isometric	等距
+Perspective	透视
+Symmetry	对称
+Tap to create vanishing points	轻点创建消失点
+Grid size	网格大小
+Assisted Drawing	辅助绘图
+Guide Options	辅助线选项
+Vertical	垂直
+Horizontal	水平
+Quadrant	象限
+Radial	径向
+Rotational Symmetry	旋转对称
+
+# ---- 灯光 ----
+Lighting Studio	灯光工作室
+Environment	环境
+Show Environment	显示环境
+Light Settings	灯光设置
+Add Light	添加灯光
+A model can have four lights at most.	一个模型最多可有四盏灯。
+Studio	工作室
+Coast	海岸
+Auditorium	礼堂
+City	城市
+Nightlife	夜生活
+Portside	码头
+Industrial	工业
+Sunrise	日出
+Beach	海滩
+Mountain	山峰
+Daytime	日光
+
+# ---- 动画 ----
+Page Assist	页面辅助
+Pause	暂停
+Play	播放
+New Page	新建页面
+Add Frame	添加帧
+Loop	循环
+Ping-Pong	往复
+One Shot	单次
+Frames Per Second	每秒帧数
+Onion skin frames	洋葱皮帧数
+Onion skin opacity	洋葱皮不透明度
+Blend primary frame	混合主帧
+Onion skin colors	洋葱皮颜色
+In-between	补间
+Page options	页面选项
+Frame options	帧选项
+Hold duration	停留时长
+An in-between goes between two frames of one layer each, with something drawn.	补间位于各有内容的两帧之间，每帧一图层。
+
+# ---- 导出 ----
+Exporting	正在导出
+Max Resolution	最大分辨率
+Web Ready	网页适用
+Dithering	抖动
+Per frame color palette	每帧调色板
+Transparent background	透明背景
+Frames per second	每秒帧数
+Animated rotate	动画旋转
+Animated swing	动画摇摆
+Animation duration	动画时长
+Zoom distance	缩放距离
+Ease	缓动
+Show environment	显示环境
+Animated GIF	动画 GIF
+Animated PNG	动画 PNG
+Animated MP4	动画 MP4
+Animated HEVC	动画 HEVC
+Untitled Artwork	未命名作品
+
+# ---- 延时摄影 ----
+Time-lapse Replay	延时摄影回放
+Purge Video?	清除视频？
+Purge	清除
+Don't Purge	不清除
+Full length	完整长度
+Nothing recorded yet	尚无记录
+Export time-lapse video	导出延时视频
+MP4 video	MP4 视频
+There is no time-lapse to export yet.	尚无延时视频可导出。
+The time-lapse video couldn't be made.	无法生成延时视频。
+
+# ---- 快捷键分组 ----
+Edit	编辑
+Tools	工具
+Panels	面板
+Brush size	笔刷大小
+View	视图
+Files	文件
+
+# ---- 手势 ----
+Touch	触摸
+While the pen hovers, drag a finger for opacity and pinch for size	笔悬停时，单指拖动调不透明度，双指捏合调大小
+Move the canvas with one finger	单指移动画布
+One finger drags the canvas instead of painting; the pen still paints	单指拖动移动画布而不绘画；笔仍可绘画
+Disable undo and redo gestures	禁用手势撤销与重做
+Two- and three-finger taps leave the history alone	双指和三指轻点不影响历史记录
+A finger paints a model; with □ held it turns it	手指可给模型上色；按住 □ 可旋转模型
+Reset to defaults	恢复默认
+Reset gesture controls?	重置手势控制？
+Every gesture goes back to how the app starts out.	所有手势恢复初始设置。
+
+# ---- 取色与形状 ----
+Picking color from reference	从参考图取色
+Picking color from canvas	从画布取色
+Editing	编辑中
+Line	直线
+Polyline	折线
+Arc	弧线
+Curve	曲线
+Ellipse	椭圆
+Circle	圆形
+Triangle	三角形
+Equilateral	等边三角形
+Quadrilateral	四边形
+Rectangle	矩形
+Square	正方形
+
+# ---- 快捷菜单与参考图 ----
+QuickMenu	快捷菜单
+Set Action	设置动作
+Reference	参考
+Import Image	导入图像
+Image	图片
+
+# ---- 提示与对话框 ----
+Can't export	无法导出
+Can't import	无法导入
+Can't import it	无法导入
+Can't share	无法分享
+Can't save	无法保存
+Can't keep the artwork	无法保留作品
+Can't keep the brushes	无法保留笔刷
+Can't open the artwork	无法打开作品
+Can't open the picture	无法打开图片
+Can't drag it out	无法拖出
+Can't insert it	无法插入
+Can't paste	无法粘贴
+Can't import this plugin	无法导入此插件
+Can't keep the time-lapse	无法保留延时摄影
+No room	空间不足
+This canvas holds at most {} layers.	此画布最多支持 {} 个图层。
+There's no room left to save this artwork.	没有足够空间保存此作品。
+This artwork couldn't be saved.	此作品无法保存。
+ProCraft stopped	ProCraft 已停止
+ProCraft can't draw	ProCraft 无法绘图
+The graphics device stopped	图形设备已停止
+ProCraft starts again, with the artwork as it was last saved.	ProCraft 将重新启动，作品为上次保存的状态。
+Now a plugin	已成为插件
+This file can't be read.	无法读取此文件。
+Time-lapse	延时摄影
+The animation could not be exported.	动画无法导出。
+Brushes will be added to the library when a canvas opens.	画布打开后，笔刷会添加到库中。
+Nothing is selected on this layer	此图层上没有选中内容
+This layer is empty	此图层为空
+Pictures	图片
+Pictures and videos	图片和视频
+Sounds	声音
+Fonts	字体
+Color profiles	色彩配置
+ProCraft plugins	ProCraft 插件
+Artworks and models	作品与模型
+ProCraft artwork	ProCraft 作品
+Making and opening videos needs ffmpeg: install it from your system's packages.	制作和打开视频需要 ffmpeg：请通过系统包管理器安装。
+Update the graphics driver may help.	更新显卡驱动可能有帮助。
+Getting the canvas ready…	正在准备画布…
+Made by 	制作人
+Hovering	悬停
+Both	两者
+Contrast	对比
+Colour	颜色
+Delete % artwork?	删除 % 件作品？
+Delete % artworks?	删除 % 件作品？
+Animation	动画
+Selection	选区
+Transform	变换
+Text	文字
+Guides	辅助线
+QuickShape	快速形状
+Lighting	灯光
+Model	模型
+About	关于
+OK	确定
+Yes	是
+No	否
+On	开
+Off	关

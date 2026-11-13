@@ -1838,8 +1838,9 @@ impl Studio {
         let response = ui.interact(area, ui.scope_id().with("pad"), Sense::click_and_drag());
         self.pad_input(ui, &response, area);
         // Drawing Pad
-        let galley =
-            ui.painter().layout_no_wrap("Drawing Pad".to_owned(), Weight::SemiBold.font(16.0), argb(BUTTON_INK));
+        let galley = ui
+            .painter()
+            .layout_no_wrap(crate::i18n::say("Drawing Pad").to_owned(), Weight::SemiBold.font(16.0), argb(BUTTON_INK));
         let button =
             Rect::from_min_size(area.min + vec2(21.0, 21.0), vec2(9.0 + 26.0 + 6.0 + galley.size().x + 13.0, 43.0));
         ui.painter().rect_filled(button, 21.5, argb(BUTTON));
@@ -1862,8 +1863,9 @@ impl Studio {
         text(ui.painter(), cancel.center(), Align2::CENTER_CENTER, "Cancel", 17.0, Weight::Regular, argb(BUTTON_INK));
         // a plugin's: the brush set at random
         if randomises {
-            let galley =
-                ui.painter().layout_no_wrap("Randomise".to_owned(), Weight::Regular.font(17.0), argb(BUTTON_INK));
+            let galley = ui
+                .painter()
+                .layout_no_wrap(crate::i18n::say("Randomise").to_owned(), Weight::Regular.font(17.0), argb(BUTTON_INK));
             let width = galley.size().x + 32.0;
             let button = Rect::from_min_size(pos2(cancel.left() - 13.0 - width, cancel.top()), vec2(width, 43.0));
             ui.painter().rect_filled(button, 21.5, argb(BUTTON));
@@ -2277,7 +2279,8 @@ fn studio_slider(
     let room = pill.left() - 12.0 - line.left();
     let mut size = 17.0;
     while size > 17.0 * 0.6
-        && ui.painter().layout_no_wrap(label.to_owned(), Weight::Regular.font(size), Color32::WHITE).size().x > room
+        && ui.painter().layout_no_wrap(crate::i18n::say(label).to_owned(), Weight::Regular.font(size), Color32::WHITE).size().x
+            > room
     {
         size -= 0.5;
     }

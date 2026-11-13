@@ -235,6 +235,7 @@ impl Prefs {
         }
         // the interface shows as it was left
         crate::look::set_light(p.light_interface);
+        crate::i18n::set(p.language);
         p
     }
 
