@@ -214,8 +214,10 @@ impl Alert {
             let ink = argb(INK);
             // the title, after its icon, centred
             let title_y = panel.top() + 21.0 + 31.0 / 2.0;
-            let words =
-                painter.layout_no_wrap(crate::i18n::say(&asking.title).to_owned(), Weight::Bold.font(26.0), ink).size().x;
+            let words = painter
+                .layout_no_wrap(crate::i18n::say(&asking.title).to_owned(), Weight::Bold.font(26.0), ink)
+                .size()
+                .x;
             let icon_w = if asking.icon.is_some() { 24.0 + 8.0 } else { 0.0 };
             let left = panel.center().x - (icon_w + words) / 2.0;
             if let Some(icon) = asking.icon {

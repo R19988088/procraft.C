@@ -218,8 +218,10 @@ fn getting_ready_note(ctx: &egui::Context) {
     let screen = ctx.content_rect();
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("getting ready")));
     let ink = look::argb(look::pc::TEXT);
-    let wide =
-        painter.layout_no_wrap(crate::i18n::say(GETTING_READY).to_owned(), look::Weight::Regular.font(15.0), ink).size().x;
+    let wide = painter
+        .layout_no_wrap(crate::i18n::say(GETTING_READY).to_owned(), look::Weight::Regular.font(15.0), ink)
+        .size()
+        .x;
     let note = egui::Rect::from_center_size(
         egui::pos2(screen.center().x, screen.bottom() - 24.0 - 18.0),
         egui::vec2(wide + 36.0, 36.0),

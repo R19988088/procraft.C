@@ -12,8 +12,8 @@
 //! window's preferences have.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::prefs::Language;
 
