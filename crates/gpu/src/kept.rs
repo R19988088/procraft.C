@@ -199,6 +199,7 @@ mod tests {
         let first = Kept::open(&gpu.device, &gpu.adapter, &dir).unwrap();
         let _ = crate::canvas::Pipelines::new(
             &gpu.device,
+            &gpu.queue,
             crate::canvas::liquify_format(&gpu.adapter),
             Some(first.cache.clone()),
         );
@@ -211,6 +212,7 @@ mod tests {
         assert!(loading(&file).exists());
         let _ = crate::canvas::Pipelines::new(
             &gpu.device,
+            &gpu.queue,
             crate::canvas::liquify_format(&gpu.adapter),
             Some(second.cache.clone()),
         );
