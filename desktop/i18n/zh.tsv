@@ -837,3 +837,144 @@ Yes	是
 No	否
 On	开
 Off	关
+
+# ---- 上游 v0.0.6 新增界面（画笔库、混合模式、图层类型、状态提示） ----
+Normal	正常
+Darken	变暗
+Multiply	正片叠底
+Color Burn	颜色加深
+Linear Burn	线性加深
+Darker Color	深色
+Lighten	变亮
+Color Dodge	颜色减淡
+Lighter Color	浅色
+Overlay	叠加
+Soft Light	柔光
+Hard Light	强光
+Vivid Light	亮光
+Linear Light	线性光
+Pin Light	点光
+Hard Mix	实色混合
+Difference	差值
+Exclusion	排除
+Subtract	减去
+Divide	划分
+Luminosity	明度
+Shade	明暗
+Brush libraries	画笔库
+Back to libraries	返回画笔库
+Create new library	新建画笔库
+Import a brush library	导入画笔库
+Restore default library	恢复默认画笔库
+Delete this library?	删除此画笔库？
+Its sets and brushes go with it.	它的分组与画笔会一并删除。
+Make a set with +, then brushes in it.	点 + 新建分组，再往分组里添加画笔。
+This library has no brushes yet	这个画笔库还没有画笔
+This library has no brushes to share.	这个画笔库没有可分享的画笔。
+a new brush library couldn't be made	无法新建画笔库
+Brushes added to the library.	画笔已加入画笔库。
+This file has no brushes in it.	这个文件里没有画笔。
+Uncombine these brushes?	取消这些画笔的组合？
+Layer rasterized	图层已栅格化
+Layer cleared	图层已清空
+Layer copied	图层已复制
+Layer cut	图层已剪切
+Layer is hidden	图层已隐藏
+Group is hidden	分组已隐藏
+it is hidden	它已隐藏
+its group is hidden	所在分组已隐藏
+its layer is hidden	所在图层已隐藏
+another layer is shown alone	另一图层被单独显示
+a layer in it is hidden	其中一层已隐藏
+Nothing is drawn there.	那里没有画任何东西。
+Open Layers	打开图层
+Previous colour	上一个颜色
+Canvas copied	画布已复制
+Erasing	擦除中
+Smudging	涂抹中
+Adjustment applied	已应用调整
+Frames saved to timeline	帧已保存到时间轴
+The palettes couldn't be kept.	调色板未能保留。
+The plugin couldn't make this artwork.	插件无法生成这个作品。
+Unsupported model features	不支持的模型特性
+This video can't be opened.	无法打开这个视频。
+This PDF can't be opened.	无法打开这个 PDF。
+This palette can't be read.	无法读取这个调色板。
+This file isn't a color profile.	这个文件不是颜色配置文件。
+This file could not be read.	无法读取这个文件。
+This file can't be opened.	无法打开这个文件。
+This couldn't be removed.	无法移除。
+This can't be undone.	此操作无法撤销。
+There's no picture to paste.	没有可粘贴的图片。
+There's no GPU device to draw it with.	没有可用来绘制的 GPU 设备。
+It isn't a PSD, or it's damaged.	它不是 PSD 文件，或已损坏。
+Can't open the file	无法打开文件
+Can't open the model	无法打开模型
+Palette added.	调色板已添加。
+Start Gallery Recovery	开始画廊恢复
+No code answers to it.	没有代码响应它。
+Changes a layer.	更改图层。
+Changes the app.	更改应用。
+Best	最佳
+Better	较好
+Good	良好
+Exporting…	正在导出…
+Opening…	正在打开…
+Finishing the fill…	正在完成填充…
+Round	圆形
+Squares	方形
+Dots	点状
+Lines	线条
+Bleed	出血
+Gradation	渐变
+Per brush	按画笔
+Primary	主色
+Secondary	次色
+Advanced cursor	高级光标
+Brush cursor visibility	画笔光标显示
+Brush outline style	画笔轮廓样式
+High contrast	高对比度
+Show both	两者都显示
+Show while hovering	悬停时显示
+Show while painting	绘制时显示
+Show 2D texture	显示 2D 纹理
+Paint through mesh	透过网格绘制
+View in AR	在 AR 中查看
+Take a photo	拍照
+Take a private photo	拍摄私密照片
+Insert a file	插入文件
+Insert a private file	插入私密文件
+Share Image	分享图像
+Share Layers	分享图层
+Share Model	分享模型
+Share Textures	分享纹理
+Share layers as PNG files	将图层分享为 PNG 文件
+Share textures as PNG files	将纹理分享为 PNG 文件
+Copy	复制
+Copy All	全部复制
+Copy canvas	复制画布
+Cut	剪切
+Reset all	全部重置
+Search Library	搜索素材库
+Add a layer	添加图层
+Add text	添加文字
+Animation Assist	动画辅助
+Drawing Guide	绘图辅助
+Edit Drawing Guide	编辑绘图辅助
+Time-lapse Recording	延时录像
+Image Format	图像格式
+Screen Size	屏幕尺寸
+New canvas	新建画布
+Tap + to start a new canvas	点 + 新建一张画布
+Canvas information	画布信息
+Size compression	尺寸压缩
+Gradient Library	渐变库
+2D Grid	2D 网格
+30 Seconds	30 秒
+Return ends the typing	按回车结束输入
+Flip horizontal	水平翻转
+Flip vertical	垂直翻转
+Turn Off	关闭
+Turn off	关闭
+Turn on	开启
+Show	显示
