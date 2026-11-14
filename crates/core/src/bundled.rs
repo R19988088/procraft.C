@@ -17,6 +17,7 @@ pub(crate) const BUNDLED: &[(&str, &[u8])] = &[
     ("hide-undo-notice", include_bytes!("../bundled-plugins/hide-undo-notice.procraft-plugin")),
     ("interface-colour", include_bytes!("../bundled-plugins/interface-colour.procraft-plugin")),
     ("interface-size", include_bytes!("../bundled-plugins/interface-size.procraft-plugin")),
+    ("keyboard-shortcuts", include_bytes!("../bundled-plugins/keyboard-shortcuts.procraft-plugin")),
     ("opacity-together", include_bytes!("../bundled-plugins/opacity-together.procraft-plugin")),
     ("outline", include_bytes!("../bundled-plugins/outline.procraft-plugin")),
     ("paper-texture", include_bytes!("../bundled-plugins/paper-texture.procraft-plugin")),
@@ -28,7 +29,7 @@ pub(crate) const BUNDLED: &[(&str, &[u8])] = &[
     ("randomise-brush", include_bytes!("../bundled-plugins/randomise-brush.procraft-plugin")),
     ("touch-offset", include_bytes!("../bundled-plugins/touch-offset.procraft-plugin")),
     ("tweening", include_bytes!("../bundled-plugins/tweening.procraft-plugin")),
-    ("vector-canvas", include_bytes!("../bundled-plugins/vector-canvas.procraft-plugin")),
+    ("vector-layers", include_bytes!("../bundled-plugins/vector-layers.procraft-plugin")),
 ];
 
 #[cfg(test)]
@@ -115,12 +116,8 @@ mod tests {
             } else {
                 assert!(!filter.exists(), "{name}");
             }
-            // code with hooks, but for a plugin of switches (no crate, its hooks answered from its
-            // controls)
             let code = package.file(crate::plugin_run::MODULE).is_some();
-            let crate_ = folder.join("Cargo.toml").exists();
-            assert_eq!(code, package.manifest.holds.contains(&PluginPart::Hooks) && crate_, "{name}");
-            assert!(code || !crate_, "{name} has a crate but no code");
+            assert_eq!(code, package.manifest.holds.contains(&PluginPart::Hooks), "{name}");
             // its code can't be built here, so the folder as it was packed, all of it, is checked
             let line = format!("{name} {}", source_digest(&folder));
             assert!(sources.lines().any(|kept| kept == line), "plugins/{name} has changed: {REPACK}");

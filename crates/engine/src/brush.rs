@@ -789,6 +789,14 @@ impl Brush {
         own.chain(others.flat_map(Brush::full_grains)).collect()
     }
 
+    /// Whether its grain, fixed to the canvas, goes on stamp by stamp, each stamp combined with it
+    /// as it lands and as deep as that stamp's depth (the depth's pressure curve, its jitter and its
+    /// least), rather than once over the whole stroke: as another app's brush that textures each
+    /// stamp does. Only a brush file of another app's sets it.
+    pub fn grain_each_stamp(&self) -> bool {
+        self.grain.mode == GrainMode::Texturized && self.setting("grain_each_stamp") >= 0.5
+    }
+
     /// The grain's tile on the canvas (pixels): fixed to the canvas, a brush file's image is as
     /// wide as the file's own times its scale over root two; else what the grain says.
     pub fn grain_tile(&self) -> f32 {
@@ -806,6 +814,28 @@ impl Brush {
     /// known.
     fn stand_in_tile(&self) -> f32 {
         let (Some(stock), Some(index)) = (&self.stock.grain, self.grain.image) else { return 1.0 };
+        // a paper or a wash drawn by the stock image's own octaves of noise: a share of that image,
+        // fixed to the canvas as wide as it times the file's scale over root two (as a brush
+        // file's own image is), moving read as the image is stamp by stamp
+        if crate::textures::drawn_by_octaves(index)
+            && let Some((width, _)) = crate::textures::stock_grain_octaves(&stock.name)
+        {
+            let share = crate::textures::OCTAVE_SHARE;
+            if self.grain.mode == GrainMode::Moving {
+                return share;
+            }
+            return width * self.grain.file_scale() / std::f32::consts::SQRT_2 * share / self.grain.scale.max(1e-3);
+        }
+        // a pattern drawn to the stock image's own proportions: fixed to the canvas, the tile that
+        // image would have, as wide as it times the file's scale over root two, as a brush file's
+        // own image is; moving, read as the image is stamp by stamp, whose tile doesn't go by its
+        // width
+        if let Some(width) = crate::textures::drawn_to_stock_width(index) {
+            if self.grain.mode == GrainMode::Moving {
+                return 1.0;
+            }
+            return width * self.grain.file_scale() / std::f32::consts::SQRT_2 / self.grain.scale.max(1e-3);
+        }
         let theirs = crate::textures::stock_grain_features(&stock.name)
             .map(|levels| crate::textures::feature_at_tile(&levels, self.grain.scale));
         stand_in_tile(theirs, crate::textures::grain_feature(index))
@@ -898,6 +928,33 @@ mod tests {
         assert_eq!(b.grain_tile(), 300.0);
         b.stock.grain = Some(StockImage { name: "no such grain.png".into(), inverted: false });
         assert_eq!(b.grain_tile(), 300.0);
+        // a pattern drawn to a stock image's proportions: that image's tile (2048 pixels wide at a
+        // file scale of 0.1024: 148 pixels)
+        b.grain.image = Some(crate::textures::grain::GRAPH_PAPER);
+        b.grain.scale = 81.92;
+        assert!((b.grain_tile() - 2048.0 * 0.1024 / std::f32::consts::SQRT_2).abs() < 0.01, "{}", b.grain_tile());
+        // moving, it goes by the moving grain's own tile, as the image's would
+        b.grain.mode = GrainMode::Moving;
+        assert_eq!(b.grain_tile(), 81.92);
+    }
+
+    #[test]
+    fn a_paper_drawn_by_its_octaves_is_tiled_as_a_share_of_the_stock_image() {
+        // a quarter of the paper (2048 pixels wide) at a file scale of 0.6728: fixed to the canvas
+        // 2048 x 0.6728 / root two / 4
+        let mut b = Brush::round_pen();
+        b.grain = Grain {
+            mode: GrainMode::Texturized,
+            scale: crate::studio::MAX_GRAIN_SCALE * (0.6728f32 / 16.0).sqrt(),
+            image: Some(crate::textures::grain::SHEET),
+            ..Grain::default()
+        };
+        b.stock.grain = Some(StockImage { name: "Wax-Crayon-Paper.jpg".into(), inverted: false });
+        let tile = 2048.0 * 0.6728 / std::f32::consts::SQRT_2 / 4.0;
+        assert!((b.grain_tile() - tile).abs() < 0.5, "{} {tile}", b.grain_tile());
+        // moving, a quarter of the moving grain's own tile
+        b.grain.mode = GrainMode::Moving;
+        assert!((b.grain_tile() - b.grain.scale / 4.0).abs() < 1e-3, "{}", b.grain_tile());
     }
 
     #[test]

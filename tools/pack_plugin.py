@@ -36,11 +36,19 @@ EXTENSION = '.procraft-plugin'
 
 
 def built(name, folder):
-    """The module of the crate in `folder`."""
+    """The module of the crate in `folder`, with no local path in it: a panic's location names its
+    source file, so the repository and cargo's home go in under fixed names (a module packed
+    anywhere comes out the same, and names nobody's folders)."""
+    env = dict(os.environ)
+    cargo_home = env.get('CARGO_HOME') or os.path.join(os.path.expanduser('~'), '.cargo')
+    flags = [f'--remap-path-prefix={ROOT}=/procraft', f'--remap-path-prefix={cargo_home}=/cargo']
+    env.pop('RUSTFLAGS', None)
+    env['CARGO_ENCODED_RUSTFLAGS'] = '\x1f'.join(flags)
     subprocess.run(
         ['cargo', 'build', '--release', '--target', TARGET, '--target-dir', TARGET_DIR],
         cwd=folder,
         check=True,
+        env=env,
     )
     with open(os.path.join(TARGET_DIR, TARGET, 'release', f"{name.replace('-', '_')}.wasm"), 'rb') as f:
         return f.read()
@@ -90,8 +98,7 @@ def pack(name, out):
     with open(os.path.join(folder, MANIFEST), encoding='utf-8') as f:
         manifest = json.load(f)
     files = {}
-    # hooks with code built from its crate; a plugin of switches (no crate) has none
-    if 'hooks' in manifest['holds'] and os.path.isfile(os.path.join(folder, 'Cargo.toml')):
+    if 'hooks' in manifest['holds']:
         files[MODULE] = built(name, folder)
     if 'filter' in manifest['holds']:
         with open(os.path.join(folder, FILTER), 'rb') as f:

@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::CanvasSession;
 use crate::plugin_file;
 use crate::plugin_run::{Hook, Running, Stop};
 use crate::plugins::Plugins;
+use crate::{CanvasSession, KeyCombo};
 
 /// A plugin at work: a lock of its own, so a long call holds up nothing but it.
 type Shared = Arc<Mutex<Running>>;
@@ -30,33 +30,14 @@ struct OnHook {
     /// On an event's hook: a copy of its code of its own for them, so that what an event calls in
     /// the app never waits on this one (its other hooks' copy).
     events: Option<Shared>,
-}
-
-/// A plugin of switches that is on: no code, its hooks each answered from its controls (yes while on,
-/// or the control at that place's value), whose values it is told as they change.
-struct Switched {
-    id: String,
-    hooks: u32,
-    answers: plugin_file::Answers,
-    values: Vec<f32>,
-}
-
-impl Switched {
-    /// What it answers at `hook`, as a number (yes is 1).
-    fn answer(&self, hook: Hook) -> f32 {
-        match self.answers.iter().find(|(h, _)| *h == hook).and_then(|(_, at)| *at) {
-            None => 1.0,
-            Some(at) => self.values.get(at).copied().unwrap_or(0.0),
-        }
-    }
+    /// The kinds of layer it adds (keys `<id>.<key>`), in its manifest's order.
+    layer_kinds: Vec<crate::PluginKind>,
 }
 
 #[derive(Default)]
 struct Working {
     /// In id order, so plugins go in the same order however they were turned on.
     on: Vec<OnHook>,
-    /// The plugins of switches on, in id order.
-    switched: Vec<Switched>,
     /// What stopped since the list last asked, and why.
     stopped: Vec<(String, Stop)>,
     /// What the app hasn't told yet: whoever is drawing sees the stroke change, not the list.
@@ -108,32 +89,7 @@ impl Hooks {
     /// The bits go by what is on now.
     fn rehook(&self, working: &Working) {
         let hooked = working.on.iter().fold(0, |bits, plugin| bits | plugin.hooks);
-        let hooked = working.switched.iter().fold(hooked, |bits, plugin| bits | plugin.hooks);
         self.hooked.store(hooked, Ordering::Relaxed);
-    }
-
-    /// Whether a plugin of switches on `hook` says yes.
-    fn switched_yes(&self, hook: Hook) -> bool {
-        let working = self.working();
-        working.switched.iter().any(|p| p.hooks & hook.bit() != 0 && p.answer(hook) != 0.0)
-    }
-
-    /// The number the first plugin of switches on `hook` answers, if one is on it.
-    fn switched_number(&self, hook: Hook) -> Option<f32> {
-        let working = self.working();
-        working.switched.iter().find(|p| p.hooks & hook.bit() != 0).map(|p| p.answer(hook))
-    }
-
-    /// Puts the plugin of switches `id` on `hooks`, each answered as `answers` says from `values`
-    /// (its controls').
-    pub(crate) fn put_switches(&self, id: String, hooks: &[Hook], answers: plugin_file::Answers, values: Vec<f32>) {
-        let mut working = self.working();
-        working.on.retain(|p| p.id != id);
-        working.switched.retain(|p| p.id != id);
-        let at = working.switched.partition_point(|p| p.id < id);
-        let hooks = hooks.iter().fold(0, |bits, hook| bits | hook.bit());
-        working.switched.insert(at, Switched { id, hooks, answers, values });
-        self.rehook(&working);
     }
 
     /// `start` through each plugin on `hook`, in turn. One that stops is off the hooks there and then,
@@ -177,16 +133,14 @@ impl Hooks {
     /// composited. It only asks: reading either is the app's, and it is a read like any other.
     pub(crate) fn pick_layer(&self) -> bool {
         self.has(Hook::PickLayer)
-            && (self.switched_yes(Hook::PickLayer)
-                || self.through(Hook::PickLayer, false, |running, said| Ok(said | running.pick_layer()?)))
+            && self.through(Hook::PickLayer, false, |running, said| Ok(said | running.pick_layer()?))
     }
 
     /// The fill-by-all hook: whether ColorDrop measures what it fills on the canvas as composited
     /// (every layer seen) rather than on the current layer or the reference layer. It only asks.
     pub(crate) fn fill_all_layers(&self) -> bool {
         self.has(Hook::FillAllLayers)
-            && (self.switched_yes(Hook::FillAllLayers)
-                || self.through(Hook::FillAllLayers, false, |running, said| Ok(said | running.fill_all_layers()?)))
+            && self.through(Hook::FillAllLayers, false, |running, said| Ok(said | running.fill_all_layers()?))
     }
 
     /// The colour hook: the colour (0xRRGGBB) the interface draws `role` in, if a plugin says (the
@@ -302,8 +256,7 @@ impl Hooks {
     /// square.
     pub(crate) fn colour_triangle(&self) -> bool {
         self.has(Hook::ColourTriangle)
-            && (self.switched_yes(Hook::ColourTriangle)
-                || self.through(Hook::ColourTriangle, false, |running, said| Ok(said | running.colour_triangle()?)))
+            && self.through(Hook::ColourTriangle, false, |running, said| Ok(said | running.colour_triangle()?))
     }
 
     /// Whether a plugin sets brushes' settings at random (the brush studio shows Randomise).
@@ -327,24 +280,21 @@ impl Hooks {
     /// every picked layer's.
     pub(crate) fn opacity_together(&self) -> bool {
         self.has(Hook::OpacityTogether)
-            && (self.switched_yes(Hook::OpacityTogether)
-                || self.through(Hook::OpacityTogether, false, |running, said| Ok(said | running.opacity_together()?)))
+            && self.through(Hook::OpacityTogether, false, |running, said| Ok(said | running.opacity_together()?))
     }
 
     /// The pin hook: whether a touch on the canvas with a panel open paints at once and leaves the
     /// panel up, rather than closing it (a tap) or fading it (a drag).
     pub(crate) fn pin_panels(&self) -> bool {
         self.has(Hook::PinPanels)
-            && (self.switched_yes(Hook::PinPanels)
-                || self.through(Hook::PinPanels, false, |running, said| Ok(said | running.pin_panels()?)))
+            && self.through(Hook::PinPanels, false, |running, said| Ok(said | running.pin_panels()?))
     }
 
     /// The undo notice hook: whether undo and redo go by without the notice naming what they took
     /// back or brought back.
     pub(crate) fn hide_undo_notice(&self) -> bool {
         self.has(Hook::HideUndoNotice)
-            && (self.switched_yes(Hook::HideUndoNotice)
-                || self.through(Hook::HideUndoNotice, false, |running, said| Ok(said | running.hide_undo_notice()?)))
+            && self.through(Hook::HideUndoNotice, false, |running, said| Ok(said | running.hide_undo_notice()?))
     }
 
     /// The radial hook: how many parts radial symmetry makes, if a plugin says (the first that
@@ -352,10 +302,6 @@ impl Hooks {
     pub(crate) fn radial_segments(&self) -> Option<u32> {
         if !self.has(Hook::RadialSegments) {
             return None;
-        }
-        // a plugin of switches' slider, held to what the hook takes
-        if let Some(n) = self.switched_number(Hook::RadialSegments) {
-            return Some((n.round().max(0.0) as u32).clamp(2, 64));
         }
         self.through(Hook::RadialSegments, None, |running, said| match said {
             Some(n) => Ok(Some(n)),
@@ -378,6 +324,75 @@ impl Hooks {
     pub(crate) fn paste_mask(&self) -> bool {
         self.has(Hook::PasteMask)
             && self.through(Hook::PasteMask, false, |running, said| Ok(said | running.paste_mask()?))
+    }
+
+    /// What the first plugin on `hook` answers to `ask`; none with none on it, or if it stops (it
+    /// comes off).
+    fn first_on<T>(&self, hook: Hook, ask: impl FnOnce(&mut Running) -> Result<T, Stop>) -> Option<T> {
+        if !self.has(hook) {
+            return None;
+        }
+        let mut working = self.working();
+        let at = working.on.iter().position(|plugin| plugin.hooks & hook.bit() != 0)?;
+        let answer = working.on.get(at).map(|plugin| ask(&mut at_work(&plugin.running)))?;
+        match answer {
+            Ok(said) => Some(said),
+            Err(stop) => {
+                let gone = working.on.remove(at);
+                self.note_stop(&mut working, gone.id, stop);
+                self.rehook(&working);
+                None
+            }
+        }
+    }
+
+    /// The key hook: what a hardware keyboard's `press` is taken as, as the first plugin on it says
+    /// (only one rebinds keys): itself, another press, or none at all.
+    pub(crate) fn key_shortcut(&self, press: KeyCombo) -> Option<KeyCombo> {
+        match self.first_on(Hook::KeyShortcut, |running| running.key_shortcut(&press)) {
+            Some(Some(taken)) => taken.into_iter().next(),
+            Some(None) | None => Some(press),
+        }
+    }
+
+    /// The key hook: the presses that now do what `press` does by default, as the first plugin on
+    /// it says; none: still `press`.
+    pub(crate) fn key_shortcut_keys(&self, press: &KeyCombo) -> Option<Vec<KeyCombo>> {
+        self.first_on(Hook::KeyShortcut, |running| running.key_shortcut_keys(press)).flatten()
+    }
+
+    /// Whether a plugin rebinds keys.
+    pub(crate) fn rebinds_keys(&self) -> bool {
+        self.has(Hook::KeyShortcut)
+    }
+
+    /// What `id` keeps handed to each copy of its code that is on, and its artworks open: another
+    /// copy (its panel's) kept it. One that stops comes off.
+    pub(crate) fn give_kept(&self, id: &str, data: &[u8]) {
+        {
+            let mut working = self.working();
+            if let Some(at) = working.on.iter().position(|p| p.id == id) {
+                if let Some(events) = working.on.get(at).and_then(|p| p.events.as_ref()) {
+                    let _ = at_work(events).give_kept(data);
+                }
+                let told = working.on.get(at).map(|p| at_work(&p.running).give_kept(data));
+                if let Some(Err(stop)) = told {
+                    let gone = working.on.remove(at);
+                    self.note_stop(&mut working, gone.id, stop);
+                    self.rehook(&working);
+                }
+            }
+        }
+        for canvas in self.canvases_of(id) {
+            canvas.give_kept(data);
+        }
+    }
+
+    /// `id`'s artworks open.
+    fn canvases_of(&self, id: &str) -> Vec<Arc<crate::PluginCanvas>> {
+        let mut canvases = self.canvases.lock().unwrap_or_else(|e| e.into_inner());
+        canvases.retain(|(_, canvas)| canvas.strong_count() > 0);
+        canvases.iter().filter(|(of, _)| of == id).filter_map(|(_, canvas)| canvas.upgrade()).collect()
     }
 
     /// The plugins on `hook`, to be called with the list let go: a long call holds up only them.
@@ -433,8 +448,7 @@ impl Hooks {
     }
 
     pub(crate) fn is_on(&self, id: &str) -> bool {
-        let working = self.working();
-        working.on.iter().any(|p| p.id == id) || working.switched.iter().any(|p| p.id == id)
+        self.working().on.iter().any(|p| p.id == id)
     }
 
     pub(crate) fn put_on(&self, id: String, running: Running, hooks: &[Hook]) {
@@ -443,7 +457,10 @@ impl Hooks {
         let at = working.on.partition_point(|p| p.id < id);
         let hooks = hooks.iter().fold(0, |bits, hook| bits | hook.bit());
         let running = Arc::new(Mutex::new(running));
-        working.on.insert(at, OnHook { id, running, hooks, brush_keys: Vec::new(), picture: None, events: None });
+        working.on.insert(
+            at,
+            OnHook { id, running, hooks, brush_keys: Vec::new(), picture: None, events: None, layer_kinds: Vec::new() },
+        );
         self.rehook(&working);
     }
 
@@ -491,6 +508,65 @@ impl Hooks {
         )
     }
 
+    /// The kinds of layer `id` adds, in its manifest's order.
+    pub(crate) fn layer_kinds(&self, id: &str, kinds: Vec<crate::PluginKind>) {
+        if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {
+            plugin.layer_kinds = kinds;
+        }
+    }
+
+    /// What a plugin on calls layers of `kind` (`<id>.<key>`), if one adds them.
+    pub(crate) fn layer_kind_label(&self, kind: &str) -> Option<String> {
+        if !self.has(Hook::Layers) {
+            return None;
+        }
+        let working = self.working();
+        working.on.iter().find_map(|p| p.layer_kinds.iter().find(|k| k.key == kind).map(|k| k.label.clone()))
+    }
+
+    /// What layers of `kind` can be exported as by the plugin on that adds them.
+    pub(crate) fn layer_kind_exports(&self, kind: &str) -> Vec<crate::PluginExport> {
+        if !self.has(Hook::Layers) {
+            return Vec::new();
+        }
+        let working = self.working();
+        working
+            .on
+            .iter()
+            .find_map(|p| p.layer_kinds.iter().find(|k| k.key == kind).map(|k| k.exports.clone()))
+            .unwrap_or_default()
+    }
+
+    /// What layers of `kind` are known by on their thumbnails, if a plugin on adds them and draws it.
+    pub(crate) fn layer_kind_badge(&self, kind: &str) -> Option<crate::PluginBadge> {
+        if !self.has(Hook::Layers) {
+            return None;
+        }
+        let working = self.working();
+        working.on.iter().find_map(|p| p.layer_kinds.iter().find(|k| k.key == kind).and_then(|k| k.badge.clone()))
+    }
+
+    /// `work` done by the plugin on that adds layers of `kind`, handed its code and the kind's place
+    /// among its kinds: none if no plugin on adds them, or it stopped (it goes off, and says why).
+    pub(crate) fn on_layer<T>(
+        &self,
+        kind: &str,
+        work: impl FnOnce(&mut Running, usize) -> Result<T, Stop>,
+    ) -> Option<T> {
+        if !self.has(Hook::Layers) {
+            return None;
+        }
+        let (id, running, index) = {
+            let working = self.working();
+            working.on.iter().find_map(|p| {
+                let index = p.layer_kinds.iter().position(|k| k.key == kind)?;
+                Some((p.id.clone(), Arc::clone(&p.running), index))
+            })?
+        };
+        let done = work(&mut at_work(&running), index);
+        done.inspect_err(|stop| self.stopped(&id, *stop)).ok()
+    }
+
     /// The keys of `id`'s rows in the brush studio, in their order.
     pub(crate) fn brush_keys(&self, id: &str, keys: Vec<String>) {
         if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {
@@ -513,7 +589,6 @@ impl Hooks {
     pub(crate) fn take_off(&self, id: &str) {
         let mut working = self.working();
         working.on.retain(|p| p.id != id);
-        working.switched.retain(|p| p.id != id);
         self.rehook(&working);
     }
 
@@ -521,12 +596,6 @@ impl Hooks {
     pub(crate) fn control(&self, id: &str, index: usize, value: f32) {
         {
             let mut working = self.working();
-            // a plugin of switches keeps the value, to answer from
-            if let Some(value_at) =
-                working.switched.iter_mut().find(|p| p.id == id).and_then(|p| p.values.get_mut(index))
-            {
-                *value_at = value;
-            }
             if let Some(at) = working.on.iter().position(|p| p.id == id) {
                 // its events' copy too
                 if let Some(events) = working.on.get(at).and_then(|p| p.events.as_ref()) {
@@ -541,12 +610,7 @@ impl Hooks {
             }
         }
         // its artworks open too, once the list is let go (a canvas telling of a stop takes it)
-        let open: Vec<Arc<crate::PluginCanvas>> = {
-            let mut canvases = self.canvases.lock().unwrap_or_else(|e| e.into_inner());
-            canvases.retain(|(_, canvas)| canvas.strong_count() > 0);
-            canvases.iter().filter(|(of, _)| of == id).filter_map(|(_, canvas)| canvas.upgrade()).collect()
-        };
-        for canvas in open {
+        for canvas in self.canvases_of(id) {
             canvas.control(index, value);
         }
     }
@@ -731,6 +795,53 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_plugins_that_come_with_the_app_and_only_answer_answer_from_their_own_code() {
+        const ANSWERING: [&str; 6] = [
+            "eyedropper-layer",
+            "fill-all-layers",
+            "hide-undo-notice",
+            "opacity-together",
+            "pin-panels",
+            "radial-segments",
+        ];
+        let dir = store("answering");
+        let plugins = Plugins::with_store(dir.clone());
+        let hooks = plugins.hooks();
+        let id = |name: &str| format!("io.github.artcraftandroid.{name}");
+        for (name, bytes) in crate::bundled::BUNDLED.iter().filter(|(name, _)| ANSWERING.contains(name)) {
+            // each holds code of its own
+            let package = crate::plugin_file::read_package(bytes).unwrap();
+            assert!(package.file(MODULE).is_some(), "{name}");
+            assert_eq!(plugins.install(bytes.to_vec()), None, "{name}");
+        }
+        let said = |hooks: &Hooks| {
+            let yes = [
+                hooks.pick_layer(),
+                hooks.fill_all_layers(),
+                hooks.hide_undo_notice(),
+                hooks.opacity_together(),
+                hooks.pin_panels(),
+            ];
+            (yes, hooks.radial_segments())
+        };
+        assert_eq!(said(&hooks), ([false; 5], None), "imported, they say nothing");
+        for name in ANSWERING {
+            assert!(plugins.set_on(id(name), true), "{name}");
+        }
+        // the eyedropper's waits for its switch, and radial symmetry makes eight until its slider moves
+        assert_eq!(said(&hooks), ([false, true, true, true, true], Some(8)));
+        // (its switch kept under the setting the app had before it was a plugin)
+        assert!(plugins.set_switch("eyedropper_layer".to_owned(), true));
+        assert!(plugins.set_slider(format!("{}.parts", id("radial-segments")), 12.0).is_some());
+        assert_eq!(said(&hooks), ([true; 5], Some(12)));
+        for name in ANSWERING {
+            assert!(plugins.set_on(id(name), false), "{name}");
+        }
+        assert_eq!(said(&hooks), ([false; 5], None));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn with_nothing_applied_a_sample_goes_through_as_it_came() {
         let hooks = Hooks::default();
         assert_eq!(hooks.position(1.5, -2.5), (1.5, -2.5));
@@ -816,31 +927,6 @@ pub(crate) mod tests {
         assert!(plugins.set_on(ID.to_owned(), false));
         assert!(!plugins.run_action(format!("{ID}.paint"), Arc::clone(&s)));
         assert_eq!(s.layers().len(), before);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_plugin_of_switches_answers_from_its_controls_while_on() {
-        let dir = store("switches");
-        let plugins = Plugins::with_store(dir.clone());
-        let hooks = plugins.hooks();
-        let mut manifest = crate::plugin_file::tests::switches(ID, json!(["radial_segments", "hide_undo_notice"]));
-        manifest["controls"] = json!([
-            { "key": "parts", "type": "slider", "label": "Segments", "least": 2, "most": 32, "step": 1, "starts": 8 },
-        ]);
-        manifest["answers"] = json!({ "radial_segments": "parts" });
-        assert_eq!(plugins.install(pack(&manifest, &[])), None);
-        assert_eq!((hooks.radial_segments(), hooks.hide_undo_notice()), (None, false), "imported, it says nothing");
-        assert!(plugins.set_on(ID.to_owned(), true));
-        assert_eq!((hooks.radial_segments(), hooks.hide_undo_notice()), (Some(8), true));
-        // its slider moved: the answer follows
-        assert!(plugins.set_slider(format!("{ID}.parts"), 12.0).is_some());
-        assert_eq!(hooks.radial_segments(), Some(12));
-        // read back as the next start reads it, still on and as it was left
-        let next = restarted(&dir, &plugins);
-        assert_eq!(next.hooks().radial_segments(), Some(12));
-        assert!(plugins.set_on(ID.to_owned(), false));
-        assert_eq!((hooks.radial_segments(), hooks.hide_undo_notice()), (None, false));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1019,6 +1105,152 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn combo(text: &str) -> KeyCombo {
+        KeyCombo::read(text).unwrap()
+    }
+
+    /// The keys of the row that does `does` in `list`.
+    fn keys_of(list: &[crate::ShortcutGroup], does: &str) -> Option<String> {
+        list.iter().flat_map(|g| &g.rows).find(|r| r.does == does).map(|r| r.keys.clone())
+    }
+
+    /// `press` written for the platform the tests run on.
+    fn written(press: &str) -> String {
+        combo(press).label(crate::keys::MAC)
+    }
+
+    #[test]
+    fn the_keyboard_plugin_binds_a_key_anew_from_its_panel_and_keeps_it() {
+        use crate::{KeyShortcut, PanelRow};
+        let Some(s) = session() else { return };
+        let dir = store("keyboard");
+        let id = "io.github.artcraftandroid.keyboard-shortcuts";
+        let plugins = Plugins::with_store(dir.clone());
+        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "keyboard-shortcuts").unwrap();
+        assert_eq!(plugins.install(file.to_vec()), None);
+        // imported, off: every key as it came
+        assert_eq!(plugins.key_press(combo("command+y")), Some(combo("command+y")));
+        assert!(plugins.set_on(id.to_owned(), true));
+        assert_eq!(plugins.key_press(combo("command+z")), Some(combo("command+z")));
+        assert_eq!(plugins.key_shortcut_list(true, false), crate::key_shortcut_list(true, false));
+        // its action shows the list, a group a page
+        let card = plugins.plugins().into_iter().find(|p| p.id == id).unwrap();
+        assert!(plugins.run_action(card.actions[0].key.clone(), Arc::clone(&s)));
+        let panel = plugins.panel().expect("shown");
+        assert_eq!(panel.title, "Keyboard shortcuts");
+        assert!(!panel.key_press);
+        assert!(matches!(&panel.rows[0], PanelRow::Choice { options, chosen: 0, .. } if options[0] == "Edit"));
+        let undo =
+            panel.rows.iter().position(|r| matches!(r, PanelRow::Keys { label, .. } if label == "Undo")).unwrap();
+        assert_eq!(panel.rows[undo], PanelRow::Keys { label: "Undo".into(), keys: written("command+z") });
+        // a key press goes to no panel that doesn't ask for one
+        assert!(!plugins.panel_key(combo("command+y"), Arc::clone(&s)));
+        // Undo tapped asks for its new keys, and takes the next press
+        assert!(plugins.panel_touched(undo as u32, 1.0, Arc::clone(&s)));
+        let asking = plugins.panel().unwrap();
+        assert_eq!(asking.title, "Undo");
+        assert!(asking.key_press);
+        assert!(plugins.panel_key(combo("command+y"), Arc::clone(&s)));
+        let panel = plugins.panel().unwrap();
+        assert!(!panel.key_press);
+        assert_eq!(panel.rows[undo], PanelRow::Keys { label: "Undo".into(), keys: written("command+y") });
+        // on the canvas Ctrl+Y undoes, and Ctrl+Z does nothing; Redo is as it came
+        assert_eq!(plugins.key_press(combo("command+y")), Some(combo("command+z")));
+        assert_eq!(plugins.key_press(combo("command+z")), None);
+        assert_eq!(plugins.key_shortcut("Y".into(), true, false, false, false), Some(KeyShortcut::Undo));
+        assert_eq!(plugins.key_shortcut("z".into(), true, false, false, false), None);
+        assert_eq!(plugins.key_shortcut("z".into(), true, true, false, false), Some(KeyShortcut::Redo));
+        // and so the list says
+        let list = plugins.key_shortcut_list(true, false);
+        assert_eq!(keys_of(&list, "Undo").as_deref(), Some("Ctrl+Y"));
+        assert_eq!(keys_of(&list, "Redo").as_deref(), Some("Ctrl+Shift+Z"));
+        // kept: the next start has it
+        let next = restarted(&dir, &plugins);
+        assert_eq!(next.key_press(combo("command+y")), Some(combo("command+z")));
+        // off, every key is as it came; on again, as it was bound
+        assert!(plugins.set_on(id.to_owned(), false));
+        assert_eq!(plugins.key_press(combo("command+z")), Some(combo("command+z")));
+        assert_eq!(plugins.key_shortcut_list(true, false), crate::key_shortcut_list(true, false));
+        assert!(plugins.set_on(id.to_owned(), true));
+        assert_eq!(plugins.key_press(combo("command+z")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// On the key hook: Q is taken as Ctrl+Z, N as nothing, X as something that is no press, and
+    /// anything else as it is.
+    const REBINDS: &str = r#"(module
+        (memory (export "memory") 1)
+        (data (i32.const 16) "command+z")
+        (data (i32.const 32) "ctrl+y")
+        (func (export "procraft_key_buffer") (param i32) (result i32) (i32.const 256))
+        (func (export "procraft_key_shortcut") (param $len i32) (result i64)
+            (if (i32.eq (local.get $len) (i32.const 1)) (then
+                (if (i32.eq (i32.load8_u (i32.const 256)) (i32.const 113))
+                    (then (return (i64.or (i64.shl (i64.const 9) (i64.const 32)) (i64.const 16)))))
+                (if (i32.eq (i32.load8_u (i32.const 256)) (i32.const 110))
+                    (then (return (i64.const -1))))
+                (if (i32.eq (i32.load8_u (i32.const 256)) (i32.const 120))
+                    (then (return (i64.or (i64.shl (i64.const 6) (i64.const 32)) (i64.const 32)))))))
+            (i64.const 0))
+        (func (export "procraft_key_shortcut_keys") (param i32) (result i64) (i64.const 0)))"#;
+
+    #[test]
+    fn a_press_goes_as_the_key_hook_says_and_one_that_is_no_press_stops_it() {
+        let dir = store("rebinds");
+        let module = wat::parse_str(REBINDS).unwrap();
+        let plugins = Plugins::with_store(dir.clone());
+        let mut manifest = coded(ID, &module);
+        manifest["hooks"] = json!(["key_shortcut"]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        assert_eq!(plugins.key_press(combo("q")), Some(combo("q")), "off");
+        assert!(plugins.set_on(ID.to_owned(), true));
+        assert_eq!(plugins.key_press(combo("q")), Some(combo("command+z")));
+        assert_eq!(plugins.key_press(combo("n")), None);
+        assert_eq!(plugins.key_press(combo("command+q")), Some(combo("command+q")));
+        // a key no press could have isn't asked about
+        assert_eq!(plugins.key_press(KeyCombo::of("a b", false, false, false)).map(|c| c.key), Some("a b".into()));
+        // what it took "x" as is no press: off it goes, and the press goes as it came
+        assert_eq!(plugins.key_press(combo("x")), Some(combo("x")));
+        assert_eq!(card(&plugins).problem.as_deref(), Some("Switched off: it gave an answer that makes no sense."));
+        assert_eq!(plugins.key_press(combo("q")), Some(combo("q")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_panel_asking_for_a_key_shows_only_with_somewhere_for_it_to_go() {
+        let Some(s) = session() else { return };
+        let dir = store("key-panel");
+        let json = r#"{"title":"Keys","key_press":true,"rows":[{"type":"button","label":"Go"}]}"#;
+        let text = |extra: &str| {
+            format!(
+                r#"(module
+                    (import "procraft" "show_panel" (func $show (param i32 i32) (result i32)))
+                    (memory (export "memory") 1)
+                    (data (i32.const 0) "{}")
+                    (func (export "procraft_action") (param i32) (result i32)
+                        (drop (call $show (i32.const 0) (i32.const {}))) (i32.const 0))
+                    (func (export "procraft_panel_event") (param i32 f32) (result i32) (i32.const 0))
+                    {extra})"#,
+                json.replace('"', "\\\""),
+                json.len()
+            )
+        };
+        let plugins = acting(&dir, &wat::parse_str(text("")).unwrap(), json!(["panel"]));
+        assert!(plugins.run_action(format!("{ID}.paint"), Arc::clone(&s)));
+        assert_eq!(plugins.panel(), None, "no procraft_panel_key");
+        let _ = std::fs::remove_dir_all(&dir);
+        let takes = r#"(func (export "procraft_key_buffer") (param i32) (result i32) (i32.const 1024))
+            (func (export "procraft_panel_key") (param i32) (result i32) (i32.const 0))"#;
+        let plugins = acting(&dir, &wat::parse_str(text(takes)).unwrap(), json!(["panel"]));
+        assert!(plugins.run_action(format!("{ID}.paint"), Arc::clone(&s)));
+        assert!(plugins.panel().is_some_and(|p| p.key_press));
+        // it takes the next press, and shows no more asking for one
+        assert!(plugins.panel_key(combo("k"), Arc::clone(&s)));
+        assert!(plugins.panel().is_some_and(|p| !p.key_press));
+        assert!(!plugins.panel_key(combo("k"), Arc::clone(&s)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_picker_plugin_draws_classic_and_says_where_touches_land() {
         let Some(s) = session() else { return };
@@ -1120,16 +1352,22 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn the_vector_canvas_plugin_draws_strokes_in_the_brush_colour_and_undoes_them() {
-        let Some(s) = session() else { return };
-        let dir = store("vector-canvas");
+    /// Plugins with the artworks of marks (`MARKS`) on, going through a store `name` of their own,
+    /// and the kind those artworks are.
+    fn marking(name: &str) -> (String, Arc<Plugins>, String) {
+        let dir = store(name);
         let plugins = Plugins::with_store(dir.clone());
-        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "vector-canvas").unwrap();
-        assert_eq!(plugins.install(file.to_vec()), None);
-        let id = "io.github.artcraftandroid.vector-canvas";
-        assert!(plugins.set_on(id.to_owned(), true));
-        let kind = plugins.kinds().into_iter().find(|k| k.key == format!("{id}.vector")).expect("listed").key;
+        let file = crate::plugin_file::tests::marks_file(ID, json!([{ "key": "marks", "label": "Marks" }]));
+        assert_eq!(plugins.install(file), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        (dir, plugins, format!("{ID}.marks"))
+    }
+
+    #[test]
+    fn a_plugin_s_artwork_draws_strokes_in_the_brush_colour_over_what_it_drew_and_undoes_them() {
+        let Some(s) = session() else { return };
+        let (dir, plugins, kind) = marking("plugin-artwork-marks");
+        let kind = plugins.kinds().into_iter().find(|k| k.key == kind).expect("listed").key;
         let canvas = plugins.open_canvas(kind.clone(), 200, 200, None).unwrap();
         assert!(s.attach_plugin_canvas(kind, canvas));
         s.set_color(0.0, 0.0, 1.0);
@@ -1166,13 +1404,7 @@ pub(crate) mod tests {
     #[test]
     fn a_plugin_s_artwork_keeps_its_layer_its_steps_and_its_data_honestly() {
         let Some(s) = session() else { return };
-        let dir = store("plugin-artwork-honest");
-        let plugins = Plugins::with_store(dir.clone());
-        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "vector-canvas").unwrap();
-        assert_eq!(plugins.install(file.to_vec()), None);
-        let id = "io.github.artcraftandroid.vector-canvas";
-        assert!(plugins.set_on(id.to_owned(), true));
-        let kind = format!("{id}.vector");
+        let (dir, plugins, kind) = marking("plugin-artwork-honest");
         let canvas = plugins.open_canvas(kind.clone(), 200, 200, None).unwrap();
         assert!(s.attach_plugin_canvas(kind.clone(), canvas));
         let art_layer = s.layers().iter().find(|l| l.current).unwrap().id;
@@ -1214,15 +1446,9 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_eraser_cuts_a_vector_stroke_on_the_canvas() {
+    fn a_plugin_s_artwork_is_told_the_eraser_and_takes_away_what_it_passes_over() {
         let Some(s) = session() else { return };
-        let dir = store("vector-eraser");
-        let plugins = Plugins::with_store(dir.clone());
-        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "vector-canvas").unwrap();
-        assert_eq!(plugins.install(file.to_vec()), None);
-        let id = "io.github.artcraftandroid.vector-canvas";
-        assert!(plugins.set_on(id.to_owned(), true));
-        let kind = format!("{id}.vector");
+        let (dir, plugins, kind) = marking("plugin-artwork-eraser");
         assert!(s.attach_plugin_canvas(kind.clone(), plugins.open_canvas(kind, 200, 200, None).unwrap()));
         s.set_color(0.0, 0.0, 1.0);
         s.set_brush_size(0.5);
@@ -1239,12 +1465,11 @@ pub(crate) mod tests {
         assert_eq!((alpha(&s, 60), alpha(&s, 100), alpha(&s, 140)), (255, 0, 255));
         s.undo();
         assert_eq!(alpha(&s, 100), 255);
-        // its switch turned on with the artwork open: the eraser takes the whole stroke at once
-        assert!(plugins.set_switch(format!("{id}.whole"), true));
-        s.stroke_begin(PointerKind::Stylus, vec![sample(100.0, 80.0, 0.0)]);
-        s.stroke_add((1..10).map(|i| sample(100.0, 80.0 + i as f32 * 4.0, f64::from(i) * 8.0)).collect());
-        s.stroke_end(vec![sample(100.0, 120.0, 88.0)]);
-        assert_eq!((alpha(&s, 60), alpha(&s, 100), alpha(&s, 140)), (0, 0, 0), "all of it gone");
+        // painting again, it adds
+        s.set_tool(crate::ToolKind::Paint);
+        s.stroke_begin(PointerKind::Stylus, vec![sample(100.0, 20.0, 0.0)]);
+        s.stroke_end(vec![sample(100.0, 20.0, 8.0)]);
+        assert_eq!(picture(&s)[(20 * 200 + 100) * 4 + 3], 255);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
