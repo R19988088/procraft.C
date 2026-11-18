@@ -3388,6 +3388,12 @@ impl Canvas {
         }
     }
 
+    /// Whether the open stroke paints in place (wet paint): it changes its layer as it goes, so
+    /// its stamps are laid for good as they come, as a smudge's are.
+    pub fn paints_in_place(&self) -> bool {
+        self.active.is_some_and(|a| a.style.paints_in_place())
+    }
+
     /// Whether the open stroke can show a tip (see [`Canvas::set_tip`]): one built up in the
     /// stroke texture, not painted in place or onto an adjustment, nor a dual brush's: its second
     /// isn't there yet to cut it.

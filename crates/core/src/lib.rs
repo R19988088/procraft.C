@@ -1328,8 +1328,10 @@ fn lay_stroke(
     }
     let drawn = builder.stamp_count();
     let for_good = if canvas.shows_tip() { builder.drawn_for_good() } else { None };
-    // a smudge, or an adjustment painted on, has laid its stamps for good as they came
-    let laid = canvas.stroke_tool() == Some(StrokeTool::Smudge) || canvas.is_pencil();
+    // a smudge, wet paint (a blending brush's), or an adjustment painted on, has laid its stamps
+    // for good as they came: laying the whole stroke again as the pen lifts took a tenth of a
+    // second on a long one (the GPU has to redo every stamp through its compute passes)
+    let laid = canvas.stroke_tool() == Some(StrokeTool::Smudge) || canvas.is_pencil() || canvas.paints_in_place();
     if laid {
         builder.hold_laid();
     }

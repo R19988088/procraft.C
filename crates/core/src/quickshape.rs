@@ -374,15 +374,18 @@ impl State {
         }
     }
 
-    /// The stroke just kept is remembered, for QuickShape on the last stroke.
+    ///
+    /// The canvas is not drawn here: doing so held the pen up after every stroke for as long as the
+    /// stroke's stamps took to lay (100–250 ms on a long one). Its step is counted as made, though
+    /// the render that makes it comes in the next frame — a later change still shows against it.
     pub(crate) fn remember_last_stroke(&mut self) {
         let Some(mut last) = self.began.take() else { return };
-        // its step is made now, so that a later change shows against it
-        self.flush();
         let Some(canvas) = self.canvas.as_ref() else { return };
         last.drawn = self.drawn.clone();
         last.pace = self.pace();
-        last.steps = canvas.steps_made();
+        // the stroke's own step, queued by `Canvas::end_stroke` and made when the canvas is next
+        // rendered (a step it doesn't make, painted quietly on an adjustment, makes this miss)
+        last.steps = canvas.steps_made() + 1;
         last.samples = std::mem::take(&mut self.drawn_samples);
         self.last_stroke = Some(last);
     }
