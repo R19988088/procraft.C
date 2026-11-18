@@ -28,6 +28,17 @@ struct Sphere {
 
 @group(0) @binding(0) var<uniform> s: Sphere;
 @group(0) @binding(1) var radiance: texture_cube<f32>;
+// above 0: the radiance cube is in 8 bits a channel, its colours over a multiplier in alpha this
+// many times white at most (see prefilter.wgsl)
+override RGBM: f32 = 0.0;
+
+// the light a texel of the radiance cube holds
+fn radiance_in(texel: vec4<f32>) -> vec3<f32> {
+    if (RGBM > 0.0) {
+        return texel.rgb * texel.a * RGBM;
+    }
+    return texel.rgb;
+}
 @group(0) @binding(2) var radiance_smp: sampler;
 @group(0) @binding(3) var brdf: texture_2d<f32>;
 @group(0) @binding(4) var brdf_smp: sampler;
@@ -100,7 +111,7 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let r = max(roughness, 0.045);
     let f0 = mix(vec3<f32>(0.04), albedo_lin, metallic);
     let nv = clamp(dot(n, v), 1e-5, 1.0);
-    let reflected = textureSampleLevel(radiance, radiance_smp, reflect(-v, n), r * s.circle.w).rgb;
+    let reflected = radiance_in(textureSampleLevel(radiance, radiance_smp, reflect(-v, n), r * s.circle.w));
     let split = textureSampleLevel(brdf, brdf_smp, vec2<f32>(nv, r), 0.0).rg;
     let fr = f0 + (max(vec3<f32>(1.0 - r), f0) - f0) * pow(1.0 - nv, 5.0);
     let lit = (1.0 - fr) * (1.0 - metallic) * albedo_lin * irradiance(n) + reflected * (fr * split.x + split.y);

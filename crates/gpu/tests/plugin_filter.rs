@@ -180,7 +180,7 @@ fn a_filter_with_a_loop_goes_in_pieces_and_comes_out_whole() {
 fn extract_lines_follows_a_finger() {
     let Some(gpu) = gpu() else { return };
     let (mut canvas, mut doc) = with_a_dot(&gpu, 2048);
-    let code = include_str!("../../../plugins/extract-lines/filter.wgsl");
+    let code = include_str!("../../../plugins/effects/filters/extract_lines.wgsl");
     let filter = program(&gpu, code, &["cut", "soft", "keep_colour"]);
     canvas.begin_transform(doc.current());
     for round in 0..4 {

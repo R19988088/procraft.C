@@ -66,6 +66,9 @@ import io.github.artcraftandroid.procraft.core.PluginSlider
 import io.github.artcraftandroid.procraft.core.PluginSource
 import io.github.artcraftandroid.procraft.core.pluginSliderAlong
 import io.github.artcraftandroid.procraft.core.pluginSliderAt
+import io.github.artcraftandroid.procraft.core.pluginSliderChoice
+import io.github.artcraftandroid.procraft.core.pluginSliderChoices
+import io.github.artcraftandroid.procraft.core.pluginSliderChosen
 import io.github.artcraftandroid.procraft.core.pluginSliderShown
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -331,6 +334,16 @@ fun ActionsPanel(vm: CanvasViewModel, arrowX: Dp, modifier: Modifier = Modifier)
                 Act("Advanced settings") {
                     // the app's own settings page, apart from the canvas
                     runCatching { context.startActivity(Intent(context, io.github.artcraftandroid.procraft.SettingsActivity::class.java)) }
+                },
+                Act("Share log") {
+                    // made outside the panel, which may be closed meanwhile
+                    vm.viewModelScope.launch {
+                        val log = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                            io.github.artcraftandroid.procraft.AppLog.toShare(context)
+                        }
+                        if (log == null) dialog = "Share log" to "The log couldn't be made ready to share."
+                        else runCatching { shareFile(context, log, "text/plain") }
+                    }
                 },
             ),
         )
@@ -616,7 +629,11 @@ private fun PluginCard(plugin: PluginInfo, vm: CanvasViewModel) {
                 Box(Modifier.fillMaxWidth().height(1.dp).background(Pc.ActionsSeparator))
                 when (control) {
                     is PluginControl.Switch -> ActionRowView(Toggle(control.control.label, control.control.on) { vm.setPluginSwitch(control.control.key, it) })
-                    is PluginControl.Slider -> PluginSliderRow(control.control, vm::setPluginSlider)
+                    is PluginControl.Slider -> {
+                        val choices = pluginSliderChoices(control.control)
+                        if (choices.isEmpty()) PluginSliderRow(control.control, vm::setPluginSlider)
+                        else PluginChoiceRow(control.control, choices, vm::setPluginSlider)
+                    }
                     is PluginControl.File -> PluginFileRow(control.control, vm)
                 }
             }
@@ -743,6 +760,33 @@ private fun PluginFileRow(file: PluginFile, vm: CanvasViewModel) {
             Text("Clear", color = Pc.Accent, fontSize = 17.sp, maxLines = 1, modifier = Modifier.clickable { vm.clearPluginFile(file.key) }.padding(start = 12.dp))
         } else {
             Text("Import", color = Pc.Accent, fontSize = 17.sp, maxLines = 1)
+        }
+    }
+}
+
+/** A setting on a card named at every step: its label, the one chosen in blue; a tap opens a menu of them. */
+@Composable
+private fun PluginChoiceRow(slider: PluginSlider, choices: List<String>, onSet: (PluginSlider, Float) -> Unit) {
+    var open by remember(slider.key) { mutableStateOf(false) }
+    Box {
+        Row(
+            Modifier.fillMaxWidth().height(44.dp).clickable { open = true }.padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(slider.label, color = Pc.ActionsRow, fontSize = 17.sp, maxLines = 1)
+            Box(Modifier.weight(1f))
+            Text(pluginSliderShown(slider, slider.value), color = Pc.Accent, fontSize = 17.sp, maxLines = 1)
+        }
+        MenuPresence(open, androidx.compose.ui.graphics.TransformOrigin(0f, 0f)) { look ->
+            ChoiceMenu(
+                look,
+                choices, pluginSliderChosen(slider, slider.value).toInt(), offsetY = (-7).dp,
+                onPick = {
+                    onSet(slider, pluginSliderChoice(slider, it.toUInt()))
+                    open = false
+                },
+                onDismiss = { open = false },
+            )
         }
     }
 }
@@ -1082,13 +1126,16 @@ internal fun shareFile(context: Context, file: File, mime: String) {
     context.startActivity(shareSheet(context, send, listOf(file), mime))
 }
 
-/** The share sheet for [send], with saving [files] to the device always among its choices. */
+/**
+ * The share sheet for [send], with saving [files] to the device always among its choices, and to
+ * the gallery too for pictures and videos.
+ */
 private fun shareSheet(context: Context, send: Intent, files: List<File>, mime: String): Intent {
-    val save = android.content.pm.LabeledIntent(
-        io.github.artcraftandroid.procraft.SaveToDeviceActivity.intent(context, files, mime),
-        context.packageName,
-        "Save to device",
-        io.github.artcraftandroid.procraft.R.mipmap.ic_launcher,
-    )
-    return Intent.createChooser(send, null).putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf<android.os.Parcelable>(save))
+    fun ours(intent: Intent, label: String) =
+        android.content.pm.LabeledIntent(intent, context.packageName, label, io.github.artcraftandroid.procraft.R.mipmap.ic_launcher)
+    val gallery = ours(io.github.artcraftandroid.procraft.SaveToGalleryActivity.intent(context, files, mime), "Save to Gallery")
+        .takeIf { io.github.artcraftandroid.procraft.savesToGallery(mime) }
+    val save = ours(io.github.artcraftandroid.procraft.SaveToDeviceActivity.intent(context, files, mime), "Save to device")
+    val choices = listOfNotNull(gallery, save).toTypedArray<android.os.Parcelable>()
+    return Intent.createChooser(send, null).putExtra(Intent.EXTRA_INITIAL_INTENTS, choices)
 }

@@ -73,6 +73,10 @@ pub mod shape {
     pub const STOCK_HOOK: u32 = 55;
     pub const STOCK_GRAINY_SQUARE: u32 = 56;
     pub const STOCK_LINE: u32 = 57;
+    pub const DAISY: u32 = 58;
+    pub const FLICKS: u32 = 59;
+    pub const SPINDLE: u32 = 60;
+    pub const STUBBLE: u32 = 61;
 }
 
 /// Grains, by index.
@@ -123,6 +127,10 @@ pub mod grain {
     pub const FINE_GRID: u32 = 43;
     pub const SOFT_DOTS: u32 = 44;
     pub const LABYRINTH: u32 = 45;
+    pub const CUBES: u32 = 46;
+    pub const SPOTS: u32 = 47;
+    pub const DISC: u32 = 48;
+    pub const SCROLLS: u32 = 49;
 }
 
 /// How many pixels wide the stock image our grain `index` is drawn to the proportions of is (a
@@ -132,8 +140,10 @@ pub mod grain {
 pub fn drawn_to_stock_width(index: u32) -> Option<f32> {
     match index {
         grain::GRAPH_PAPER | grain::DOT_GRID | grain::DOTTED_STAR | grain::LABYRINTH => Some(2048.0),
-        grain::DIAGONAL_STRIPES | grain::FINE_GRID => Some(1024.0),
+        grain::DIAGONAL_STRIPES | grain::FINE_GRID | grain::CUBES | grain::DISC => Some(1024.0),
         grain::SOFT_DOTS => Some(1792.0),
+        grain::SPOTS => Some(2048.0),
+        grain::SCROLLS => Some(1024.0),
         _ => None,
     }
 }
@@ -161,6 +171,16 @@ pub fn grains() -> Vec<GrayImage> {
     GRAINS.get_or_init(make_grains).clone()
 }
 
+/// Shape `index`, if there is one (without copying the others).
+pub fn shape_image(index: u32) -> Option<GrayImage> {
+    SHAPES.get_or_init(make_shapes).get(index as usize).cloned()
+}
+
+/// Grain `index`, if there is one (without copying the others).
+pub fn grain_image(index: u32) -> Option<GrayImage> {
+    GRAINS.get_or_init(make_grains).get(index as usize).cloned()
+}
+
 /// The shares of a grain at which [`stock_grain_tones`] gives its values: none, 5%, 10%, a
 /// quarter, half, three quarters, 90%, 95% and all of it.
 pub const TONE_SHARES: [f32; 9] = [0.0, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 1.0];
@@ -174,7 +194,13 @@ pub const SHAPE_TONE_SHARES: [f32; 17] = [
 /// The tones of the stock grain a brush file names `name` (its path or file name) instead of
 /// carrying it, as measured: its values at [`TONE_SHARES`], if it is one we know.
 pub fn stock_grain_tones(name: &str) -> Option<[u8; 9]> {
-    stock_tones(crate::stock_tones::STOCK_GRAIN_TONES, name)
+    stock_grain_tones_of(stock_key(name))
+}
+
+/// [`stock_grain_tones`] of the stock grain whose measurements are kept under `key` (see
+/// [`stock_key`]).
+pub fn stock_grain_tones_of(key: u64) -> Option<[u8; 9]> {
+    stock_tones(crate::stock_tones::STOCK_GRAIN_TONES, key)
 }
 
 /// The sides at which [`stock_grain_features`] gives a stock grain's feature size: the image as a
@@ -185,8 +211,12 @@ pub const FEATURE_SIDES: [f32; 4] = [1024.0, 512.0, 256.0, 128.0];
 /// (how far it shifts before it matches itself only half), at each of [`FEATURE_SIDES`], as
 /// measured, if it is one we know.
 pub fn stock_grain_features(name: &str) -> Option<[f32; 4]> {
+    stock_grain_features_of(stock_key(name))
+}
+
+/// [`stock_grain_features`] of the stock grain whose measurements are kept under `key`.
+pub fn stock_grain_features_of(key: u64) -> Option<[f32; 4]> {
     let table = crate::stock_tones::STOCK_GRAIN_FEATURES;
-    let key = name_key(name);
     let at = table.binary_search_by_key(&key, |&(k, _)| k).ok()?;
     table.get(at).map(|&(_, v)| v.map(|v| f32::from(v) / 65536.0))
 }
@@ -195,8 +225,12 @@ pub fn stock_grain_features(name: &str) -> Option<[f32; 4]> {
 /// size of what is left of it with its broad outline taken away, as a share of its side; `Some(None)`
 /// for one with no texture of its own (solid or smooth), none if it is one we don't know.
 pub fn stock_shape_feature(name: &str) -> Option<Option<f32>> {
+    stock_shape_feature_of(stock_key(name))
+}
+
+/// [`stock_shape_feature`] of the stock shape whose measurements are kept under `key`.
+pub fn stock_shape_feature_of(key: u64) -> Option<Option<f32>> {
     let table = crate::stock_tones::STOCK_SHAPE_FEATURES;
-    let key = name_key(name);
     let at = table.binary_search_by_key(&key, |&(k, _)| k).ok()?;
     table.get(at).map(|&(_, [v])| (v < u16::MAX).then(|| f32::from(v) / 65536.0))
 }
@@ -391,7 +425,12 @@ fn feature_share(pixels: &[u8], n: usize) -> Option<f32> {
 /// The tones of the stock shape a brush file names `name`, as measured: its values at
 /// [`SHAPE_TONE_SHARES`] (of it inverted, for a brush that inverts it), if it is one we know.
 pub fn stock_shape_tones(name: &str, inverted: bool) -> Option<[u8; 17]> {
-    let tones = stock_tones(crate::stock_tones::STOCK_SHAPE_TONES, name)?;
+    stock_shape_tones_of(stock_key(name), inverted)
+}
+
+/// [`stock_shape_tones`] of the stock shape whose measurements are kept under `key`.
+pub fn stock_shape_tones_of(key: u64, inverted: bool) -> Option<[u8; 17]> {
+    let tones = stock_tones(crate::stock_tones::STOCK_SHAPE_TONES, key)?;
     // inverted, the darkest share is what was the lightest (the shares run evenly both ways)
     Some(if inverted {
         std::array::from_fn(|i| 255 - tones.get(tones.len() - 1 - i).copied().unwrap_or(0))
@@ -404,12 +443,22 @@ pub fn stock_shape_tones(name: &str, inverted: bool) -> Option<[u8; 17]> {
 /// of its fullest (0..255), as measured (of it inverted, for a brush that inverts it), if it is
 /// one we know.
 pub fn stock_shape_rows(name: &str, inverted: bool) -> Option<[u8; 64]> {
-    stock_tones(crate::stock_tones::STOCK_SHAPE_ROWS, name).map(|means| band_shares(&means, inverted))
+    stock_shape_rows_of(stock_key(name), inverted)
+}
+
+/// [`stock_shape_rows`] of the stock shape whose measurements are kept under `key`.
+pub fn stock_shape_rows_of(key: u64, inverted: bool) -> Option<[u8; 64]> {
+    stock_tones(crate::stock_tones::STOCK_SHAPE_ROWS, key).map(|means| band_shares(&means, inverted))
 }
 
 /// The same of its columns, left to right.
 pub fn stock_shape_cols(name: &str, inverted: bool) -> Option<[u8; 64]> {
-    stock_tones(crate::stock_tones::STOCK_SHAPE_COLS, name).map(|means| band_shares(&means, inverted))
+    stock_shape_cols_of(stock_key(name), inverted)
+}
+
+/// [`stock_shape_cols`] of the stock shape whose measurements are kept under `key`.
+pub fn stock_shape_cols_of(key: u64, inverted: bool) -> Option<[u8; 64]> {
+    stock_tones(crate::stock_tones::STOCK_SHAPE_COLS, key).map(|means| band_shares(&means, inverted))
 }
 
 /// Bands' mean values as the ink each holds, as shares of the fullest (0..255): the means
@@ -578,8 +627,7 @@ pub fn striped(pixels: &[u8], rows: &[u8; 64]) -> Vec<u8> {
     pixels.iter().enumerate().map(|(i, &v)| (f32::from(v) * at(i / n) / most).round().clamp(0.0, 255.0) as u8).collect()
 }
 
-fn stock_tones<T: Copy, const N: usize>(table: &[(u64, [T; N])], name: &str) -> Option<[T; N]> {
-    let key = name_key(name);
+fn stock_tones<T: Copy, const N: usize>(table: &[(u64, [T; N])], key: u64) -> Option<[T; N]> {
     table.binary_search_by_key(&key, |&(k, _)| k).ok().and_then(|i| table.get(i)).map(|&(_, t)| t)
 }
 
@@ -594,7 +642,12 @@ pub const OCTAVE_SHARE: f32 = 0.25;
 /// [`octave_grain`]'s noise is (finest first) for it to vary as much at each size as that image
 /// does, as measured, if it is one we know.
 pub fn stock_grain_octaves(name: &str) -> Option<(f32, [f32; OCTAVES])> {
-    let [width, octaves @ ..] = stock_tones(crate::stock_tones::STOCK_GRAIN_OCTAVES, name)?;
+    stock_grain_octaves_of(stock_key(name))
+}
+
+/// [`stock_grain_octaves`] of the stock grain whose measurements are kept under `key`.
+pub fn stock_grain_octaves_of(key: u64) -> Option<(f32, [f32; OCTAVES])> {
+    let [width, octaves @ ..] = stock_tones(crate::stock_tones::STOCK_GRAIN_OCTAVES, key)?;
     Some((f32::from(width), octaves.map(|a| f32::from(a) / 10000.0)))
 }
 
@@ -634,8 +687,8 @@ pub fn octave_grain(amplitudes: &[f32; OCTAVES], tones: &[u8; 9]) -> Vec<u8> {
 }
 
 /// The key the stock tables keep an image's measurements under: FNV-1a of its file's name in lower
-/// case.
-fn name_key(name: &str) -> u64 {
+/// case. A stand-in drawn for a brush that names no image (the stock library's own) goes by it.
+pub fn stock_key(name: &str) -> u64 {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name).to_lowercase();
     base.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
 }
@@ -680,6 +733,21 @@ pub fn retoned(pixels: &[u8], tones: &[u8], shares: &[f32]) -> Vec<u8> {
 pub fn prepare() {
     SHAPES.get_or_init(make_shapes);
     GRAINS.get_or_init(make_grains);
+}
+
+/// A daisy: eight long, narrow petals round a small dot, a ring of black between.
+fn daisy() -> Vec<u8> {
+    field(|x, y| {
+        let (u, v) = centred(x, y);
+        let (r, a) = ((u * u + v * v).sqrt(), v.atan2(u));
+        // the nearest petal's way, and how far along and across it the point lies
+        let gap = TAU / 8.0;
+        let off = a - (a / gap).round() * gap;
+        let (along, across) = (r * off.cos(), r * off.sin());
+        let petal = 1.0 - ((along - 0.56) / 0.4).powi(2) - (across / 0.085).powi(2);
+        let dot = 0.05 - r;
+        (petal * 12.0).max(dot * 120.0).clamp(0.0, 1.0)
+    })
 }
 
 fn make_shapes() -> Vec<GrayImage> {
@@ -1310,7 +1378,129 @@ fn make_shapes() -> Vec<GrayImage> {
             smooth(((thick - off) * TEXTURE_SIZE as f32 + 0.5).clamp(0.0, 1.0))
         }),
     });
+    shapes.push(GrayImage { name: "Daisy", pixels: daisy() });
+    shapes.push(GrayImage { name: "Flicks", pixels: flicks() });
+    shapes.push(GrayImage { name: "Spindle", pixels: spindle() });
+    shapes.push(GrayImage { name: "Stubble", pixels: stubble() });
     shapes
+}
+
+/// Whether our shape `index` is drawn to a stock picture's own proportions (its marks as wide,
+/// as many and as fine as the picture's), so that standing in for it, it takes the picture's tones
+/// but none of the marks or streaks put on a shape standing in for a picture we know less of.
+pub fn drawn_to_stock(index: u32) -> bool {
+    matches!(index, shape::FLICKS | shape::SPINDLE | shape::STUBBLE)
+}
+
+/// Splashes of water flicked on: six big ones (a sixteenth of the tile across down to a 26th), a
+/// few drops a fifth their size near them and over the rest, many specks, all crisp, their rims
+/// crowned with short spikes and fine streaks flung out of the biggest; about a twentieth of the
+/// tile, inside its middle nine tenths across and three quarters down.
+fn flicks() -> Vec<u8> {
+    let random = |k: u32, salt: u32| hash(k as i32, salt as i32, 7717);
+    // somewhere in the part of the tile the splashes keep to
+    let anywhere = |k: u32| (0.07 + 0.88 * random(k, 1), 0.16 + 0.71 * random(k, 2));
+    // (middle, radius) of each: the big ones spread out, the drops round them and anywhere
+    let big = [0.063f32, 0.061, 0.052, 0.039, 0.039, 0.039];
+    let mut blots: Vec<((f32, f32), f32)> = big.iter().enumerate().map(|(k, &r)| (anywhere(k as u32), r)).collect();
+    let drops = [0.021f32, 0.021, 0.0125, 0.0125, 0.0104, 0.0098];
+    let specks = (0..16).map(|k| 0.003 + 0.0065 * random(k, 3));
+    let dots = (0..73).map(|k| 0.0015 + 0.0015 * random(k, 4));
+    for (k, r) in drops.into_iter().chain(specks).chain(dots).enumerate() {
+        let k = k as u32 + 100;
+        let at = if random(k, 5) < 0.5 {
+            // thrown off one of the big ones, two to four of its radii out
+            let ((x, y), from) =
+                blots.get((random(k, 6) * big.len() as f32) as usize % big.len()).copied().unwrap_or_default();
+            let (way, out) = (random(k, 7) * TAU, from * (2.0 + 2.0 * random(k, 8)));
+            (x + way.cos() * out, y + way.sin() * out)
+        } else {
+            anywhere(k)
+        };
+        blots.push((at, r));
+    }
+    // fine streaks flung out of the big ones: (from, to)
+    let streaks: Vec<((f32, f32), (f32, f32))> = (0..14u32)
+        .filter_map(|k| {
+            let &((x, y), r) = blots.get(k as usize % big.len())?;
+            let way = random(k, 9) * TAU;
+            let (from, to) = (r * (1.6 + random(k, 10)), r * (2.2 + 1.6 * random(k, 11)));
+            Some(((x + way.cos() * from, y + way.sin() * from), (x + way.cos() * to, y + way.sin() * to)))
+        })
+        .collect();
+    field(|x, y| {
+        let mut ink = 0.0f32;
+        for (k, &((bx, by), r)) in blots.iter().enumerate() {
+            let (dx, dy) = (x - bx, y - by);
+            let d = (dx * dx + dy * dy).sqrt();
+            if d > r * 1.4 + 2.0 / TEXTURE_SIZE as f32 {
+                continue;
+            }
+            // the rim: a few short spikes round it, a wobble between
+            let a = dy.atan2(dx);
+            let seed = k as u32 * 31;
+            let mut rim = 1.0 + 0.05 * (a * 5.0 + random(seed, 12) * TAU).sin();
+            for s in 0..9u32 {
+                let off = (a - random(seed + s, 13) * TAU + PI).rem_euclid(TAU) - PI;
+                rim += 0.3 * random(seed + s, 14) * (1.0 - (off / 0.12).abs()).max(0.0);
+            }
+            ink = ink.max(((r * rim - d) * TEXTURE_SIZE as f32 * 1.5 + 0.5).clamp(0.0, 1.0));
+        }
+        for &(from, to) in &streaks {
+            let (d, _) = segment(x, y, from, to);
+            ink = ink.max(mark(d, 0.6 / TEXTURE_SIZE as f32) * 0.8);
+        }
+        ink
+    })
+}
+
+/// A spindle: one fine line across the tile's diagonal, up from its lower left corner, nine
+/// tenths of the diagonal long, its width (at most a 140th of the tile) going to nothing straight
+/// from its middle to its ends.
+fn spindle() -> Vec<u8> {
+    let (a, b) = ((0.065, 0.937), (0.95, 0.044));
+    let widest = 1.0 / 140.0;
+    let texel = 1.0 / TEXTURE_SIZE as f32;
+    field(|x, y| {
+        let (d, t) = segment(x, y, a, b);
+        let width = widest * (1.0 - (2.0 * t - 1.0).abs()).powf(0.9);
+        // a line under a texel wide as faint as it is thin
+        mark(d, width.max(texel) * 0.5) * (width / texel).min(1.0)
+    })
+}
+
+/// Stubble: 110 short hairs, each a shallow arc lying across (ends up, a 30th of the tile long,
+/// brightest at its middle and fading to its ends, a 400th thick), scattered over the tile's
+/// middle three quarters, thicker towards its middle.
+fn stubble() -> Vec<u8> {
+    let random = |k: u32, salt: u32| hash(k as i32, salt as i32, 9091);
+    let hairs: Vec<(f32, f32, f32)> = (0..110u32)
+        .map(|k| {
+            let (way, out) = (random(k, 1) * TAU, random(k, 2).powf(0.7));
+            (0.505 + 0.37 * out * way.cos(), 0.51 + 0.39 * out * way.sin(), (random(k, 3) - 0.5) * 0.25)
+        })
+        .collect();
+    let (half, sag, thick) = (0.016f32, 0.004f32, 1.25f32 / 1024.0);
+    let least = 0.5 / TEXTURE_SIZE as f32;
+    field(|x, y| {
+        let mut ink = 0.0f32;
+        for &(hx, hy, turn) in &hairs {
+            let (dx, dy) = (x - hx, y - hy);
+            if dx.abs() > half * 1.2 || dy.abs() > half * 0.6 {
+                continue;
+            }
+            let (c, s) = (turn.cos(), turn.sin());
+            let (u, v) = (dx * c + dy * s, -dx * s + dy * c);
+            let along = u / half;
+            if along.abs() > 1.0 {
+                continue;
+            }
+            // the arc's ends lie `sag` above its middle
+            let d = (v + sag * (1.0 - along * along)).abs();
+            ink = ink.max(mark(d, thick.max(least)) * (thick / least).min(1.0) * (1.0 - along * along).sqrt());
+        }
+        ink
+    })
 }
 
 /// The hook's pixels (see the shape of that name): the distance to a curve sampled along its length,
@@ -1832,7 +2022,131 @@ fn make_grains() -> Vec<GrayImage> {
     grains.push(GrayImage { name: "Fine grid", pixels: fine_grid() });
     grains.push(GrayImage { name: "Soft dots", pixels: soft_dots() });
     grains.push(GrayImage { name: "Labyrinth", pixels: labyrinth() });
+    grains.push(GrayImage { name: "Cubes", pixels: cubes() });
+    grains.push(GrayImage { name: "Spots", pixels: spots() });
+    grains.push(GrayImage { name: "Disc", pixels: disc() });
+    grains.push(GrayImage { name: "Scrolls", pixels: scrolls() });
     grains
+}
+
+/// Scrolls: four white curls on black, one in each quarter of the tile, each turned a quarter from
+/// the one before: a band winding in about one and a quarter turns, thinning as it goes, ending in
+/// a dot, with two leaves on its outer curve; about a third of the tile white.
+fn scrolls() -> Vec<u8> {
+    // a curl's band as points along it (curl-sized units, its middle at 0), each with its half
+    // width; and its leaves, as (middle, way, half length, half width)
+    let turns = 1.25;
+    let steps = 120;
+    let band: Vec<(f32, f32, f32)> = (0..=steps)
+        .map(|i| {
+            let t = i as f32 / steps as f32;
+            let angle = t * turns * TAU;
+            let r = 0.92 - 0.72 * t;
+            (r * angle.cos(), r * angle.sin(), 0.17 - 0.09 * t)
+        })
+        .collect();
+    let leaves = [(-0.66, -0.86, 0.5, 0.34, 0.16), (1.04, -0.42, -1.2, 0.32, 0.15)];
+    let curl = |u: f32, v: f32| -> f32 {
+        let mut ink = 0.0f32;
+        for pair in band.windows(2) {
+            if let [(ax, ay, aw), (bx, by, bw)] = *pair {
+                let (dx, dy) = (bx - ax, by - ay);
+                let t = (((u - ax) * dx + (v - ay) * dy) / (dx * dx + dy * dy).max(1e-9)).clamp(0.0, 1.0);
+                let d = (u - ax - t * dx).hypot(v - ay - t * dy);
+                let w = aw + (bw - aw) * t;
+                ink = ink.max(((w - d) * 60.0 + 0.5).clamp(0.0, 1.0));
+            }
+        }
+        // the dot it ends in
+        if let Some(&(ex, ey, _)) = band.last() {
+            ink = ink.max(((0.13 - (u - ex).hypot(v - ey)) * 60.0 + 0.5).clamp(0.0, 1.0));
+        }
+        for &(lx, ly, way, long, wide) in &leaves {
+            let (c, s) = (f32::cos(way), f32::sin(way));
+            let (a, b) = ((u - lx) * c + (v - ly) * s, -(u - lx) * s + (v - ly) * c);
+            // a leaf: pointed at both ends
+            let e = (a / long).powi(2) + (b / (wide * (1.0 - (a / long).abs()).max(0.0).sqrt())).powi(2);
+            ink = ink.max(((1.0 - e) * 8.0).clamp(0.0, 1.0));
+        }
+        ink
+    };
+    field(|x, y| {
+        let mut ink = 0.0f32;
+        for (k, (cx, cy)) in [(0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75)].into_iter().enumerate() {
+            let turn = k as f32 * FRAC_PI_2;
+            let (c, s) = (turn.cos(), turn.sin());
+            // the curl a quarter of the tile wide either way of its middle, read across the tile's
+            // wrap
+            for (ox, oy) in [(0.0, 0.0), (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                let (px, py) = ((x + ox - cx) / 0.215, (y + oy - cy) / 0.215);
+                if px.abs() > 1.4 || py.abs() > 1.4 {
+                    continue;
+                }
+                ink = ink.max(curl(px * c + py * s, -px * s + py * c));
+            }
+        }
+        ink
+    })
+}
+
+/// Stacked cubes seen from above at an angle: two to the tile across and two rows down (each row
+/// half a cube along), each cube's top black, its left face grey and its right face white, a third
+/// of the tile each. A cube's top is a rhombus as wide as the cube and a third of a row tall (so
+/// the cubes are a little taller than true isometric ones), its faces hanging a row's two thirds
+/// below it.
+fn cubes() -> Vec<u8> {
+    const TOP: f32 = 0.0;
+    const LEFT: f32 = 0.47;
+    const RIGHT: f32 = 0.97;
+    field(|x, y| {
+        // in cubes across (a cube 1 wide) and rows down (a top's half height a third of a row),
+        // a quarter cube along so that no edge lies on the tile's
+        let (u, v) = (x * 2.0 + 0.25, y * 2.0);
+        let row = v.floor();
+        // the cube whose top this row's line runs through, and the point from that top's middle
+        let shift = if (row as i32).rem_euclid(2) == 1 { 0.5 } else { 0.0 };
+        let near = |r: f32, s: f32| {
+            let cx = (u - s).round() + s;
+            (u - cx, v - r)
+        };
+        let (dx, dy) = near(row, shift);
+        let (nx, ny) = near(row + 1.0, 0.5 - shift);
+        let h = 1.0 / 3.0;
+        // on a top: this row's or the next's
+        if dx.abs() * 2.0 + dy.abs() / h <= 1.0 || nx.abs() * 2.0 + ny.abs() / h <= 1.0 {
+            return TOP;
+        }
+        // below this row's top: the face on the side of its middle the point is
+        if dx < 0.0 { LEFT } else { RIGHT }
+    })
+}
+
+/// Spots: rounded white patches packed close, about forty to the tile each way, parted by black
+/// gaps of uneven width, a little over half of it white (a hide's spots).
+fn spots() -> Vec<u8> {
+    let raw: Vec<f32> = (0..TEXTURE_SIZE * TEXTURE_SIZE)
+        .map(|k| {
+            let (x, y) = (
+                ((k % TEXTURE_SIZE) as f32 + 0.5) / TEXTURE_SIZE as f32,
+                ((k / TEXTURE_SIZE) as f32 + 0.5) / TEXTURE_SIZE as f32,
+            );
+            // the gaps wander: where each texel is read from is moved a little by soft noise
+            let wx = x + 0.004 * (fbm(x * 16.0, y * 16.0, 16, 2, 4703) - 0.5);
+            let wy = y + 0.004 * (fbm(x * 16.0, y * 16.0, 16, 2, 4709) - 0.5);
+            let (f1, f2) = cells(wx.rem_euclid(1.0), wy.rem_euclid(1.0), 40, 4701);
+            // how far inside its patch, against the patch next to it, rounded off at its corners
+            (f2 - f1) - 0.25 * f1
+        })
+        .collect();
+    let mut sorted = raw.clone();
+    sorted.sort_by(f32::total_cmp);
+    let cut = sorted.get(((TEXTURE_SIZE * TEXTURE_SIZE) as f32 * 0.48) as usize).copied().unwrap_or(0.0);
+    raw.iter().map(|&v| if v > cut { 255 } else { 0 }).collect()
+}
+
+/// One hard white disc in the middle of the tile on black, four fifths of it across.
+fn disc() -> Vec<u8> {
+    field(|x, y| mark((x - 0.5).hypot(y - 0.5), 0.398))
 }
 
 /// Diagonal stripes, white on black, rising to the right: five of differing widths in each quarter

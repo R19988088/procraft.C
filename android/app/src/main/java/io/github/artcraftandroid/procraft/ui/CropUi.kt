@@ -1,5 +1,8 @@
 package io.github.artcraftandroid.procraft.ui
 
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -49,11 +52,13 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 // light over the dark surround; dark with the light interface
@@ -131,6 +136,7 @@ fun BoxScope.CropOverlay(vm: CanvasViewModel) {
             drawLine(Mark, m - toNext * arm, m + toNext * arm, w, StrokeCap.Butt)
         }
     }
+    SizeReadout(vm)
     ToolHeader(
         "Crop and Resize",
         listOf(
@@ -143,6 +149,38 @@ fun BoxScope.CropOverlay(vm: CanvasViewModel) {
     )
     // 9 from the screen's right edge, its arrow up at Settings (183 from that edge)
     if (vm.cropSettingsOpen) CropSettings(vm, Modifier.align(Alignment.TopEnd).offset(x = (-9).dp, y = 66.dp))
+}
+
+/**
+ * While a corner or side of the frame is dragged: its width and height in a small box above the
+ * touch, beside it away from the frame's middle (the core places it), fading as the touch lifts.
+ */
+@Composable
+private fun BoxScope.SizeReadout(vm: CanvasViewModel) {
+    val now = vm.cropReadout
+    var last by remember { mutableStateOf(now) }
+    if (now != null) last = now
+    val shown = last ?: return
+    androidx.compose.animation.AnimatedVisibility(
+        now != null,
+        Modifier.offset { IntOffset(shown.x.roundToInt(), shown.y.roundToInt()) },
+        enter = EnterTransition.None,
+        exit = fadeOut(tween(300)),
+    ) {
+        Box(Modifier.size(148.dp, 54.dp).clip(RoundedCornerShape(8.dp)).background(PopoverFill)) {
+            // each row's name from its left half, its value to the right; 8 either side of the middle
+            ReadoutRow("Width", shown.width, Modifier.align(Alignment.TopStart).padding(top = 3.dp))
+            ReadoutRow("Height", shown.height, Modifier.align(Alignment.TopStart).padding(top = 35.dp))
+        }
+    }
+}
+
+@Composable
+private fun ReadoutRow(name: String, value: UInt, modifier: Modifier) {
+    Row(modifier.padding(horizontal = 10.dp).fillMaxWidth().height(16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(name, color = SettingsInk, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f).padding(start = 4.dp))
+        Text("${value}px", color = SettingsInk, fontSize = 13.sp, textAlign = TextAlign.End, maxLines = 1, modifier = Modifier.weight(1f).padding(start = 4.dp, end = 4.dp))
+    }
 }
 
 /** The settings popover: the size (aspect locked or not), DPI, resampling, snapping, the turn. */

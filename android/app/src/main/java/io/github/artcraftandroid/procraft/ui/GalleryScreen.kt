@@ -156,8 +156,10 @@ fun GalleryScreen(vm: CanvasViewModel) {
     var moreOpen by remember { mutableStateOf(false) }
     // Share's formats, open for these artworks
     var sharing by remember { mutableStateOf<GalleryShare?>(null) }
-    // artworks waiting for their PDF's quality
-    var pdfFor by remember { mutableStateOf<List<Artwork>?>(null) }
+    // artworks waiting for their PDF's quality (several go into one, named as the share says)
+    var pdfFor by remember { mutableStateOf<GalleryShare?>(null) }
+    // a stack swiped to, asked about deleting
+    var deletingStack by remember { mutableStateOf<io.github.artcraftandroid.procraft.gallery.Stack?>(null) }
     var deletingSelected by remember { mutableStateOf(false) }
     var previewing by remember { mutableStateOf<List<Artwork>?>(null) }
     // which of them Preview starts on
@@ -180,6 +182,8 @@ fun GalleryScreen(vm: CanvasViewModel) {
         uri?.let(vm::newFromPicture)
     }
     if (vm.openStack != null && !selecting) BackHandler { vm.showStack(null) }
+    // the band kept clear of the status bar and camera in the gallery's own colour
+    ClearBandShows(Pc.GalleryBackground)
     BoxWithConstraints(Modifier.fillMaxSize().background(Pc.GalleryBackground)) {
         val (screenWidth, screenHeight) = maxWidth to maxHeight
         vm.windowPx = androidx.compose.ui.unit.IntSize(constraints.maxWidth, constraints.maxHeight)
@@ -223,7 +227,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
                         previewFrom = 0
                         previewing = picked()
                     },
-                    onShare = { sharing = GalleryShare(picked(), null) },
+                    onShare = { sharing = GalleryShare(picked(), null, galleryShareName(vm.openStack?.name)) },
                     onDuplicate = {
                         picked().forEach(vm::duplicateArtwork)
                         endSelecting()
@@ -301,33 +305,59 @@ fun GalleryScreen(vm: CanvasViewModel) {
                                 )
                                 val view = LocalView.current
                                 val density = androidx.compose.ui.platform.LocalDensity.current
-                                StackCell(
-                                    entry, vm.galleryVersion, dim = selecting, wash = dropOnto == entry.dir.name,
-                                    modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null).graphicsLayer { alpha = faint.value },
-                                    onPlaced = { stackCellAt[entry.dir.name] = it },
-                                    onDrag = { touch ->
-                                        // its top artwork's picture, lifted, held where the finger is on it
-                                        val placed = stackCellAt[entry.dir.name]
-                                        val top = entry.artworks.firstOrNull()
-                                        if (!selecting && placed != null && top != null) {
-                                            val box = with(density) {
-                                                androidx.compose.ui.geometry.Rect(
-                                                    placed.center.x - cell.width.toPx() / 2f, placed.top + 39.dp.toPx(),
-                                                    placed.center.x + cell.width.toPx() / 2f, placed.top + 39.dp.toPx() + cell.thumb.toPx(),
-                                                )
+                                // swiped open, it fades back and its actions grow in over it, as an artwork's
+                                val open = androidx.compose.animation.core.animateFloatAsState(
+                                    if (swiped == entry.dir.name) 1f else 0f, Motion.swipeActions(), label = "swipe",
+                                ).value
+                                Box(Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null)) {
+                                    StackCell(
+                                        entry, vm.galleryVersion, dim = selecting, wash = dropOnto == entry.dir.name,
+                                        modifier = Modifier.fillMaxWidth().graphicsLayer { alpha = faint.value * (1f - SWIPED_FADE * open.coerceIn(0f, 1f)) },
+                                        onPlaced = { stackCellAt[entry.dir.name] = it },
+                                        onSwipe = { dx, dy -> swipeOpens(dx, dy, selecting)?.let { opens -> swiped = if (opens) entry.dir.name else null } },
+                                        onDrag = { touch ->
+                                            // its top artwork's picture, lifted, held where the finger is on it
+                                            val placed = stackCellAt[entry.dir.name]
+                                            val top = entry.artworks.firstOrNull()
+                                            if (!selecting && placed != null && top != null) {
+                                                val box = with(density) {
+                                                    androidx.compose.ui.geometry.Rect(
+                                                        placed.center.x - cell.width.toPx() / 2f, placed.top + 39.dp.toPx(),
+                                                        placed.center.x + cell.width.toPx() / 2f, placed.top + 39.dp.toPx() + cell.thumb.toPx(),
+                                                    )
+                                                }
+                                                val picture = fitted(box, top)
+                                                val held = (touch - picture.topLeft) * Motion.ARTWORK_LIFTED
+                                                val w = (picture.width * Motion.ARTWORK_LIFTED).toInt()
+                                                val h = (picture.height * Motion.ARTWORK_LIFTED).toInt()
+                                                if (io.github.artcraftandroid.procraft.gallery.startStackDrag(view, entry, w, h, android.graphics.Point(held.x.toInt(), held.y.toInt()))) {
+                                                    dragging = entry.dir.name
+                                                }
                                             }
-                                            val picture = fitted(box, top)
-                                            val held = (touch - picture.topLeft) * Motion.ARTWORK_LIFTED
-                                            val w = (picture.width * Motion.ARTWORK_LIFTED).toInt()
-                                            val h = (picture.height * Motion.ARTWORK_LIFTED).toInt()
-                                            if (io.github.artcraftandroid.procraft.gallery.startStackDrag(view, entry, w, h, android.graphics.Point(held.x.toInt(), held.y.toInt()))) {
-                                                dragging = entry.dir.name
-                                            }
-                                        }
-                                    },
-                                    onRename = { if (!selecting) renamingStack = entry },
-                                ) {
-                                    if (!selecting) vm.showStack(entry)
+                                        },
+                                        onRename = {
+                                            // a tap puts away the actions showing
+                                            if (swiped != null) swiped = null else if (!selecting) renamingStack = entry
+                                        },
+                                    ) {
+                                        if (swiped != null) swiped = null else if (!selecting) vm.showStack(entry)
+                                    }
+                                    if (open > 0f) {
+                                        // a stack's act on every artwork in it
+                                        SwipeActions(
+                                            open,
+                                            Modifier.align(Alignment.TopCenter).padding(top = 39.dp + cell.thumb / 2 - SwipePillHeight / 2),
+                                            onShare = { at -> sharing = GalleryShare(entry.artworks, at, entry.name) },
+                                            onDuplicate = {
+                                                swiped = null
+                                                vm.duplicateStack(entry)
+                                            },
+                                            onDelete = {
+                                                swiped = null
+                                                deletingStack = entry
+                                            },
+                                        )
+                                    }
                                 }
                                 return@items
                             }
@@ -408,7 +438,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
                                                 }
                                                 val d = moved
                                                 if (d != null) {
-                                                    if (!selecting && kotlin.math.abs(d.x) > kotlin.math.abs(d.y)) swiped = if (d.x < 0f) a.dir.name else null
+                                                    swipeOpens(d.x, d.y, selecting)?.let { opens -> swiped = if (opens) a.dir.name else null }
                                                     return@awaitEachGesture
                                                 }
                                                 if (!held) {
@@ -453,10 +483,13 @@ fun GalleryScreen(vm: CanvasViewModel) {
                                     horizontalAlignment = Alignment.CenterHorizontally,
                                 ) {
                                     Box(
-                                        Modifier.padding(top = 39.dp).size(cell.width, cell.thumb).graphicsLayer {
-                                            scaleX = lift.value
-                                            scaleY = lift.value
-                                        },
+                                        Modifier.padding(top = 39.dp).size(cell.width, cell.thumb)
+                                            // the box it is fitted in, for the cell it will be once its canvas is turned
+                                            .onGloballyPositioned { if (vm.galleryZoom == null) vm.thumbBoxAt[a.dir.name] = it.boundsInWindow() }
+                                            .graphicsLayer {
+                                                scaleX = lift.value
+                                                scaleY = lift.value
+                                            },
                                         contentAlignment = Alignment.BottomCenter,
                                     ) {
                                         // where it is, for zooming into it, unless the gallery is zooming itself
@@ -480,7 +513,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
                                         open,
                                         // centred on the thumbnail's frame
                                         Modifier.align(Alignment.TopCenter).padding(top = 39.dp + cell.thumb / 2 - SwipePillHeight / 2),
-                                        onShare = { at -> sharing = GalleryShare(listOf(a), at) },
+                                        onShare = { at -> sharing = GalleryShare(listOf(a), at, a.name) },
                                         onDuplicate = {
                                             swiped = null
                                             vm.duplicateArtwork(a)
@@ -568,7 +601,7 @@ fun GalleryScreen(vm: CanvasViewModel) {
                         share.artworks.firstOrNull()?.let { vm.openForAnimatedExport(it, animated) }
                         if (selecting) endSelecting()
                     } else if (format == "PDF") {
-                        pdfFor = share.artworks
+                        pdfFor = share
                     } else {
                         // with the export card; a failure is told, a cancel shares nothing
                         vm.viewModelScope.launch {
@@ -579,10 +612,10 @@ fun GalleryScreen(vm: CanvasViewModel) {
             }
         }
         PdfQualityAlert(pdfFor != null, onCancel = { pdfFor = null }) { quality ->
-            val list = pdfFor.orEmpty()
+            val share = pdfFor ?: return@PdfQualityAlert
             pdfFor = null
             vm.viewModelScope.launch {
-                vm.shareFromGallery(list, "PDF", quality.jpeg)?.let { (files, mime) -> runCatching { shareFiles(context, files, mime) } }
+                vm.shareFromGallery(share.artworks, "PDF", quality.jpeg, share.group)?.let { (files, mime) -> runCatching { shareFiles(context, files, mime) } }
             }
         }
         opening?.let { o ->
@@ -687,6 +720,18 @@ fun GalleryScreen(vm: CanvasViewModel) {
             picked().forEach(vm::deleteArtwork)
             deletingSelected = false
             endSelecting()
+        },
+    )
+    Alert(
+        deletingStack,
+        title = { st -> "Delete “${st.name}”?" },
+        message = { st -> "Its ${st.artworks.size} artworks go with it. This can't be undone." },
+        action = "Delete",
+        icon = PcIcons.Trash,
+        onCancel = { deletingStack = null },
+        onAction = { st ->
+            vm.deleteStack(st)
+            deletingStack = null
         },
     )
     Alert(
@@ -880,7 +925,7 @@ private fun RenameArtwork(a: Artwork, version: Int, from: androidx.compose.ui.ge
         onDone(text.text.trim().ifEmpty { a.name })
     }
     BackHandler(enabled = !closing) { finish() }
-    val ratio = if (a.width > 0 && a.height > 0) a.width.toFloat() / a.height else 0.75f
+    val ratio = a.ratio
     BoxWithConstraints(
         Modifier.fillMaxSize().graphicsLayer { alpha = if (closing) shown else 1f }
             .pointerInput(a) { detectTapGestures { finish() } },
@@ -958,8 +1003,10 @@ private val DragScrollEdge = 60.dp
 private val DragScrollStep = 12.dp
 
 /** Artwork [a]'s picture as it sits in its thumbnail's [box]: fitted, standing on the box's bottom. */
-private fun fitted(box: androidx.compose.ui.geometry.Rect, a: Artwork): androidx.compose.ui.geometry.Rect {
-    val ratio = if (a.width > 0 && a.height > 0) a.width.toFloat() / a.height else 0.75f
+private fun fitted(box: androidx.compose.ui.geometry.Rect, a: Artwork): androidx.compose.ui.geometry.Rect = fittedIn(box, a.ratio)
+
+/** A picture [ratio] wide to its height as it sits in a thumbnail's [box]: fitted, standing on the box's bottom. */
+fun fittedIn(box: androidx.compose.ui.geometry.Rect, ratio: Float): androidx.compose.ui.geometry.Rect {
     val w = if (ratio <= box.width / box.height) box.height * ratio else box.width
     val h = w / ratio
     return androidx.compose.ui.geometry.Rect(box.center.x - w / 2f, box.bottom - h, box.center.x + w / 2f, box.bottom)
@@ -1175,8 +1222,11 @@ private fun SwipeActions(open: Float, modifier: Modifier, onShare: (androidx.com
     }
 }
 
-/** Artworks to share, and the swiped Share button's place (window pixels); none from Select. */
-private class GalleryShare(val artworks: List<Artwork>, val from: androidx.compose.ui.geometry.Rect?)
+/**
+ * Artworks to share, the swiped Share button's place (window pixels; none from Select), and what
+ * several of them shared as one PDF are named.
+ */
+private class GalleryShare(val artworks: List<Artwork>, val from: androidx.compose.ui.geometry.Rect?, val group: String)
 
 private val FormatsWidth = 260.dp
 private val FormatsTitleHeight = 55.dp
@@ -1262,6 +1312,7 @@ private fun StackCell(
     wash: Boolean,
     modifier: Modifier,
     onPlaced: (androidx.compose.ui.geometry.Rect) -> Unit,
+    onSwipe: (Float, Float) -> Unit,
     onDrag: (Offset) -> Unit,
     onRename: () -> Unit,
     onOpen: () -> Unit,
@@ -1276,19 +1327,25 @@ private fun StackCell(
             onPlaced(it.boundsInWindow())
             cellAt[0] = it.positionInWindow()
         }.pointerInput(s) {
-            // a tap opens it (on its name, renames it); held and moved, it is dragged ([onDrag], with
-            // the finger's place in the window)
+            // a tap opens it (on its name, renames it); moved across, it is swiped ([onSwipe], how
+            // far across and down); held and moved, it is dragged ([onDrag], with the finger's
+            // place in the window)
             awaitEachGesture {
                 val down = awaitFirstDown()
                 var up: androidx.compose.ui.input.pointer.PointerInputChange? = null
-                var moved = false
+                var moved: Offset? = null
                 val held = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
-                    while (up == null && !moved) {
+                    while (up == null && moved == null) {
                         val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
-                        if (!c.pressed) up = c else if ((c.position - down.position).getDistance() > viewConfiguration.touchSlop) moved = true
+                        val d = c.position - down.position
+                        if (!c.pressed) up = c else if (d.getDistance() > viewConfiguration.touchSlop) moved = d
                     }
                     false
                 } ?: true
+                moved?.let { d ->
+                    onSwipe(d.x, d.y)
+                    return@awaitEachGesture
+                }
                 if (!held) {
                     up?.let {
                         it.consume()
@@ -1576,7 +1633,7 @@ private fun Thumbnail(a: Artwork, version: Int, chosen: Boolean? = null, wash: B
         if (decoded != null) ThumbnailsShown.put(a.thumbnail.path, decoded)
         value = decoded ?: value
     }
-    val ratio = if (a.width > 0 && a.height > 0) a.width.toFloat() / a.height else 0.75f
+    val ratio = a.ratio
     val cell = LocalCell.current
     val tall = ratio <= cell.width / cell.thumb
     Box(

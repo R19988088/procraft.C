@@ -545,7 +545,15 @@ impl CanvasSession {
             pressure_curve: if pts.len() >= 2 { Curve::new(&pts) } else { Curve::linear() },
             speed_distance: st.input.speed_distance,
             tip_attached,
+            tilt_known: st.input.tilt_known,
         };
+    }
+
+    /// Whether the pen drawing the strokes to come says how it leans (as each platform's input
+    /// tells it). One that doesn't draws as a finger does: no lean at all, the tilt switches of
+    /// its brushes out of the way.
+    pub fn set_pen_tilt_known(&self, known: bool) {
+        self.shared.lock().input.tilt_known = known;
     }
 
     /// How far input must move for the speed dynamics to count it as fast, as a part of the usual
@@ -1199,11 +1207,13 @@ mod naming {
     #[test]
     fn a_dual_brush_is_named_whole_whichever_part_shows() {
         let s = CanvasSession::new(64, 64);
-        assert!(s.select_brush(1, 0) && s.combine_brushes(1, 0, 1));
+        // in the set of ours from before, whose brushes are no dual brushes
+        let l = s.brush_library().len() as u32 - 1;
+        assert!(s.select_brush(l, 0) && s.combine_brushes(l, 0, 1));
         s.studio_begin();
         s.studio_show_second(true);
         assert_eq!(s.set_studio_name("Pair".to_owned()), "Pair");
         s.studio_end(true);
-        assert_eq!(name(&s, 1, 0), "Pair");
+        assert_eq!(name(&s, l as usize, 0), "Pair");
     }
 }

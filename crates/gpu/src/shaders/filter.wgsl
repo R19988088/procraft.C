@@ -415,6 +415,29 @@ fn fs_liquified(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     return kept(i, textureSampleLevel(src, smp, (pos.xy + offset) / fu.size.xy, 0.0));
 }
 
+// liquify on a GPU that can't draw into floats, its field kept as integers holding each float's
+// bits (binding 2 in place of the table)
+@group(2) @binding(2) var table_bits: texture_2d<u32>;
+
+fn table_bits_at(q: vec2<i32>) -> vec2<f32> {
+    return bitcast<vec2<f32>>(textureLoad(table_bits, q, 0).xy);
+}
+
+@fragment
+fn fs_liquified_bits(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let i = vec2<i32>(pos.xy);
+    let last = vec2<i32>(textureDimensions(table_bits)) - 1;
+    let at = pos.xy * fu.a.yz - 0.5;
+    let below = floor(at);
+    let t = at - below;
+    let a = clamp(vec2<i32>(below), vec2<i32>(0), last);
+    let b = clamp(vec2<i32>(below) + 1, vec2<i32>(0), last);
+    let top = mix(table_bits_at(a), table_bits_at(vec2<i32>(b.x, a.y)), t.x);
+    let bottom = mix(table_bits_at(vec2<i32>(a.x, b.y)), table_bits_at(b), t.x);
+    let offset = mix(top, bottom, t.y) * fu.a.x;
+    return kept(i, textureSampleLevel(src, smp, (pos.xy + offset) / fu.size.xy, 0.0));
+}
+
 // clone: the copy from a.xy (pixels) away
 @fragment
 fn fs_clone(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {

@@ -228,6 +228,8 @@ struct Tool {
     leaving: bool,
     at: (f64, f64),
     pressure: f32,
+    /// Whether it says how it leans (the tilt capability, or a tilt heard), and its last tilts.
+    tilts: bool,
     tilt: Option<(f64, f64)>,
     /// Its barrel roll, radians clockwise, for a pen that gives one.
     roll: Option<f32>,
@@ -245,7 +247,8 @@ impl Reader {
         if !t.over && !t.leaving {
             return;
         }
-        let lean = t.tilt.map_or((0.0, 0.0), |(x, y)| super::lean_of(x as f32, y as f32));
+        let lean = (t.tilts || t.tilt.is_some())
+            .then(|| t.tilt.map_or((0.0, 0.0), |(x, y)| super::lean_of(x as f32, y as f32)));
         super::keep_pose(t.id, lean, t.roll);
         super::pointer_kind(t.id, true);
         let first = if t.held.contains(&FIRST_BARREL) { FLAG_BARREL } else { 0 };
@@ -299,6 +302,7 @@ impl Dispatch<ZwpTabletToolV2, ()> for Reader {
         let Some(t) = reader.tools.get_mut(&key) else { return };
         match event {
             E::Type { tool_type: WEnum::Value(kind) } => t.eraser = kind == zwp_tablet_tool_v2::Type::Eraser,
+            E::Capability { capability: WEnum::Value(zwp_tablet_tool_v2::Capability::Tilt) } => t.tilts = true,
             E::ProximityIn { serial, surface, .. } => {
                 t.over = surface.id().as_ptr() as usize == reader.surface;
                 t.leaving = false;

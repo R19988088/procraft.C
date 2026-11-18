@@ -3168,7 +3168,30 @@ impl State {
             .with_input(self.input.clone())
             .scaled(zoom)
             .seen_at(1.0);
-        let stamps = builder.add(&window_samples(samples));
+        // a brush engine's, drawn by it (on the screen's canvas, where it gets its tips)
+        let engine = self.hooks.clone().filter(|_| brush.engine.is_some()).map(|hooks| {
+            let starting = crate::plugin_brushes::Starting {
+                colour: self.color,
+                secondary: self.secondary,
+                diameter,
+                start_diameter: brush.diameter(crate::starting_sliders_of(&brush, tool).size),
+                opacity: self.sliders(tool).opacity.clamp(0.0, 1.0),
+                tool: match tool.stroke_tool() {
+                    StrokeTool::Erase => 1,
+                    StrokeTool::Smudge => 2,
+                    _ => 0,
+                },
+                pointer: match pointer {
+                    PointerKind::Finger => 0,
+                    PointerKind::Mouse => 2,
+                    _ => 1,
+                },
+                seed,
+                under_at: None,
+                turn: 0.0,
+            };
+            (hooks, starting)
+        });
         let (Some(gpu), Some(scene)) = (self.gpu.as_ref(), self.scene.as_mut()) else { return };
         // the screen's canvas, the window's size
         let stale = scene.screen.as_ref().is_none_or(|(d, _)| (d.width(), d.height()) != size);
@@ -3203,6 +3226,14 @@ impl State {
         let Some((screen_doc, screen)) = scene.screen.as_mut() else { return };
         // the screen's canvas holds its own copies of the brush's shape and grain
         screen.use_sources(gpu, &mut style, &brush);
+        if let Some((hooks, starting)) = engine
+            && let Some(o) =
+                crate::plugin_brushes::engine_stroke(&hooks, &brush, style.tool, starting, (false, false), screen, gpu)
+        {
+            style = o.style;
+            builder = builder.with_engine(Box::new(o.first));
+        }
+        let stamps = builder.add(&window_samples(samples));
         screen.begin_stroke(screen_doc.current(), style);
         screen.add_stamps(&stamps);
         scene.bounds = bounds_of(&stamps);
@@ -5382,7 +5413,10 @@ f 1/1 2/2",
         let small = 1024 + 1 + 2 * layers;
         let (bytes, _, made) = channel_bytes(&s);
         assert_eq!(made, [true, true]);
-        assert_eq!(bytes, 2 * (side * side * 8 + small) + side * side * 8);
+        // (on a GPU that can't draw into half floats a stroke keeps more: counted for half floats)
+        if s.shared.lock().gpu.as_ref().is_some_and(procraft_gpu::Gpu::draws_half_floats) {
+            assert_eq!(bytes, 2 * (side * side * 8 + small) + side * side * 8);
+        }
         s.stroke_end(vec![sample(110.0, 100.0, 50.0)]);
         frame(&s, 200);
         assert_eq!(channel_bytes(&s).0, bytes);

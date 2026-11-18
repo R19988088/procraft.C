@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- the screen's cutouts are known from Android 9; "always" only from Android 11
+         (values-v30), and Android 10 stops on it -->
+    <style name="Theme.ProCraft" parent="Base.Theme.ProCraft">
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+</resources>

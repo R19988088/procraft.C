@@ -116,18 +116,8 @@ impl ShapeEdit {
         stroke: Option<DrawnStroke>,
     ) -> ShapeEdit {
         let first = shape.clone();
-        ShapeEdit {
-            shape,
-            first,
-            earlier: Vec::new(),
-            later: Vec::new(),
-            choices,
-            drawn,
-            along,
-            modes: Vec::new(),
-            held,
-            stroke,
-        }
+        let modes = initial_curve_modes(&shape);
+        ShapeEdit { shape, first, earlier: Vec::new(), later: Vec::new(), choices, drawn, along, modes, held, stroke }
     }
 
     /// A drag undone can be done again.
@@ -161,6 +151,8 @@ pub(crate) struct DrawnStroke {
     style: StrokeStyle,
     builder: StrokeBuilder,
     samples: Vec<Sample>,
+    /// What its randomness was seeded with: a brush engine draws it again the same.
+    seed: u32,
 }
 
 /// A shape kept, as it first snapped, or the stroke it gave way to: the canvas's undo steps once
@@ -204,6 +196,8 @@ pub(crate) struct LastStroke {
     pub(crate) samples: Vec<Sample>,
     /// Its builder as it began (a dual brush's first), for the line a shape is fitted to.
     pub(crate) line: StrokeBuilder,
+    /// What its randomness was seeded with.
+    pub(crate) seed: u32,
 }
 
 impl LastStroke {
@@ -218,7 +212,7 @@ impl LastStroke {
     /// The stroke as it can be laid again, given its input.
     fn laid_again(&self, samples: Vec<Sample>) -> Option<DrawnStroke> {
         let builder = self.fresh.clone()?;
-        Some(DrawnStroke { layer: self.layer, style: self.style, builder, samples })
+        Some(DrawnStroke { layer: self.layer, style: self.style, builder, samples, seed: self.seed })
     }
 }
 
@@ -289,11 +283,13 @@ impl State {
     fn back_to_stroke(&mut self) -> bool {
         self.flush();
         let Some(mut kept) = self.kept_shape.take().filter(|kept| self.still_stands(kept)) else { return false };
-        let guide = self.doc.stroke_guide();
         let Some(canvas) = self.canvas.as_mut() else { return false };
         canvas.undo();
         canvas.begin_stroke(kept.stroke.layer, kept.stroke.style);
-        let mut builder = kept.stroke.builder.clone();
+        // a brush engine's stroke drawn by it again, as it was
+        let mut builder = self.engine_again(kept.stroke.builder.clone(), kept.stroke.layer, kept.stroke.seed);
+        let guide = self.doc.stroke_guide();
+        let Some(canvas) = self.canvas.as_mut() else { return false };
         crate::draw_samples(canvas, &mut builder, None, &kept.stroke.samples, &guide);
         crate::close_stroke(canvas, builder, None, &guide);
         self.flush();
@@ -324,10 +320,12 @@ impl State {
     fn draw_shape(&mut self) {
         let (Some(edit), Some(old)) = (self.shape.as_ref(), self.stroke.as_ref()) else { return };
         // the outline is the path: nothing smooths it, or round its corners
-        let mut builder = StrokeBuilder::with_seed(old.brush().clone(), old.diameter(), old.pointer(), SHAPE_SEED)
+        let builder = StrokeBuilder::with_seed(old.brush().clone(), old.diameter(), old.pointer(), SHAPE_SEED)
             .scaled(self.brush_scale())
             .exact_path();
         let samples = edit.samples();
+        // a brush engine's stroke drawn by it along the shape
+        let mut builder = self.engine_again(builder, self.doc.current(), SHAPE_SEED);
         builder.add(&samples);
         let stamps = builder.finish();
         // with a symmetry guide on, its copies too, as the stroke had them and as it is kept
@@ -451,13 +449,44 @@ fn shape_number(kind: ShapeKind) -> i32 {
     }
 }
 
+/// The place in a curve's anchors' modes of its `k`th anchor: a closed curve's last is its first.
+fn mode_of(shape: &Shape, k: usize) -> usize {
+    if shape.closed_curve() && k == shape.nodes.len().saturating_sub(1) / 3 { 0 } else { k }
+}
+
+/// How a curve's anchors start, as it is fitted: broken where the controls either side turn (by
+/// some 16 degrees or more), so a drag of one leaves the other and the turn stays; smooth elsewhere.
+/// The ends and a closed curve's join start smooth.
+fn initial_curve_modes(shape: &Shape) -> Vec<Anchor> {
+    if shape.kind != ShapeKind::Curve {
+        return Vec::new();
+    }
+    let n = shape.nodes.len().saturating_sub(1) / 3 + 1;
+    (0..n)
+        .map(|k| {
+            let i = k * 3;
+            if i == 0 || i + 1 >= shape.nodes.len() {
+                return Anchor::Smooth;
+            }
+            let (Some(&point), Some(&prior), Some(&next)) =
+                (shape.nodes.get(i), shape.nodes.get(i - 1), shape.nodes.get(i + 1))
+            else {
+                return Anchor::Smooth;
+            };
+            let (incoming, outgoing) = (point - prior, next - point);
+            let lengths = incoming.length() * outgoing.length();
+            if lengths > 1e-5 && incoming.dot(outgoing) < 0.96 * lengths { Anchor::Broken } else { Anchor::Smooth }
+        })
+        .collect()
+}
+
 /// How each of a curve's anchors sits, for its handles to be drawn as.
 fn anchor_list(shape: &Shape, modes: &[Anchor]) -> Vec<QuickShapeAnchor> {
     if shape.kind != ShapeKind::Curve {
         return Vec::new();
     }
     (0..shape.nodes.len().saturating_sub(1) / 3 + 1)
-        .map(|k| match modes.get(k).copied().unwrap_or(Anchor::Smooth) {
+        .map(|k| match modes.get(mode_of(shape, k)).copied().unwrap_or(Anchor::Smooth) {
             Anchor::Smooth => QuickShapeAnchor::Smooth,
             Anchor::Broken => QuickShapeAnchor::Broken,
             Anchor::Corner => QuickShapeAnchor::Corner,
@@ -734,7 +763,7 @@ impl CanvasSession {
         edit.earlier.push(before);
         edit.later.clear();
         // fitted afresh: the anchors it had are no guide
-        edit.modes.clear();
+        edit.modes = initial_curve_modes(&edit.shape);
         st.draw_shape();
         self.shared.frame(st);
         st.shape_info()
@@ -810,7 +839,7 @@ impl CanvasSession {
         // a control of an anchor set broken moves on its own; otherwise its pair follows it
         let anchor = match index % 3 {
             1 => (index - 1) / 3,
-            2 => (index + 1) / 3,
+            2 => mode_of(&edit.shape, (index + 1) / 3),
             _ => usize::MAX,
         };
         if edit.shape.kind == ShapeKind::Curve && edit.modes.get(anchor) == Some(&Anchor::Broken) {
@@ -835,7 +864,9 @@ impl CanvasSession {
         if edit.shape.kind != ShapeKind::Curve || !at.is_multiple_of(3) || at >= edit.shape.nodes.len() {
             return None;
         }
-        let k = at / 3;
+        // a closed curve's last anchor is its first
+        let k = mode_of(&edit.shape, at / 3);
+        let at = 3 * k;
         edit.held = None;
         edit.earlier.push(edit.shape.clone());
         edit.later.clear();

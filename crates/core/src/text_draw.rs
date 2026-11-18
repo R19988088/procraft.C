@@ -361,90 +361,216 @@ fn weight_and_slant(style: &str) -> (u16, bool) {
 /// What is drawn: upper case if asked, one letter a line when vertical (a blank line between the
 /// text's own lines).
 fn shown(t: &TextInfo) -> String {
-    let text = if t.all_caps { t.text.to_uppercase() } else { t.text.clone() };
+    shown_mapped(t).0
+}
+
+/// What is drawn (see [`shown`]), and for each of its characters the character of the text it
+/// shows (a line break running it down takes the next letter's, those between the text's lines
+/// its own line break's).
+fn shown_mapped(t: &TextInfo) -> (String, Vec<usize>) {
+    let mut chars: Vec<(char, usize)> = Vec::with_capacity(t.text.len());
+    for (i, c) in t.text.chars().enumerate() {
+        if t.all_caps {
+            chars.extend(c.to_uppercase().map(|u| (u, i)));
+        } else {
+            chars.push((c, i));
+        }
+    }
     if !t.vertical {
-        return text;
+        return chars.into_iter().unzip();
     }
     use unicode_segmentation::UnicodeSegmentation;
     // each of its lines (an empty last one kept, as Android's layout keeps it) a letter a line,
     // a letter with its marks (or an emoji as joined) as one
-    text.split('\n')
-        .map(|line| line.strip_suffix('\r').unwrap_or(line).graphemes(true).collect::<Vec<_>>().join("\n"))
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    let all: String = chars.iter().map(|c| c.0).collect();
+    let source = |at: usize| chars.get(at).or(chars.last()).map_or(0, |c| c.1);
+    let (mut out, mut from) = (String::new(), Vec::new());
+    let mut at = 0usize;
+    for (n, line) in all.split('\n').enumerate() {
+        if n > 0 {
+            // the line break before it, as two
+            let s = source(at.saturating_sub(1));
+            out.push_str("\n\n");
+            from.extend([s, s]);
+        }
+        let kept = line.strip_suffix('\r').unwrap_or(line);
+        for (k, letter) in kept.graphemes(true).enumerate() {
+            if k > 0 {
+                out.push('\n');
+                from.push(source(at));
+            }
+            out.push_str(letter);
+            for _ in letter.chars() {
+                from.push(source(at));
+                at += 1;
+            }
+        }
+        // the carriage return left out, and the line break after it
+        at += line.chars().count() - kept.chars().count() + 1;
+    }
+    (out, from)
 }
 
-/// Text laid out: its lines, the box's size, how tall a line is and the font's ascent and descent
-/// in it, the font's underline (offset below the baseline and thickness), all pixels; and how
-/// the lines align.
+/// Text laid out: its lines, the box's size, how the lines align, and how each of its runs looks
+/// drawn (see [`RunLook`]).
 struct Laid {
     lines: Vec<Line>,
     width: f32,
     height: f32,
-    line_height: f32,
-    ascent: f32,
-    descent: f32,
-    underline: (f32, f32),
     align: TextAlignment,
+    looks: Vec<RunLook>,
 }
 
-/// A line as laid out: its baseline from the box's top, where its letters start and how wide they
-/// run, which of the text's own lines it is part of (a long one wraps onto several), and its
-/// glyphs (each with where its letters are in that line, in bytes).
+/// A run of text as drawn: its colour and opacity, its size, a stroke round its letters this wide
+/// (outlined), its font's ascent and descent, its underline (offset below the baseline and
+/// thickness) when underlined, and how far up its letters are raised (pixels) beside the first
+/// run's (which raises the whole box).
+struct RunLook {
+    colour: [f32; 3],
+    opacity: f32,
+    size: f32,
+    stroke: Option<f32>,
+    ascent: f32,
+    descent: f32,
+    underline: Option<(f32, f32)>,
+    raise: f32,
+}
+
+/// A line as laid out: its baseline, top and bottom from the box's top (as tall as the tallest of
+/// the fonts its letters are in), where its letters start and how wide they run, which of the
+/// text's own lines it is part of (a long one wraps onto several), and its glyphs (each with where
+/// its letters are in that line, in bytes, and its run as its metadata).
 struct Line {
     baseline: f32,
+    top: f32,
+    bottom: f32,
     start: f32,
     width: f32,
     paragraph: usize,
     glyphs: Vec<LayoutGlyph>,
 }
 
-/// Lays `t` out with fonts `f`.
+/// Lays `t` out with fonts `f`, each run in its own look.
 fn lay_out(f: &mut Fonts, t: &TextInfo) -> Laid {
-    let size = t.size.max(1.0);
+    let runs = t.each_run();
+    let first_raise = runs.first().map_or(0.0, |r| r.baseline * r.size.max(1.0));
+    let leading = t.leading * t.size.max(1.0);
+    let align = t.align;
     // no font read in yet (an app draws text before giving any): nothing to lay out, rather than
     // the layout's panic for want of a font
     if f.system.db().is_empty() {
+        let size = t.size.max(1.0);
         let (ascent, descent) = (size * 0.97, size * 0.24);
-        return Laid {
-            lines: Vec::new(),
-            width: t.width.max(1.0),
-            height: ascent + descent,
-            line_height: ascent + descent,
-            ascent,
-            descent,
-            underline: (size * 0.1, 1.0),
-            align: t.align,
-        };
+        let looks = runs
+            .iter()
+            .map(|r| RunLook {
+                colour: r.color,
+                opacity: r.opacity,
+                size: r.size.max(1.0),
+                stroke: None,
+                ascent,
+                descent,
+                underline: None,
+                raise: 0.0,
+            })
+            .collect();
+        return Laid { lines: Vec::new(), width: t.width.max(1.0), height: ascent + descent, align, looks };
     }
-    let family = family_name(f, &t.font);
-    let (weight, italic) = weight_and_slant(&t.style);
-    let mut attrs = Attrs::new()
-        .family(Family::Name(&family))
-        .weight(Weight(weight))
-        .style(if italic { Style::Italic } else { Style::Normal })
-        .letter_spacing(t.tracking + t.kerning);
-    // the small capitals family: lower case as small capitals where the font has them (a
-    // computer's stand-ins for Android's small-capitals face do)
-    if t.font == "sans-serif-smallcaps" {
-        let mut features = cosmic_text::FontFeatures::new();
-        features.enable(cosmic_text::FeatureTag::SMALL_CAPS);
-        attrs = attrs.font_features(features);
+    // each run's family, weight and slant, and how it looks drawn
+    let faces: Vec<(String, u16, bool)> = runs
+        .iter()
+        .map(|r| {
+            let (weight, italic) = weight_and_slant(&r.style);
+            (family_name(f, &r.font), weight, italic)
+        })
+        .collect();
+    let looks: Vec<RunLook> = runs
+        .iter()
+        .zip(&faces)
+        .map(|(r, (family, weight, italic))| {
+            let size = r.size.max(1.0);
+            // the font's own ascent and descent, as a line's height before the leading
+            let (ascent, descent, underline) = font_metrics(f, family, *weight, *italic, size);
+            RunLook {
+                colour: r.color.map(|c| c.clamp(0.0, 1.0)),
+                opacity: r.opacity.clamp(0.0, 1.0),
+                size,
+                stroke: r.outline.then(|| (size * OUTLINE).max(1.0)),
+                ascent,
+                descent,
+                underline: r.underline.then_some(underline),
+                raise: r.baseline * size - first_raise,
+            }
+        })
+        .collect();
+    let attrs: Vec<Attrs> = runs
+        .iter()
+        .zip(&faces)
+        .zip(&looks)
+        .enumerate()
+        .map(|(i, ((r, (family, weight, italic)), look))| {
+            let mut attrs = Attrs::new()
+                .family(Family::Name(family))
+                .weight(Weight(*weight))
+                .style(if *italic { Style::Italic } else { Style::Normal })
+                .letter_spacing(r.tracking + r.kerning)
+                .metrics(Metrics::new(look.size, (look.ascent + look.descent).max(1.0)))
+                .metadata(i);
+            // the small capitals family: lower case as small capitals where the font has them (a
+            // computer's stand-ins for Android's small-capitals face do)
+            if r.font == "sans-serif-smallcaps" {
+                let mut features = cosmic_text::FontFeatures::new();
+                features.enable(cosmic_text::FeatureTag::SMALL_CAPS);
+                attrs = attrs.font_features(features);
+            }
+            attrs
+        })
+        .collect();
+    let Some(first) = attrs.first() else {
+        return Laid { lines: Vec::new(), width: t.width.max(1.0), height: 1.0, align, looks };
+    };
+    let first_look = looks.first().map_or((t.size.max(1.0), 0.0, 0.0), |l| (l.size, l.ascent, l.descent));
+    // the shown text in stretches of one run each
+    let (text, sources) = shown_mapped(t);
+    let run_of: Vec<usize> =
+        runs.iter().enumerate().flat_map(|(i, r)| std::iter::repeat_n(i, r.len as usize)).collect();
+    let run_at = |source: usize| run_of.get(source).copied().unwrap_or(0).min(attrs.len().saturating_sub(1));
+    let mut spans: Vec<(std::ops::Range<usize>, usize)> = Vec::new();
+    for ((at, c), source) in text.char_indices().zip(&sources) {
+        let run = run_at(*source);
+        match spans.last_mut() {
+            Some((range, last)) if *last == run => range.end = at + c.len_utf8(),
+            _ => spans.push((at..at + c.len_utf8(), run)),
+        }
     }
-    // the font's own ascent and descent, as a line's height before the leading
-    let (ascent, descent, underline) = font_metrics(f, &family, weight, italic, size);
-    let line_height = (ascent + descent + t.leading * size).max(1.0);
-    let align = match t.align {
+    // a line with no letters is as tall as the run of the line break before it
+    let breaks: Vec<usize> = std::iter::once(0)
+        .chain(text.chars().zip(&sources).filter(|(c, _)| *c == '\n').map(|(_, s)| run_at(*s)))
+        .collect();
+    let aligned = match align {
         TextAlignment::Left => Align::Left,
         TextAlignment::Center => Align::Center,
         TextAlignment::Right => Align::Right,
         TextAlignment::Justify => Align::Justified,
     };
-    let text = shown(t);
-    let mut buffer = Buffer::new(&mut f.system, Metrics::new(size, line_height));
+    let line_height = (first_look.1 + first_look.2).max(1.0);
+    let mut buffer = Buffer::new(&mut f.system, Metrics::new(first_look.0, line_height));
     // without a width of its own, it is as wide as its longest line
     buffer.set_size(None, None);
-    buffer.set_text(&text, &attrs, Shaping::Advanced, Some(align));
+    let pieces = spans.iter().filter_map(|(range, run)| Some((text.get(range.clone())?, attrs.get(*run)?.clone())));
+    buffer.set_rich_text(pieces, first, Shaping::Advanced, Some(aligned));
+    // a line break at the end starts a line, empty (as Android's layout has it), in the break's run
+    if text.ends_with(['\n', '\r', '\u{85}', '\u{2029}']) {
+        let run = sources.last().map_or(0, |s| run_at(*s));
+        let mut line = cosmic_text::BufferLine::new(
+            "",
+            cosmic_text::LineEnding::None,
+            cosmic_text::AttrsList::new(attrs.get(run).unwrap_or(first)),
+            Shaping::Advanced,
+        );
+        line.set_align(Some(aligned));
+        buffer.lines.push(line);
+    }
     buffer.shape_until_scroll(&mut f.system, false);
     let natural = buffer.layout_runs().map(|r| r.line_w).fold(0.0f32, f32::max).ceil().max(1.0);
     let width = if t.width > 0.0 { t.width } else { natural };
@@ -452,30 +578,47 @@ fn lay_out(f: &mut Fonts, t: &TextInfo) -> Laid {
     buffer.shape_until_scroll(&mut f.system, false);
     // the letter spacing half before each letter and half after, as Android's layout spaces them
     // (the layout here puts it all after)
-    let half = (t.tracking + t.kerning) * size / 2.0;
-    let lines: Vec<Line> = buffer
-        .layout_runs()
-        .enumerate()
-        .map(|(i, run)| Line {
-            baseline: ascent + line_height * i as f32,
-            start: run.glyphs.first().map_or(0.0, |g| g.x + half),
+    let half = |g: &LayoutGlyph| runs.get(g.metadata).map_or(0.0, |r| (r.tracking + r.kerning) * r.size / 2.0);
+    let mut lines: Vec<Line> = Vec::new();
+    for run in buffer.layout_runs() {
+        let (ascent, descent) = if run.glyphs.is_empty() {
+            breaks
+                .get(run.line_i)
+                .and_then(|r| looks.get(*r))
+                .map_or((first_look.1, first_look.2), |l| (l.ascent, l.descent))
+        } else {
+            run.glyphs
+                .iter()
+                .filter_map(|g| looks.get(g.metadata))
+                .fold((0.0f32, 0.0f32), |(a, d), l| (a.max(l.ascent), d.max(l.descent)))
+        };
+        // as Android's layout: every line its ascent and descent, the leading between lines only
+        // (the last line takes none, more or less)
+        let baseline = match lines.last() {
+            Some(last) => last.baseline + (last.bottom - last.baseline + leading + ascent).max(1.0),
+            None => ascent,
+        };
+        let glyphs: Vec<LayoutGlyph> = run
+            .glyphs
+            .iter()
+            .map(|g| {
+                let mut g = g.clone();
+                g.x += half(&g);
+                g
+            })
+            .collect();
+        lines.push(Line {
+            baseline,
+            top: baseline - ascent,
+            bottom: baseline + descent,
+            start: glyphs.first().map_or(0.0, |g| g.x),
             width: run.line_w,
             paragraph: run.line_i,
-            glyphs: run
-                .glyphs
-                .iter()
-                .map(|g| {
-                    let mut g = g.clone();
-                    g.x += half;
-                    g
-                })
-                .collect(),
-        })
-        .collect();
-    // as Android's layout: every line its ascent and descent, the leading between lines only (the
-    // last line takes none, more or less)
-    let height = (line_height * lines.len().max(1) as f32 - t.leading * size).max(1.0);
-    Laid { lines, width, height, line_height, ascent, descent, underline, align: t.align }
+            glyphs,
+        });
+    }
+    let height = lines.last().map_or(first_look.1 + first_look.2, |l| l.bottom).max(1.0);
+    Laid { lines, width, height, align, looks }
 }
 
 /// The font `family` (`weight`, `italic`) at `size`: its ascent, descent and underline (offset
@@ -571,7 +714,7 @@ fn glyph_image(
 pub(crate) fn text_reach(info: &TextInfo) -> procraft_engine::geom::IRect {
     let laid = lay_out(&mut fonts(), info);
     let (left, top) = (info.x, info.y - info.baseline * info.size);
-    let margin = info.size.abs() + 4.0;
+    let margin = laid.looks.iter().map(|l| l.size).fold(info.size.abs(), f32::max) + 4.0;
     let n = |v: f32| if v.is_finite() { v.clamp(-1e9, 1e9) as i32 } else { 0 };
     let around = |x0: f32, y0: f32, x1: f32, y1: f32| {
         procraft_engine::geom::IRect::new(
@@ -585,9 +728,10 @@ pub(crate) fn text_reach(info: &TextInfo) -> procraft_engine::geom::IRect {
     for line in &laid.lines {
         let baseline = top + line.baseline;
         for glyph in &line.glyphs {
-            let at = glyph.physical((left, baseline), 1.0);
+            let Some(look) = laid.looks.get(glyph.metadata) else { continue };
+            let at = glyph.physical((left, baseline - look.raise), 1.0);
             let (x, y) = (at.x as f32, at.y as f32);
-            reach = reach.union(around(x, y - laid.ascent, x + glyph.w.max(0.0), y + laid.descent));
+            reach = reach.union(around(x, y - look.ascent, x + glyph.w.max(0.0), y + look.descent));
         }
     }
     reach
@@ -601,7 +745,7 @@ pub(crate) fn draw_text_within(info: &TextInfo, region: procraft_engine::geom::I
     let f = &mut *guard;
     let laid = lay_out(f, info);
     let (left, top) = (info.x - region.x0 as f32, info.y - info.baseline * info.size - region.y0 as f32);
-    letters(f, &laid, info, &mut out, (left, top), |_, _| true);
+    letters(f, &laid, &mut out, (left, top), |_, _| true);
     out.rgba
 }
 
@@ -614,43 +758,54 @@ pub fn draw_text(info: TextInfo, width: u32, height: u32) -> Vec<u8> {
     let f = &mut *guard;
     let laid = lay_out(f, &info);
     let (left, top) = (info.x, info.y - info.baseline * info.size);
-    letters(f, &laid, &info, &mut out, (left, top), |_, _| true);
+    letters(f, &laid, &mut out, (left, top), |_, _| true);
     out.rgba
 }
 
-/// The letters (and underline) of `t`, laid out as `laid`, drawn into `out` with the box's top
-/// left at `at`, where `inside` lets them.
-fn letters(
-    f: &mut Fonts,
-    laid: &Laid,
-    t: &TextInfo,
-    out: &mut Picture,
-    at: (f32, f32),
-    inside: impl Fn(i32, i32) -> bool,
-) {
-    let colour = [t.r, t.g, t.b].map(|c| c.clamp(0.0, 1.0));
-    let opacity = t.opacity.clamp(0.0, 1.0);
-    let stroke = t.outline.then(|| (t.size * OUTLINE).max(1.0));
+/// The letters (and underlines) laid out as `laid`, each in its run's look, drawn into `out` with
+/// the box's top left at `at`, where `inside` lets them.
+fn letters(f: &mut Fonts, laid: &Laid, out: &mut Picture, at: (f32, f32), inside: impl Fn(i32, i32) -> bool) {
     for line in &laid.lines {
         let y = at.1 + line.baseline;
         for glyph in &line.glyphs {
-            let Some((image, x0, y0)) = glyph_image(f, glyph, at.0, y, stroke) else { continue };
+            let Some(look) = laid.looks.get(glyph.metadata) else { continue };
+            let Some((image, x0, y0)) = glyph_image(f, glyph, at.0, y - look.raise, look.stroke) else { continue };
             each_pixel(&image, x0, y0, |x, y, c| {
                 if inside(x, y) {
-                    out.over(x, y, colour, c * opacity);
+                    out.over(x, y, look.colour, c * look.opacity);
                 }
             });
         }
-        // the underline under the whole line
-        if t.underline && line.width > 0.0 {
-            let (offset, thickness) = laid.underline;
-            let (x0, x1) = ((at.0 + line.start).floor() as i32, (at.0 + line.start + line.width).ceil() as i32);
-            let (y0, y1) =
-                ((y + offset).round() as i32, (y + offset + thickness).round().max((y + offset).round() + 1.0) as i32);
+        // under each stretch of the line's letters in an underlined run (no further than the
+        // line's letters run), each pixel once
+        let mut stretches: Vec<(f32, f32, usize)> = Vec::new();
+        for g in &line.glyphs {
+            if laid.looks.get(g.metadata).is_none_or(|l| l.underline.is_none()) {
+                continue;
+            }
+            match stretches.last_mut() {
+                Some((_, x1, run)) if *run == g.metadata => *x1 = x1.max(g.x + g.w),
+                _ => stretches.push((g.x, g.x + g.w, g.metadata)),
+            }
+        }
+        let mut drawn_to = i32::MIN;
+        for (sx0, sx1, run) in stretches {
+            let Some((look, (offset, thickness))) = laid.looks.get(run).and_then(|l| Some((l, l.underline?))) else {
+                continue;
+            };
+            let sx1 = sx1.min(line.start + line.width);
+            let x0 = ((at.0 + sx0).floor() as i32).max(drawn_to);
+            let x1 = (at.0 + sx1).ceil() as i32;
+            drawn_to = drawn_to.max(x1);
+            let base = y - look.raise;
+            let (y0, y1) = (
+                (base + offset).round() as i32,
+                (base + offset + thickness).round().max((base + offset).round() + 1.0) as i32,
+            );
             for yy in y0..y1 {
                 for xx in x0..x1 {
                     if inside(xx, yy) {
-                        out.over(xx, yy, colour, opacity);
+                        out.over(xx, yy, look.colour, look.opacity);
                     }
                 }
             }
@@ -732,8 +887,9 @@ pub fn text_caret(info: TextInfo, index: u32) -> Vec<f32> {
     let laid = lay_out(&mut fonts(), &info);
     let (paragraph, offset) = place_of(&shown(&info), shown_index(&info, index as usize));
     let Some((line, x)) = caret_in(&laid, paragraph, offset) else { return Vec::new() };
-    let top = info.y - info.baseline * info.size + laid.line_height * line as f32;
-    vec![info.x + x, top, top + laid.ascent + laid.descent]
+    let Some(line) = laid.lines.get(line) else { return Vec::new() };
+    let top = info.y - info.baseline * info.size;
+    vec![info.x + x, top + line.top, top + line.bottom]
 }
 
 /// How wide the ring round chosen letters is, as a fraction of the text's size.
@@ -769,16 +925,20 @@ pub fn draw_chosen_text(info: TextInfo, start: u32, end: u32, ring: u32) -> Opti
         let before_end = paragraph < to.0 || (paragraph == to.0 && g.start < to.1);
         after_start && before_end
     };
-    // each line's chosen stretch, from its line's top to its bottom (box pixels)
+    // each line's chosen stretch, from its line's top to its bottom (box pixels), and as far as
+    // letters raised or lowered go
     let rects: Vec<[f32; 4]> = laid
         .lines
         .iter()
-        .enumerate()
-        .filter_map(|(i, line)| {
+        .filter_map(|line| {
             let picked = line.glyphs.iter().filter(|g| chosen(line.paragraph, g));
-            let (x0, x1) = picked.fold((f32::MAX, f32::MIN), |(a, b), g| (a.min(g.x), b.max(g.x + g.w)));
-            let top = laid.line_height * i as f32;
-            (x0 < x1).then_some([x0, top, x1, top + laid.ascent + laid.descent])
+            let span = picked.fold([f32::MAX, line.top, f32::MIN, line.bottom], |r, g| {
+                let (raise, ascent, descent) =
+                    laid.looks.get(g.metadata).map_or((0.0, 0.0, 0.0), |l| (l.raise, l.ascent, l.descent));
+                let base = line.baseline - raise;
+                [r[0].min(g.x), r[1].min(base - ascent), r[2].max(g.x + g.w), r[3].max(base + descent)]
+            });
+            (span[0] < span[2]).then_some(span)
         })
         .collect();
     let bounds = rects.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, r| {
@@ -799,10 +959,12 @@ pub fn draw_chosen_text(info: TextInfo, start: u32, end: u32, ring: u32) -> Opti
     };
     let ring_colour = [(ring >> 16) & 255, (ring >> 8) & 255, ring & 255].map(|c| c as f32 / 255.0);
     let ring_alpha = ((ring >> 24) & 255) as f32 / 255.0;
-    let width = (info.size * CHOSEN_RING).max(1.0);
     for line in &laid.lines {
         for glyph in line.glyphs.iter().filter(|g| chosen(line.paragraph, g)) {
-            let Some((image, x0, y0)) = glyph_image(f, glyph, ox, oy + line.baseline, Some(width)) else { continue };
+            let Some(look) = laid.looks.get(glyph.metadata) else { continue };
+            let width = (look.size * CHOSEN_RING).max(1.0);
+            let baseline = oy + line.baseline - look.raise;
+            let Some((image, x0, y0)) = glyph_image(f, glyph, ox, baseline, Some(width)) else { continue };
             each_pixel(&image, x0, y0, |px, py, c| {
                 if inside(px, py) {
                     out.over(px, py, ring_colour, c * ring_alpha);
@@ -811,7 +973,7 @@ pub fn draw_chosen_text(info: TextInfo, start: u32, end: u32, ring: u32) -> Opti
         }
     }
     // the letters again over their ring
-    letters(f, &laid, &info, &mut out, (ox, oy), inside);
+    letters(f, &laid, &mut out, (ox, oy), inside);
     Some(TextPicture { x, y, width: w as u32, height: h as u32, rgba: out.rgba })
 }
 
@@ -934,6 +1096,7 @@ mod tests {
             x: 0.0,
             y: 0.0,
             width,
+            runs: Vec::new(),
         }
     }
 
@@ -967,5 +1130,40 @@ mod tests {
         assert!((b[3] - 2.0 * one[3]).abs() < 1.0, "{} for a line {}", b[3], one[3]);
         // narrower than a letter, a letter a line
         assert_eq!(lines(&text("Text", 5.0)), ["T", "e", "x", "t"]);
+    }
+
+    #[test]
+    fn each_run_draws_in_its_own_colour_and_raise() {
+        use procraft_engine::document::TextRun;
+        inter();
+        let base = text("HHHH", 0.0);
+        let plain = base.each_run().remove(0);
+        let red = TextRun { len: 2, color: [1.0, 0.0, 0.0], ..plain.clone() };
+        let blue = TextRun { len: 2, color: [0.0, 0.0, 1.0], baseline: 0.5, ..plain };
+        let info = TextInfo { y: 30.0, runs: [red, blue].iter().map(crate::TextRunInfo::from).collect(), ..base };
+        let b = crate::text_box(info.clone());
+        let (w, h) = (b[2].ceil() as u32, (b[1] + b[3] + 10.0).ceil() as u32);
+        let px = crate::draw_text(info, w, h);
+        // each half's ink: its colour, and its top row
+        let half = |left: bool| {
+            let (mut colours, mut top) = (std::collections::BTreeSet::new(), u32::MAX);
+            for y in 0..h {
+                for x in 0..w {
+                    let at = ((y * w + x) * 4) as usize;
+                    let p = &px[at..at + 4];
+                    if p[3] == 255 && (x < w / 2) == left {
+                        colours.insert((p[0], p[1], p[2]));
+                        top = top.min(y);
+                    }
+                }
+            }
+            (colours, top)
+        };
+        let (reds, red_top) = half(true);
+        let (blues, blue_top) = half(false);
+        assert_eq!(reds.into_iter().collect::<Vec<_>>(), [(255, 0, 0)]);
+        assert_eq!(blues.into_iter().collect::<Vec<_>>(), [(0, 0, 255)]);
+        // raised half the size (40): 20 pixels up
+        assert!((red_top as i32 - blue_top as i32 - 20).abs() <= 1, "{red_top} {blue_top}");
     }
 }

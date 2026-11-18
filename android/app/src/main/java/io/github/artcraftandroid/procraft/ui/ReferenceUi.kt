@@ -83,9 +83,10 @@ private const val GlassSide = 24
 @Composable
 fun BoxScope.ReferenceWindow(vm: CanvasViewModel) {
     // it fades in where it is, and out when closed; over the whole screen, since the fade draws
-    // into a buffer its own size and the window sits away from the corner
+    // into a buffer its own size and the window sits away from the corner. Crop and Resize puts it
+    // away while it is open, and it comes back after
     androidx.compose.animation.AnimatedVisibility(
-        vm.referenceOn,
+        vm.referenceOn && vm.cropRect == null,
         Modifier.matchParentSize(),
         enter = androidx.compose.animation.fadeIn(Motion.referenceFade()),
         exit = androidx.compose.animation.fadeOut(Motion.referenceFade()),
@@ -138,7 +139,9 @@ private fun ReferenceWindowContent(vm: CanvasViewModel) {
             // where the picture's area is, read when a finger picks (kept as the layout itself, so a
             // window dragged since is never read where it was)
             val area = remember { arrayOfNulls<androidx.compose.ui.layout.LayoutCoordinates>(1) }
-            val toScreen = { p: Offset -> area[0]?.takeIf { it.isAttached }?.localToRoot(p) ?: p }
+            // (the loupe's place in the interface: in the window, less what it keeps clear of)
+            val corner = LocalClearance.current.corner
+            val toScreen = { p: Offset -> area[0]?.takeIf { it.isAttached }?.localToRoot(p)?.minus(corner) ?: p }
             Box(
                 Modifier.fillMaxSize().clipToBounds()
                     .onGloballyPositioned { area[0] = it }

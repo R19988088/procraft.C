@@ -260,11 +260,13 @@ fun ColorPanel(vm: CanvasViewModel, arrowX: Dp, screenHeight: Dp, modifier: Modi
     val m = remember(c, vm.colourModel, place) { ModelColor(c, vm.colourModel, place) }
     // a swatch dragged out and let go over the panel itself fills nothing
     if (!background) androidx.compose.runtime.DisposableEffect(Unit) { onDispose { vm.dropAvoid = null } }
+    // (on the canvas: in the window, less what the interface keeps clear of)
+    val corner = LocalClearance.current.corner
     // dragged out by its grabber, it is not seen (nor its blur) until let go, the window floating
     val undocking = !background && vm.colorsUndocking
     val look = LocalPanelLook.current
     ProvidePanelLook(if (undocking) PanelLook(0f, look.scale, look.pivot) else look) {
-    Popover(PanelWidth, arrowX, (if (background) modifier else modifier.onGloballyPositioned { vm.dropAvoid = it.boundsInRoot() }).heightIn(max = screenHeight - Pc.BarHeight - 25.dp).alpha(if (undocking) 0f else 1f)) {
+    Popover(PanelWidth, arrowX, (if (background) modifier else modifier.onGloballyPositioned { vm.dropAvoid = it.boundsInRoot().translate(-corner) }).heightIn(max = screenHeight - Pc.BarHeight - 25.dp).alpha(if (undocking) 0f else 1f)) {
         Box {
             if (background) {
                 PanelHeader("Background", start = 20.dp, end = 12.dp, height = headerHeight, chevron = false) {
@@ -335,10 +337,15 @@ private val FloatingField = Color.White.copy(alpha = 0.06f)
 private fun UndockHandle(vm: CanvasViewModel, modifier: Modifier) {
     var origin by remember { mutableStateOf(Offset.Zero) }
     val density = LocalDensity.current
+    // where it is in the interface: in the window, less what the interface keeps clear of
+    val corner = LocalClearance.current.corner
     Box(
-        modifier.size(150.dp, 30.dp).onGloballyPositioned { origin = it.positionInRoot() }.pointerInput(vm) {
+        modifier.size(150.dp, 30.dp).onGloballyPositioned { origin = it.positionInRoot() - corner }.pointerInput(vm) {
             var total = Offset.Zero
-            val grab = with(density) { Offset(FloatingGrab.x.toPx(), FloatingGrab.y.toPx()) }
+            // (the window's grabber under the finger, at the size the window shows: this panel's
+            // density undone, the floating windows' taken)
+            val k = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.FLOATING) / Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.PANELS)
+            val grab = with(density) { Offset(FloatingGrab.x.toPx(), FloatingGrab.y.toPx()) * k }
             fun letGo() {
                 if (vm.colorsUndocking) {
                     vm.colorsUndocking = false
@@ -364,7 +371,9 @@ private fun UndockHandle(vm: CanvasViewModel, modifier: Modifier) {
 /**
  * The colour panel floating: a window of its own, 260 wide, moved by its grabber and closed by its
  * Close (the colour button then opens the panel again). The same colour and mode as the panel; no
- * swatches, history or palette under the pickers, the modes as icons under them.
+ * swatches, history or palette under the pickers, the modes as icons under them. A plugin may show
+ * it smaller than the rest of the interface ([Pc.floatingScale]), or as Classic's picker alone
+ * ([Pc.floatingPickerOnly]).
  */
 @Composable
 fun FloatingColors(vm: CanvasViewModel, maxWidth: Dp, maxHeight: Dp) {
@@ -372,15 +381,20 @@ fun FloatingColors(vm: CanvasViewModel, maxWidth: Dp, maxHeight: Dp) {
     val c: ColorPick = remember(vm) { BrushColor(vm) }
     // the disc and Classic in the panel's colour model (Value stays HSB or RGB, as its switch picks)
     val m = remember(c, vm.colourModel) { ModelColor(c, vm.colourModel, vm.colourPlace) }
-    val density = LocalDensity.current
+    val k = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.FLOATING)
+    if (Pc.floatingPickerOnly) {
+        FloatingPicker(vm, c, m, maxWidth, maxHeight, at)
+        return
+    }
     val height = if (vm.colorMode == ColorMode.DISC) 351.dp else 390.dp
-    // kept on the screen
-    val x = with(density) { at.x.toDp() }.coerceIn(0.dp, (maxWidth - FloatingWidth).coerceAtLeast(0.dp))
-    val y = with(density) { at.y.toDp() }.coerceIn(0.dp, (maxHeight - height).coerceAtLeast(0.dp))
+    // kept on the screen, and clear of the side bar as the panels are
+    val (x, y) = floatingPlace(vm, at, FloatingWidth * k, height * k, maxWidth, maxHeight)
+    // all of it drawn at the floating windows' size, placed in the window's pixels
+    PartScaled(io.github.artcraftandroid.procraft.core.InterfacePart.FLOATING) {
     Popover(
         FloatingWidth,
         0.dp,
-        Modifier.offset(x, y).height(height).pointerInput(Unit) {
+        Modifier.offset { androidx.compose.ui.unit.IntOffset(x, y) }.height(height).pointerInput(Unit) {
             // the canvas under it takes no touch (a move stays unconsumed: the grabber's drag gives up
             // on one consumed before it has gone far enough)
             awaitEachGesture { awaitFirstDown().consume() }
@@ -425,6 +439,61 @@ fun FloatingColors(vm: CanvasViewModel, maxWidth: Dp, maxHeight: Dp) {
             }
         }
         CompactTabs(vm.colorMode) { vm.colorMode = it }
+    }
+    }
+}
+
+/**
+ * Where the floating window [width] × [height] (as shown) sits, in the window's pixels, for [at]: kept on the screen,
+ * and clear of the side bar as the panels are.
+ */
+@Composable
+private fun floatingPlace(vm: CanvasViewModel, at: Offset, width: Dp, height: Dp, maxWidth: Dp, maxHeight: Dp): Pair<Int, Int> {
+    val density = LocalDensity.current
+    val clear = if (vm.showSideBar) Pc.sideBarShown + Pc.PopoverGap else 0.dp
+    val least = if (vm.rightHanded) 0.dp else clear
+    val most = (maxWidth - width - if (vm.rightHanded) clear else 0.dp).coerceAtLeast(least)
+    val x = with(density) { at.x.toDp() }.coerceIn(least, most)
+    val y = with(density) { at.y.toDp() }.coerceIn(0.dp, (maxHeight - height).coerceAtLeast(0.dp))
+    return with(density) { x.roundToPx() to y.roundToPx() }
+}
+
+/** The floating window's top as Classic's picker alone has it: its grabber, and the picker under it. */
+private val FloatingPickerTop = 30.dp
+
+/**
+ * The floating window as Classic's picker alone, as a plugin asks: its grabber and Close over the picker (the hue
+ * slider under it, unless the picker has the hue on a ring of its own), nothing else; at the plugin's scale.
+ */
+@Composable
+private fun FloatingPicker(vm: CanvasViewModel, c: ColorPick, m: ModelColor, maxWidth: Dp, maxHeight: Dp, at: Offset) {
+    val k = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.FLOATING)
+    val ringed = vm.colourModel == ColourModel.HSB && Pc.picker?.huePoint?.invoke(c.hue) != null
+    val height = FloatingPickerTop + 248.dp + (if (ringed) 0.dp else 40.dp) + 6.dp
+    val (x, y) = floatingPlace(vm, at, FloatingWidth * k, height * k, maxWidth, maxHeight)
+    PartScaled(io.github.artcraftandroid.procraft.core.InterfacePart.FLOATING) {
+        Popover(
+            FloatingWidth,
+            0.dp,
+            Modifier.offset { androidx.compose.ui.unit.IntOffset(x, y) }.height(height).pointerInput(Unit) {
+                awaitEachGesture { awaitFirstDown().consume() }
+            },
+            side = ArrowSide.NONE,
+        ) {
+            Box(Modifier.fillMaxWidth().height(height)) {
+                Box(Modifier.align(Alignment.TopCenter).padding(top = 5.5.dp).size(40.dp, 4.dp).clip(CircleShape).background(Pc.Grabber))
+                Box(
+                    Modifier.align(Alignment.TopCenter).size(150.dp, FloatingPickerTop).pointerInput(vm) {
+                        detectDragGestures { change, delta ->
+                            change.consume()
+                            vm.floatingColorsAt = (vm.floatingColorsAt ?: Offset.Zero) + delta
+                        }
+                    },
+                )
+                Column(Modifier.padding(top = FloatingPickerTop)) { Classic(c, compact = true, m = m) }
+                FloatingClose(Modifier.align(Alignment.TopEnd).padding(top = 0.dp, end = 0.dp)) { vm.floatingColorsAt = null }
+            }
+        }
     }
 }
 
@@ -580,16 +649,18 @@ private fun Classic(c: ColorPick, compact: Boolean = false, square: Dp = 344.dp,
         return
     }
     SaturationBrightness(c, compact, square)
+    // a picker plugin's with the hue on a ring of its own takes the hue slider's place
+    val ringed = Pc.picker?.huePoint?.invoke(c.hue) != null
     if (compact) {
         // the hue only, 240 wide under the 248 square
-        Box(Modifier.padding(start = 10.dp, end = 10.dp).height(40.dp)) {
+        if (!ringed) Box(Modifier.padding(start = 10.dp, end = 10.dp).height(40.dp)) {
             SliderRow(huePosition(HueControl.SLIDER, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }) { c.setHsv(hueAt(HueControl.SLIDER, it), c.saturation, c.brightness) }
         }
         return
     }
     Column(Modifier.padding(horizontal = 20.dp)) {
         val pure = hsvColor(c.hue, 1f, 1f)
-        SliderRow(huePosition(HueControl.SLIDER, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }) { c.setHsv(hueAt(HueControl.SLIDER, it), c.saturation, c.brightness) }
+        if (!ringed) SliderRow(huePosition(HueControl.SLIDER, c.hue), SliderHues.map { hsvColor(it / 360f, 1f, 1f) }) { c.setHsv(hueAt(HueControl.SLIDER, it), c.saturation, c.brightness) }
         SliderRow(c.saturation, listOf(Pc.SaturationGrey, pure)) { c.setHsv(c.hue, it, c.brightness) }
         SliderRow(c.brightness, BrightnessTrack) { c.setHsv(c.hue, c.saturation, it) }
     }
@@ -943,17 +1014,21 @@ private fun SaturationBrightness(c: ColorPick, compact: Boolean, height: Dp = 34
 /**
  * A plugin's picker in Classic's square, as big as fits: a picker plugin's picture, touches and knob, or else a
  * triangle (saturation and brightness between the pure hue at the right, white at the top left and black at the
- * bottom left) drawn by the core.
+ * bottom left) drawn by the core. A picker plugin's may pick the hue too, on a ring of its own: a touch that starts
+ * where it says a hue moves the hue, and the hue's knob sits where it says.
  */
 @Composable
 private fun ColourTriangle(c: ColorPick, compact: Boolean, height: Dp) {
     val hue by rememberUpdatedState(c.hue)
+    val saturation by rememberUpdatedState(c.saturation)
+    val brightness by rememberUpdatedState(c.brightness)
     val picker by rememberUpdatedState(Pc.picker)
     val current = rgbColor(c.rgb())
     val box = if (compact) 248.dp else 344.dp
     val side = if (compact) 248.dp else minOf(344.dp, height)
     val px = with(LocalDensity.current) { side.roundToPx() }
-    val picture = rememberPickerPicture(c.hue to (picker != null), px, false) { n ->
+    // (a new picker is its controls changed: its picture drawn again)
+    val picture = rememberPickerPicture(c.hue to picker, px, false) { n ->
         val drawn = picker?.let { it.picture(hue, n) ?: ByteArray(n * n * 4) }
         drawn ?: io.github.artcraftandroid.procraft.core.trianglePicture(hue, n.toUInt())
     }
@@ -961,15 +1036,37 @@ private fun ColourTriangle(c: ColorPick, compact: Boolean, height: Dp) {
         Box(
             Modifier.size(side)
                 .pointerInput(Unit) {
-                    track { x, y ->
-                        val sv = picker?.pick?.invoke(x, y) ?: io.github.artcraftandroid.procraft.core.triangleSv(x, y)
-                        c.setHsv(hue, sv[0], sv[1])
+                    awaitEachGesture {
+                        val down = awaitFirstDown()
+                        down.consume()
+                        fun share(p: Offset) = Offset(p.x / size.width, p.y / size.height)
+                        // on the picker's ring, the hue for the whole drag; else saturation and brightness
+                        val onRing = share(down.position).let { picker?.hue?.invoke(it.x, it.y) } != null
+                        fun send(p: Offset) {
+                            val at = share(p)
+                            if (onRing) {
+                                picker?.hue?.invoke(at.x, at.y)?.let { c.setHsv(it, saturation, brightness) }
+                                return
+                            }
+                            val (x, y) = at.x.coerceIn(0f, 1f) to at.y.coerceIn(0f, 1f)
+                            val sv = picker?.pick?.invoke(x, y) ?: io.github.artcraftandroid.procraft.core.triangleSv(x, y)
+                            c.setHsv(hue, sv[0], sv[1])
+                        }
+                        send(down.position)
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val ch = event.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!ch.pressed) break
+                            send(ch.position)
+                            ch.consume()
+                        }
                     }
                 }
                 .drawWithContent {
                     // read, so a new picture draws
                     picture.version
                     drawImage(picture.image, dstSize = androidx.compose.ui.unit.IntSize(size.width.roundToInt(), size.height.roundToInt()))
+                    picker?.huePoint?.invoke(c.hue)?.let { knob(Offset(it[0] * size.width, it[1] * size.height), 10.75.dp.toPx(), hsvColor(c.hue, 1f, 1f)) }
                     val at = picker?.point?.invoke(c.saturation, c.brightness)
                         ?: io.github.artcraftandroid.procraft.core.trianglePoint(c.saturation, c.brightness)
                     knob(Offset(at[0] * size.width, at[1] * size.height), 10.75.dp.toPx(), current)

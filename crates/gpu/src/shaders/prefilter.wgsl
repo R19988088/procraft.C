@@ -54,7 +54,7 @@ fn fs_prefilter(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let st = pos.xy / pf.side * 2.0 - 1.0;
     let n = normalize(face_direction(pf.face, st.x, st.y));
     if (pf.roughness <= 0.0) {
-        return vec4<f32>(textureSampleLevel(panorama, smp, panorama_at(n), 0.0).rgb, 1.0);
+        return kept(textureSampleLevel(panorama, smp, panorama_at(n), 0.0).rgb);
     }
     // a frame about the normal (the view taken along it)
     let up = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(n.y) < 0.999);
@@ -83,5 +83,19 @@ fn fs_prefilter(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
             weight += nl;
         }
     }
-    return vec4<f32>(sum / max(weight, 1e-4), 1.0);
+    return kept(sum / max(weight, 1e-4));
 }
+
+// `light` as the cube keeps it
+fn kept(light: vec3<f32>) -> vec4<f32> {
+    if (RGBM > 0.0) {
+        // in 8 bits a channel: the colour over a multiplier kept in alpha, up to RGBM times white
+        let m = ceil(clamp(max(light.r, max(light.g, light.b)) / RGBM, 1.0 / 255.0, 1.0) * 255.0) / 255.0;
+        return vec4<f32>(light / (m * RGBM), m);
+    }
+    return vec4<f32>(light, 1.0);
+}
+
+// above 0: the cube is in 8 bits a channel (on a GPU that can't draw into half floats), each
+// texel's colour over a multiplier in its alpha, this many times white at most
+override RGBM: f32 = 0.0;

@@ -145,9 +145,32 @@ pub fn mode_switch(button: ModeButton, open: Modes) -> ModeSwitch {
     }
 }
 
+/// Whether pressing `button` with the modes `open` also lets go of the selection: the Selection
+/// button, while the selection tool is open, deselects as it closes the tool; but with Color Fill
+/// on (`colour_fill`) the tool closing fills what is selected, and that lets go of it.
+#[uniffi::export]
+pub fn mode_switch_deselects(button: ModeButton, open: Modes, colour_fill: bool) -> bool {
+    button == ModeButton::Selection && open.selection && !colour_fill
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_selection_button_deselects_as_it_closes_the_selection_tool() {
+        let selecting = open(|m| m.selection = true);
+        assert!(mode_switch_deselects(ModeButton::Selection, selecting, false));
+        assert_eq!(mode_switch(ModeButton::Selection, selecting), ModeSwitch { end: selecting, goes_on: false });
+        // opening it, or leaving it by another button, keeps what is selected
+        assert!(!mode_switch_deselects(ModeButton::Selection, NONE, false));
+        assert!(!mode_switch_deselects(ModeButton::Selection, open(|m| m.transform = true), false));
+        for other in [ModeButton::Tool, ModeButton::Transform, ModeButton::Panel { colour: false }] {
+            assert!(!mode_switch_deselects(other, selecting, false));
+        }
+        // with Color Fill, the tool closing fills it, which lets go of it
+        assert!(!mode_switch_deselects(ModeButton::Selection, selecting, true));
+    }
 
     const ALL: Modes = Modes {
         quickshape: true,

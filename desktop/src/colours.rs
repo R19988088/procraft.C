@@ -280,6 +280,12 @@ pub struct Colours {
     pub floating: Option<Pos2>,
     floating_grab: Option<egui::Vec2>,
     floating_rgb: bool,
+    /// How big the floating window shows next to the rest of the interface, and whether it shows
+    /// Classic's picker alone, as plugins say; and how it is drawn onto the window (for what opens
+    /// from it).
+    floating_scale: f32,
+    floating_picker_only: bool,
+    floating_transform: egui::emath::TSTransform,
     /// The colour model's button left of the swatches, its menu, and a model chosen there (for
     /// the preferences to keep).
     model_button: Rect,
@@ -324,6 +330,9 @@ impl Default for Colours {
             floating: None,
             floating_grab: None,
             floating_rgb: false,
+            floating_scale: 1.0,
+            floating_picker_only: false,
+            floating_transform: egui::emath::TSTransform::IDENTITY,
             model_button: Rect::NOTHING,
             model_menu: crate::menu::Menu::default(),
             model_chosen: None,
@@ -369,6 +378,12 @@ impl Colours {
         changed
     }
 
+    /// Whether Classic's picker (a picker plugin's) has the hue on a ring of its own, in place of
+    /// the hue slider.
+    pub(crate) fn hue_ringed(&self) -> bool {
+        self.pickers.ringed(self.hsv[0])
+    }
+
     /// Whether Classic shows a plugin's triangle in place of its square.
     pub fn set_triangle(&mut self, on: bool) {
         self.pickers.triangle = on;
@@ -378,6 +393,13 @@ impl Colours {
     /// its.
     pub fn set_picker(&mut self, picker: Option<(Arc<Plugins>, Arc<CanvasSession>)>) {
         self.pickers.picker = picker;
+    }
+
+    /// How big the floating window shows next to the rest of the interface (1: as the rest), and
+    /// whether it shows Classic's picker alone, as the plugins on say.
+    pub fn set_floating_look(&mut self, plugins: &Plugins) {
+        self.floating_scale = plugins.interface_part_scale(procraft_core::InterfacePart::Floating);
+        self.floating_picker_only = plugins.floating_picker_only();
     }
 
     /// Classic's square in `rect`, in the colour model; whether it changed the colour.
@@ -590,7 +612,7 @@ impl Colours {
         history_shown: &mut bool,
         backdrops: &mut Vec<f32>,
     ) -> Rect {
-        let screen = ctx.content_rect();
+        let screen = panel::screen(ctx);
         let (left, arrow_x) = panel::place(ctx, PANEL_WIDTH, button.center().x);
         let top = screen.top() + pc::BAR_HEIGHT;
         // the header (with Harmony's kind under its title), the picker, the history (44 and 36),
@@ -629,195 +651,186 @@ impl Colours {
         self.scrolled = self.scrolled.min(overflow);
         let mut hex_row = Rect::NOTHING;
         let rect = Rect::from_min_size(pos2(left, top), vec2(PANEL_WIDTH, height));
-        egui::Area::new(egui::Id::unique("colour panel")).fixed_pos(rect.min).order(egui::Order::Foreground).show(
-            ctx,
-            |ui| {
-                ui.allocate_rect(rect, Sense::click());
-                panel::frame(ui, look, "colour frame", rect, arrow_x, backdrops);
-                let body = panel::body(rect);
-                if self.background {
-                    // titled so on every page, with a tick 12 in from the right that closes it
-                    panel::header(ui, look, body, "Background", 20.0, false, false);
-                    let tick =
-                        Rect::from_min_size(pos2(body.right() - 12.0 - 44.0, body.top() + 19.0), vec2(44.0, 44.0));
-                    ui.painter().circle_filled(tick.center(), 22.0, argb(pc::ACCENT));
-                    look.icon(ui, &icons::DONE_TICK, tick.center(), 40.0, Color32::WHITE);
-                    if ui.interact(tick, ui.scope_id().with("background done"), Sense::click()).clicked() {
-                        self.background_done = true;
-                    }
-                } else if self.mode == Mode::Palettes {
-                    panel::header(ui, look, body, "Palettes", 20.0, false, false);
-                    // the plus: a new palette, from a file or a picture, or the examples back
-                    let plus =
-                        Rect::from_min_size(pos2(body.right() - 17.0 - 40.0, body.top() + 12.0), vec2(40.0, 41.0));
-                    look.icon(ui, &icons::PLUS_MEDIUM, plus.center(), 41.0, argb(panel::PANEL_GLYPH));
-                    self.new_palette_button = plus;
-                    if ui.interact(plus, ui.scope_id().with("new palette"), Sense::click()).clicked() {
-                        self.new_palette_menu.open();
-                    }
-                } else {
-                    panel::header(ui, look, body, "Colors", 20.0, false, false);
+        panel::area(ctx, egui::Id::unique("colour panel"), rect).show(ctx, |ui| {
+            ui.allocate_rect(rect, Sense::click());
+            panel::frame(ui, look, "colour frame", rect, arrow_x, backdrops);
+            let body = panel::body(rect);
+            if self.background {
+                // titled so on every page, with a tick 12 in from the right that closes it
+                panel::header(ui, look, body, "Background", 20.0, false, false);
+                let tick = Rect::from_min_size(pos2(body.right() - 12.0 - 44.0, body.top() + 19.0), vec2(44.0, 44.0));
+                ui.painter().circle_filled(tick.center(), 22.0, argb(pc::ACCENT));
+                look.icon(ui, &icons::DONE_TICK, tick.center(), 40.0, Color32::WHITE);
+                if ui.interact(tick, ui.scope_id().with("background done"), Sense::click()).clicked() {
+                    self.background_done = true;
                 }
-                // the current colour (edged) and the second, which swaps with it when tapped
-                let swatch = vec2(43.0, 25.0);
-                let second = Rect::from_min_size(pos2(body.right() - 20.0 - swatch.x, body.top() + 21.5), swatch);
-                let first = second.translate(vec2(-(swatch.x + 7.0), 0.0));
-                if self.mode != Mode::Palettes && !self.background {
-                    // the colour model, for the pages that work in one
-                    if self.mode != Mode::Harmony {
-                        let model =
-                            Rect::from_min_size(pos2(first.left() - 8.0 - 70.0, first.top()), vec2(70.0, swatch.y));
-                        self.model_button(ui, model);
-                    }
-                    ui.painter().rect_filled(first, 6, srgb(self.rgb()));
-                    ui.painter().rect_stroke(
-                        first,
-                        6,
-                        egui::Stroke::new(1.0, argb(SWATCH_EDGE)),
-                        egui::StrokeKind::Inside,
-                    );
-                    ui.painter().rect_filled(second, 6, srgb(self.secondary));
-                    if ui.interact(second, ui.scope_id().with("swap"), Sense::click()).clicked() {
-                        self.swap(session);
-                    }
+            } else if self.mode == Mode::Palettes {
+                panel::header(ui, look, body, "Palettes", 20.0, false, false);
+                // the plus: a new palette, from a file or a picture, or the examples back
+                let plus = Rect::from_min_size(pos2(body.right() - 17.0 - 40.0, body.top() + 12.0), vec2(40.0, 41.0));
+                look.icon(ui, &icons::PLUS_MEDIUM, plus.center(), 41.0, argb(panel::PANEL_GLYPH));
+                self.new_palette_button = plus;
+                if ui.interact(plus, ui.scope_id().with("new palette"), Sense::click()).clicked() {
+                    self.new_palette_menu.open();
                 }
-                let grabber = Rect::from_center_size(pos2(body.center().x, body.top() + 6.0), vec2(40.0, 4.0));
-                ui.painter().rect_filled(grabber, 2, argb(GRABBER));
-                // dragged out by its grabber, the panel floats as a window of its own (not while
-                // it picks the background's colour)
-                let handle = Rect::from_center_size(pos2(body.center().x, body.top() + 15.0), vec2(150.0, 30.0));
-                let held = ui.interact(handle, ui.scope_id().with("undock"), Sense::drag());
-                if !self.background
-                    && held.dragged()
-                    && let (Some(p), Some(from)) = (held.interact_pointer_pos(), ui.input(|i| i.pointer.press_origin()))
-                    && p.distance(from) > UNDOCK_DRAG
-                {
-                    self.float_at(p - floating::GRAB);
+            } else {
+                panel::header(ui, look, body, "Colors", 20.0, false, false);
+            }
+            // the current colour (edged) and the second, which swaps with it when tapped
+            let swatch = vec2(43.0, 25.0);
+            let second = Rect::from_min_size(pos2(body.right() - 20.0 - swatch.x, body.top() + 21.5), swatch);
+            let first = second.translate(vec2(-(swatch.x + 7.0), 0.0));
+            if self.mode != Mode::Palettes && !self.background {
+                // the colour model, for the pages that work in one
+                if self.mode != Mode::Harmony {
+                    let model = Rect::from_min_size(pos2(first.left() - 8.0 - 70.0, first.top()), vec2(70.0, swatch.y));
+                    self.model_button(ui, model);
                 }
+                ui.painter().rect_filled(first, 6, srgb(self.rgb()));
+                ui.painter().rect_stroke(first, 6, egui::Stroke::new(1.0, argb(SWATCH_EDGE)), egui::StrokeKind::Inside);
+                ui.painter().rect_filled(second, 6, srgb(self.secondary));
+                if ui.interact(second, ui.scope_id().with("swap"), Sense::click()).clicked() {
+                    self.swap(session);
+                }
+            }
+            let grabber = Rect::from_center_size(pos2(body.center().x, body.top() + 6.0), vec2(40.0, 4.0));
+            ui.painter().rect_filled(grabber, 2, argb(GRABBER));
+            // dragged out by its grabber, the panel floats as a window of its own (not while
+            // it picks the background's colour)
+            let handle = Rect::from_center_size(pos2(body.center().x, body.top() + 15.0), vec2(150.0, 30.0));
+            let held = ui.interact(handle, ui.scope_id().with("undock"), Sense::drag());
+            if !self.background
+                && held.dragged()
+                && let (Some(p), Some(from)) = (held.interact_pointer_pos(), ui.input(|i| i.pointer.press_origin()))
+                && let p = panel::to_window(ctx) * p
+                && p.distance(from) > UNDOCK_DRAG
+            {
+                self.float_at(p - floating::GRAB * self.floating_scale);
+            }
 
-                let top = body.top() + header;
-                if self.mode == Mode::Harmony {
-                    self.harmony_kind_button(ui, body);
-                }
-                // on a window too short for it all the picker scrolls, by the wheel or a drag
-                // between its controls, the tabs staying
-                let clip = ui.clip_rect();
-                let top = if overflow > 0.0 {
-                    let view = Rect::from_min_max(pos2(body.left(), top), pos2(body.right(), body.bottom() - 70.0));
-                    let dragged = ui.interact(view, ui.scope_id().with("scroll"), Sense::drag()).drag_delta().y;
-                    let wheel = if ui.rect_contains_pointer(view) {
-                        ui.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta.y))
-                    } else {
-                        0.0
-                    };
-                    self.scrolled = (self.scrolled - dragged - wheel).clamp(0.0, overflow);
-                    ui.set_clip_rect(clip.intersect(view));
-                    top - self.scrolled
+            let top = body.top() + header;
+            if self.mode == Mode::Harmony {
+                self.harmony_kind_button(ui, body);
+            }
+            // on a window too short for it all the picker scrolls, by the wheel or a drag
+            // between its controls, the tabs staying
+            let clip = ui.clip_rect();
+            let top = if overflow > 0.0 {
+                let view = Rect::from_min_max(pos2(body.left(), top), pos2(body.right(), body.bottom() - 70.0));
+                let dragged = ui.interact(view, ui.scope_id().with("scroll"), Sense::drag()).drag_delta().y;
+                let wheel = if ui.rect_contains_pointer(view) {
+                    ui.input_mut(|i| std::mem::take(&mut i.smooth_scroll_delta.y))
                 } else {
-                    top
+                    0.0
                 };
-                match self.mode {
-                    Mode::Palettes => self.palettes_view(ui, look, session, body, top, shape.palette_list),
-                    Mode::Disc => {
-                        let at = pos2(body.left() + 6.0, top + if short { 0.0 } else { 8.0 });
-                        let picker = Rect::from_min_size(at, vec2(PICKER, PICKER));
-                        if self.model_disc(ui, picker) {
-                            self.send(session);
-                        }
-                        // HSY′: its saturation and luma on sliders under the wheel
-                        if self.model() == ColourModel::Hsy && self.luma_sliders(ui, body, picker.bottom() + 4.0) {
-                            self.send(session);
-                        }
+                self.scrolled = (self.scrolled - dragged - wheel).clamp(0.0, overflow);
+                ui.set_clip_rect(clip.intersect(view));
+                top - self.scrolled
+            } else {
+                top
+            };
+            match self.mode {
+                Mode::Palettes => self.palettes_view(ui, look, session, body, top, shape.palette_list),
+                Mode::Disc => {
+                    let at = pos2(body.left() + 6.0, top + if short { 0.0 } else { 8.0 });
+                    let picker = Rect::from_min_size(at, vec2(PICKER, PICKER));
+                    if self.model_disc(ui, picker) {
+                        self.send(session);
                     }
-                    Mode::Classic => self.classic(ui, session, body, top, shape.square),
-                    Mode::Harmony => self.harmony(ui, session, body, top, shape),
-                    Mode::Value => hex_row = self.value(ui, session, body, top, shape),
+                    // HSY′: its saturation and luma on sliders under the wheel
+                    if self.model() == ColourModel::Hsy && self.luma_sliders(ui, body, picker.bottom() + 4.0) {
+                        self.send(session);
+                    }
                 }
+                Mode::Classic => self.classic(ui, session, body, top, shape.square),
+                Mode::Harmony => self.harmony(ui, session, body, top, shape),
+                Mode::Value => hex_row = self.value(ui, session, body, top, shape),
+            }
 
-                if self.mode != Mode::Palettes && short {
-                    // the history or the palette, as the "•••" beside its title says
-                    let y = top + picker_height;
-                    let band = if history { 44.0 } else { 34.0 };
-                    if history {
-                        let at = pos2(body.left() + 21.0, y + 13.0);
-                        text(ui.painter(), at, Align2::LEFT_TOP, "History", 14.0, Weight::SemiBold, argb(PANEL_TITLE));
-                        self.history_strip(ui, session, body, y + band);
-                    } else {
-                        let at = pos2(body.left() + 21.0, y + 8.0);
-                        let name = self.palette_name();
-                        text(ui.painter(), at, Align2::LEFT_TOP, &name, 14.0, Weight::SemiBold, argb(PANEL_TITLE));
-                        self.palette_rows(ui, session, drop, rect, body, y + band);
-                    }
-                    // three dots in a 44 x 34 box 9 in from the right, level with the title
-                    let dots =
-                        Rect::from_min_size(pos2(body.right() - 9.0 - 44.0, y + (band - 34.0) / 2.0), vec2(44.0, 34.0));
-                    for i in -1..=1 {
-                        ui.painter().circle_filled(dots.center() + vec2(i as f32 * 6.5, 0.0), 1.8, argb(PANEL_TITLE));
-                    }
-                    self.short_dots = dots;
-                    if ui.interact(dots, ui.scope_id().with("short menu"), Sense::click()).clicked() {
-                        self.short_menu.open();
-                    }
-                } else if self.mode != Mode::Palettes {
-                    let mut y = top + picker_height;
-                    // the history: its title, Clear, and the last ten colours
-                    let ink = argb(PANEL_TITLE);
-                    text(
-                        ui.painter(),
-                        pos2(body.left() + 21.0, y + 13.0),
-                        Align2::LEFT_TOP,
-                        "History",
-                        14.0,
-                        Weight::SemiBold,
-                        ink,
-                    );
-                    let clear = Rect::from_min_size(pos2(body.right() - 16.0 - 86.0, y + 11.0), vec2(86.0, 22.5));
-                    ui.painter().rect_filled(clear, 7, argb(SET_CELL));
-                    text(
-                        ui.painter(),
-                        clear.center(),
-                        Align2::CENTER_CENTER,
-                        "Clear",
-                        13.0,
-                        Weight::Regular,
-                        argb(CLEAR_TEXT),
-                    );
-                    if ui.interact(clear, ui.scope_id().with("clear history"), Sense::click()).clicked() {
-                        self.history.clear();
-                    }
-                    y += 44.0;
-                    self.history_strip(ui, session, body, y);
-                    y += 36.0;
+            if self.mode != Mode::Palettes && short {
+                // the history or the palette, as the "•••" beside its title says
+                let y = top + picker_height;
+                let band = if history { 44.0 } else { 34.0 };
+                if history {
+                    let at = pos2(body.left() + 21.0, y + 13.0);
+                    text(ui.painter(), at, Align2::LEFT_TOP, "History", 14.0, Weight::SemiBold, argb(PANEL_TITLE));
+                    self.history_strip(ui, session, body, y + band);
+                } else {
+                    let at = pos2(body.left() + 21.0, y + 8.0);
                     let name = self.palette_name();
-                    text(
-                        ui.painter(),
-                        pos2(body.left() + 21.0, y + 13.0),
-                        Align2::LEFT_TOP,
-                        &name,
-                        14.0,
-                        Weight::SemiBold,
-                        ink,
-                    );
-                    y += 44.0;
-                    self.palette_rows(ui, session, drop, rect, body, y);
+                    text(ui.painter(), at, Align2::LEFT_TOP, &name, 14.0, Weight::SemiBold, argb(PANEL_TITLE));
+                    self.palette_rows(ui, session, drop, rect, body, y + band);
                 }
-                ui.set_clip_rect(clip);
-                let tabs = Rect::from_min_max(pos2(body.left(), body.bottom() - 70.0), body.max);
-                if let Some(mode) = mode_tabs(ui, look, tabs, self.mode) {
-                    self.mode = mode;
-                    self.hex = None;
-                    self.scrolled = 0.0;
+                // three dots in a 44 x 34 box 9 in from the right, level with the title
+                let dots =
+                    Rect::from_min_size(pos2(body.right() - 9.0 - 44.0, y + (band - 34.0) / 2.0), vec2(44.0, 34.0));
+                for i in -1..=1 {
+                    ui.painter().circle_filled(dots.center() + vec2(i as f32 * 6.5, 0.0), 1.8, argb(PANEL_TITLE));
                 }
-            },
-        );
+                self.short_dots = dots;
+                if ui.interact(dots, ui.scope_id().with("short menu"), Sense::click()).clicked() {
+                    self.short_menu.open();
+                }
+            } else if self.mode != Mode::Palettes {
+                let mut y = top + picker_height;
+                // the history: its title, Clear, and the last ten colours
+                let ink = argb(PANEL_TITLE);
+                text(
+                    ui.painter(),
+                    pos2(body.left() + 21.0, y + 13.0),
+                    Align2::LEFT_TOP,
+                    "History",
+                    14.0,
+                    Weight::SemiBold,
+                    ink,
+                );
+                let clear = Rect::from_min_size(pos2(body.right() - 16.0 - 86.0, y + 11.0), vec2(86.0, 22.5));
+                ui.painter().rect_filled(clear, 7, argb(SET_CELL));
+                text(
+                    ui.painter(),
+                    clear.center(),
+                    Align2::CENTER_CENTER,
+                    "Clear",
+                    13.0,
+                    Weight::Regular,
+                    argb(CLEAR_TEXT),
+                );
+                if ui.interact(clear, ui.scope_id().with("clear history"), Sense::click()).clicked() {
+                    self.history.clear();
+                }
+                y += 44.0;
+                self.history_strip(ui, session, body, y);
+                y += 36.0;
+                let name = self.palette_name();
+                text(
+                    ui.painter(),
+                    pos2(body.left() + 21.0, y + 13.0),
+                    Align2::LEFT_TOP,
+                    &name,
+                    14.0,
+                    Weight::SemiBold,
+                    ink,
+                );
+                y += 44.0;
+                self.palette_rows(ui, session, drop, rect, body, y);
+            }
+            ui.set_clip_rect(clip);
+            let tabs = Rect::from_min_max(pos2(body.left(), body.bottom() - 70.0), body.max);
+            if let Some(mode) = mode_tabs(ui, look, tabs, self.mode) {
+                self.mode = mode;
+                self.hex = None;
+                self.scrolled = 0.0;
+            }
+        });
         if self.mode == Mode::Harmony {
             self.harmony_menu(ctx, look, rect, backdrops);
         }
         if self.mode != Mode::Palettes {
             self.model_menu(ctx, look, backdrops);
         }
+        // the keypad by its row as it shows
         if self.mode == Mode::Value
-            && let Some(rgb) = hex_pad(ctx, look, &mut self.hex, hex_row)
+            && let Some(rgb) = hex_pad(ctx, look, &mut self.hex, panel::to_window(ctx).mul_rect(hex_row))
         {
             self.set_rgb(session, rgb);
         }
@@ -962,7 +975,8 @@ pub struct Pickers {
     /// it shows).
     disc: Option<(u32, usize, ColourModel, TextureHandle)>,
     ring: Option<(usize, ColourModel, TextureHandle)>,
-    /// What a drag that started on the disc picker moves: the ring (true) or the disc.
+    /// What a drag that started on the disc picker, or on a picker plugin's Classic, moves: the hue
+    /// on a ring (true), or the rest.
     on_ring: Option<bool>,
     /// Classic's square for its hue (with the model it shows), and Harmony's wheel for its
     /// brightness.
@@ -973,7 +987,7 @@ pub struct Pickers {
     /// picker plugin's.
     pub triangle: bool,
     pub picker: Option<(Arc<Plugins>, Arc<CanvasSession>)>,
-    triangle_picture: Option<(u32, usize, bool, TextureHandle)>,
+    triangle_picture: Option<(u32, usize, Option<u64>, TextureHandle)>,
     /// Harmony's hue, saturation and brightness (Display P3) as dragged to, with the colour they
     /// made: kept while that is the colour, not worked out again from it (a dark or greyish
     /// colour's would wander, and black's be lost).
@@ -1082,9 +1096,17 @@ impl Pickers {
         *hsv != before
     }
 
+    /// Whether a picker plugin's Classic has the hue at `hue` on a ring of its own (HSB).
+    fn ringed(&self, hue: f32) -> bool {
+        self.model == ColourModel::Hsb
+            && self.picker.as_ref().is_some_and(|(plugins, _)| plugins.picker_hue_point(hue).is_some())
+    }
+
     /// A plugin's picker in Classic's square `area`, as big as fits: a picker plugin's picture,
     /// touches and knob, or else a triangle (saturation and brightness between the pure hue at the
     /// right, white at the top left and black at the bottom left); returns whether it changed `hsv`.
+    /// A picker plugin's may pick the hue too, on a ring of its own: a drag that starts where it says
+    /// a hue moves the hue, and the hue's knob sits where it says.
     fn triangle(&mut self, ui: &Ui, hsv: &mut [f32; 3], area: Rect) -> bool {
         let side = area.width().min(area.height());
         let rect = Rect::from_center_size(area.center(), vec2(side, side));
@@ -1095,17 +1117,29 @@ impl Pickers {
             Some((plugins, _)) => plugins.picker_pick(x, y),
             None => Some(procraft_core::triangle_sv(x, y)),
         };
+        let hue_at = |x: f32, y: f32| picker.as_ref().and_then(|(plugins, _)| plugins.picker_hue(x, y));
         let response = ui.interact(rect, ui.scope_id().with("classic triangle"), Sense::click_and_drag());
-        if let Some(p) = response.interact_pointer_pos()
-            && let Some([s, v]) = pick((p.x - rect.left()) / side, (p.y - rect.top()) / side).as_deref()
-        {
-            hsv[1] = *s;
-            hsv[2] = *v;
+        if let Some(p) = response.interact_pointer_pos() {
+            let (x, y) = ((p.x - rect.left()) / side, (p.y - rect.top()) / side);
+            // on the picker's ring, the hue for the whole drag; else saturation and brightness
+            if *self.on_ring.get_or_insert_with(|| hue_at(x, y).is_some()) {
+                if let Some(h) = hue_at(x, y) {
+                    hsv[0] = h;
+                }
+            } else if let Some([s, v]) = pick(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)).as_deref() {
+                hsv[1] = *s;
+                hsv[2] = *v;
+            }
+        }
+        if !response.is_pointer_button_down_on() {
+            self.on_ring = None;
         }
         let hue_key = (hsv[0] * 10_000.0).round() as u32;
         let px = (side * ctx.pixels_per_point()).round() as usize;
-        let plugin = picker.is_some();
-        let stale = |(h, at, by, _): &(u32, usize, bool, TextureHandle)| *h != hue_key || *at != px || *by != plugin;
+        // a picker plugin's drawn again whenever the plugins changed (its controls among them)
+        let plugin = picker.as_ref().map(|(plugins, _)| plugins.generation());
+        let stale =
+            |(h, at, by, _): &(u32, usize, Option<u64>, TextureHandle)| *h != hue_key || *at != px || *by != plugin;
         if self.triangle_picture.as_ref().is_none_or(stale) {
             let rgba = match &picker {
                 Some((_, session)) => session.picker_picture(hsv[0], px as u32),
@@ -1119,6 +1153,10 @@ impl Pickers {
         }
         if let Some((_, _, _, t)) = &self.triangle_picture {
             ui.painter().image(t.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
+        if let Some([x, y]) = picker.as_ref().and_then(|(plugins, _)| plugins.picker_hue_point(hsv[0])).as_deref() {
+            let pure = ColourModel::Hsb.to_rgb([hsv[0], 1.0, 1.0]);
+            knob(ui, pos2(rect.left() + x * side, rect.top() + y * side), 10.75, srgb(pure));
         }
         let at = match &picker {
             Some((plugins, _)) => plugins.picker_point(hsv[1], hsv[2]),
@@ -1211,9 +1249,12 @@ impl Colours {
                 vec2(body.width() - 40.0, SLIDER_ROW),
             )
         };
-        changed |= self.model_slider(ui, row(0.0), "classic hue", 0);
-        changed |= self.model_slider(ui, row(1.0), "classic saturation", 1);
-        changed |= self.model_slider(ui, row(2.0), "classic brightness", 2);
+        // a picker plugin's with the hue on a ring of its own takes the hue slider's place
+        let from = usize::from(self.hue_ringed());
+        let sliders = [(0, "classic hue"), (1, "classic saturation"), (2, "classic brightness")];
+        for (i, (channel, id)) in sliders.into_iter().skip(from).enumerate() {
+            changed |= self.model_slider(ui, row(i as f32), id, channel);
+        }
         if changed {
             self.send(session);
         }

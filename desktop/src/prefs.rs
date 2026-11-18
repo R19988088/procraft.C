@@ -64,10 +64,10 @@ pub struct Prefs {
     pub project_canvas: bool,
     /// The Plugins page's list, its values kept here with the rest.
     pub plugins: Arc<Plugins>,
-    /// Advanced settings: an artwork opens as it was left; fitting the canvas keeps it clear of
-    /// the top bar and the side bar; new artworks don't record their time-lapse; strokes made in
-    /// an adjustment undo together; how far the pen moves before it counts as fast (0.25..1); the
-    /// colour named in a message as it changes.
+    /// Advanced settings: an artwork is kept turned as its canvas was left (the nearest quarter
+    /// turn); fitting the canvas keeps it clear of the top bar and the side bar; new artworks don't
+    /// record their time-lapse; strokes made in an adjustment undo together; how far the pen moves
+    /// before it counts as fast (0.25..1); the colour named in a message as it changes.
     pub orientation_memory: bool,
     pub fit_inside: bool,
     pub no_time_lapse: bool,
@@ -254,6 +254,8 @@ impl Prefs {
         session.use_plugins(Arc::clone(&self.plugins));
         session.set_simplified_undos(self.simplified_undos);
         session.set_speed_distance(self.speed_distance);
+        // the turn an artwork is kept at follows its canvas's (Canvas Orientation Memory), or stays
+        session.set_orientation_memory(self.orientation_memory);
         session.set_input_settings(
             self.stabilization,
             self.motion_filtering,

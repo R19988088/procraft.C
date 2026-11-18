@@ -15,6 +15,16 @@ const CROP_SCALE: f32 = 0.597;
 /// snaps.
 const REACH: f32 = 28.0;
 const SNAP: f32 = 10.0;
+/// The size readout by the touch while a corner or side is dragged (points): its size, how far
+/// above the touch its top is (twice its height), how far beside the touch it starts, as parts of
+/// its width (right of the frame's middle, and this far past it, to the touch's right; else to its
+/// left), and how near the window's sides it comes.
+const CROP_READOUT_WIDTH: f32 = 148.0;
+const CROP_READOUT_HEIGHT: f32 = 54.0;
+const READOUT_RIGHT: f32 = 0.2;
+const READOUT_LEFT: f32 = -1.2;
+const READOUT_PAST_MIDDLE: f32 = 37.5;
+const READOUT_MARGIN: f32 = 10.0;
 
 /// Which part of the frame a drag takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +60,19 @@ pub struct CropShown {
     /// The frame's corners in the window (x, y each: top left, top right, bottom right, bottom
     /// left), turned with the crop.
     pub corners: Vec<f32>,
+    /// While a corner or side is dragged: the size readout by the touch.
+    pub readout: Option<CropReadout>,
+}
+
+/// The size a corner or side being dragged frames, as it lies on the screen (the frame's width and
+/// height in canvas pixels, whole, swapped on a canvas shown a quarter turn round), and where the
+/// readout showing it goes: its top left corner, window pixels.
+#[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
+pub struct CropReadout {
+    pub width: u32,
+    pub height: u32,
+    pub x: f32,
+    pub y: f32,
 }
 
 #[derive(Default)]
@@ -63,8 +86,9 @@ pub(crate) struct CropEdit {
     snapping: bool,
     dpi: f32,
     /// A drag on the frame: what it took, the rectangle then, where it began (canvas pixels) and
-    /// how far (canvas pixels) the frame snaps.
+    /// how far (canvas pixels) the frame snaps; and where the touch is now (window pixels).
     drag: Option<(Grab, [f32; 4], Vec2, f32)>,
+    touch: Vec2,
     /// Why the last crop couldn't be made, until the app takes it to tell, and whether the GPU's
     /// device being lost was told.
     pub(crate) failure: Option<String>,
@@ -143,7 +167,46 @@ impl CropEdit {
                 b = t + h;
             }
         }
+        // unturned and not resampled, the sides are whole canvas pixels: what is kept is a plain
+        // copy (moved, the frame keeps its size)
+        if self.whole_pixels() {
+            if grab == Grab::Move {
+                let (w, h) = ((r - l).round(), (b - t).round());
+                (l, t) = (l.round(), t.round());
+                (r, b) = (l + w, t + h);
+            } else {
+                (l, t, r, b) = (l.round(), t.round(), r.round(), b.round());
+            }
+        }
         (r - l >= 1.0 && b - t >= 1.0).then_some([l, t, r, b])
+    }
+
+    /// Whether the frame's sides are kept to whole canvas pixels: while it is unturned and what
+    /// it keeps isn't resampled.
+    fn whole_pixels(&self) -> bool {
+        self.angle == 0.0 && !self.resample
+    }
+
+    /// The readout while a corner or side is dragged: the frame's size as `turns` (quarter turns
+    /// the canvas shows at) lays it on the screen, placed above the touch and beside it, away from
+    /// the frame's middle (`middle`, window pixels), within a window `window_width` wide; `scale`
+    /// window pixels a point.
+    fn readout(&self, middle: Vec2, turns: u8, window_width: f32, scale: f32) -> Option<CropReadout> {
+        let (grab, ..) = self.drag?;
+        let [l, t, r, b] = self.rect?;
+        if grab == Grab::Move {
+            return None;
+        }
+        let (w, h) = ((r - l).max(0.0) as u32, (b - t).max(0.0) as u32);
+        let (width, height) = if turns % 2 == 1 { (h, w) } else { (w, h) };
+        let (box_w, box_h) = (CROP_READOUT_WIDTH * scale, CROP_READOUT_HEIGHT * scale);
+        let at = self.touch;
+        let right = at.x - middle.x - READOUT_PAST_MIDDLE * scale > 0.0;
+        let x = at.x + box_w * if right { READOUT_RIGHT } else { READOUT_LEFT };
+        let margin = READOUT_MARGIN * scale;
+        let x = x.max(margin).min((window_width - box_w - margin).max(margin));
+        let y = at.y - 2.0 * box_h;
+        (x.is_finite() && y.is_finite()).then_some(CropReadout { width, height, x, y })
     }
 
     fn set_rect(&mut self, [l, t, r, b]: [f32; 4]) {
@@ -187,6 +250,9 @@ impl CanvasSession {
                 })
                 .collect()
         });
+        let middle =
+            corners.as_chunks::<2>().0.iter().fold(Vec2::new(0.0, 0.0), |m, &[x, y]| m + Vec2::new(x, y) * 0.25);
+        let readout = e.readout(middle, st.shown_turns(), st.window_size.0 as f32, st.interface_scale());
         Some(CropShown {
             x: l,
             y: t,
@@ -200,6 +266,7 @@ impl CanvasSession {
             snapping: e.snapping,
             dpi: e.dpi,
             corners,
+            readout,
         })
     }
 
@@ -238,6 +305,7 @@ impl CanvasSession {
         // canvas pixels a few window points cover, for snapping
         let snap = st.window_to_canvas(x + SNAP * st.display_scale, y).map_or(0.0, |p| (p - from).length());
         st.crop_edit.drag = Some((grab, rect, from, snap));
+        st.crop_edit.touch = at;
     }
 
     /// The drag on the frame reached window point (`x`, `y`).
@@ -245,6 +313,9 @@ impl CanvasSession {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         let Some(at) = st.window_to_canvas(x, y) else { return };
+        if x.is_finite() && y.is_finite() {
+            st.crop_edit.touch = Vec2::new(x, y);
+        }
         let canvas = (st.doc.width() as f32, st.doc.height() as f32);
         if let Some(rect) = st.crop_edit.dragged(at, canvas) {
             st.crop_edit.set_rect(rect);
@@ -331,6 +402,10 @@ impl CanvasSession {
         };
         let [l, t, r, b] = rect;
         let (w, h) = (r - l, b - t);
+        // unturned and not resampled: a plain copy of whole pixels (turned back or resampled
+        // and back since the last drag)
+        let (l, t, w, h) =
+            if angle == 0.0 && !resample { (l.round(), t.round(), w.round(), h.round()) } else { (l, t, w, h) };
         // nothing to crop: the whole canvas, unturned, at its size
         let same = l == 0.0
             && t == 0.0
@@ -365,6 +440,52 @@ mod tests {
         // never inside out
         let e = edit([100.0, 100.0, 500.0, 400.0], Grab::Right, (500.0, 250.0));
         assert_eq!(e.dragged(Vec2::new(50.0, 250.0), canvas), None);
+    }
+
+    #[test]
+    fn unturned_the_frame_keeps_to_whole_pixels() {
+        let canvas = (1000.0, 800.0);
+        let e = edit([100.0, 100.0, 500.0, 400.0], Grab::Left, (100.0, 250.0));
+        assert_eq!(e.dragged(Vec2::new(110.4, 250.0), canvas), Some([110.0, 100.0, 500.0, 400.0]));
+        let e = edit([100.0, 100.0, 500.0, 400.0], Grab::Move, (300.0, 250.0));
+        assert_eq!(e.dragged(Vec2::new(310.6, 249.3), canvas), Some([111.0, 99.0, 511.0, 399.0]));
+        // turned, or resampled, it follows the drag as it is
+        let mut e = edit([100.0, 100.0, 500.0, 400.0], Grab::Left, (100.0, 250.0));
+        e.angle = 0.1;
+        assert_eq!(e.dragged(Vec2::new(110.4, 250.0), canvas), Some([110.4, 100.0, 500.0, 400.0]));
+        let mut e = edit([100.0, 100.0, 500.0, 400.0], Grab::Left, (100.0, 250.0));
+        e.resample = true;
+        assert_eq!(e.dragged(Vec2::new(110.4, 250.0), canvas), Some([110.4, 100.0, 500.0, 400.0]));
+    }
+
+    #[test]
+    fn a_corner_or_side_dragged_shows_its_size_above_the_touch_away_from_the_middle() {
+        // 2 window pixels a point: the readout 296 x 108, 20 from the window's sides
+        let middle = Vec2::new(1000.0, 700.0);
+        let mut e = edit([0.0, 0.0, 1979.6, 2048.0], Grab::Right, (2048.0, 1024.0));
+        e.touch = Vec2::new(1600.0, 800.0);
+        // right of the middle: to the touch's right, its top two heights above it
+        let r = e.readout(middle, 0, 2400.0, 2.0).unwrap();
+        assert_eq!((r.width, r.height), (1979, 2048));
+        assert!((r.x - (1600.0 + 0.2 * 296.0)).abs() < 1e-3 && (r.y - (800.0 - 216.0)).abs() < 1e-3, "{r:?}");
+        // within the window
+        e.touch = Vec2::new(2350.0, 800.0);
+        assert_eq!(e.readout(middle, 0, 2400.0, 2.0).unwrap().x, 2400.0 - 296.0 - 20.0);
+        // left of the middle (or not 37.5 points past it): to its left, kept off the window's edge
+        e.touch = Vec2::new(1070.0, 800.0);
+        assert!((e.readout(middle, 0, 2400.0, 2.0).unwrap().x - (1070.0 - 1.2 * 296.0)).abs() < 1e-3);
+        e.touch = Vec2::new(100.0, 800.0);
+        assert_eq!(e.readout(middle, 0, 2400.0, 2.0).unwrap().x, 20.0);
+        // a quarter turn round, the width is what lies across the screen
+        let r = e.readout(middle, 1, 2400.0, 2.0).unwrap();
+        assert_eq!((r.width, r.height), (2048, 1979));
+        // moving the whole frame, or not dragging, shows none
+        assert!(edit([0.0, 0.0, 10.0, 10.0], Grab::Move, (5.0, 5.0)).readout(middle, 0, 2400.0, 2.0).is_none());
+        assert!(
+            CropEdit { rect: Some([0.0, 0.0, 10.0, 10.0]), ..CropEdit::default() }
+                .readout(middle, 0, 2400.0, 2.0)
+                .is_none()
+        );
     }
 
     #[test]

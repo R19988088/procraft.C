@@ -127,8 +127,11 @@ impl ColourDrop {
     ) -> Option<Touch> {
         let response = ui.interact(rect, id, Sense::click_and_drag());
         let ctx = ui.ctx();
+        // where it, and the panel it is on, show in the window (a panel may show bigger or smaller)
+        let to_window = ctx.layer_transform_to_global(ui.layer_id()).unwrap_or(egui::emath::TSTransform::IDENTITY);
+        let (centre, avoid) = (to_window * rect.center(), avoid.map(|a| to_window.mul_rect(a)));
         if !swatch {
-            self.button = Some(rect.center());
+            self.button = Some(centre);
         }
         let (at, down) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
         // pressed and let go between two frames: a tap never seen down
@@ -177,7 +180,7 @@ impl ColourDrop {
                     let ppp = ctx.pixels_per_point();
                     rested = drag.rest(
                         ms,
-                        dot.y > pc::BAR_HEIGHT
+                        dot.y > crate::panel::bar_shown(ctx)
                             && !avoid.is_some_and(|a| a.contains(dot))
                             && session.pour_lands(dot.x * ppp, dot.y * ppp),
                     );
@@ -209,7 +212,7 @@ impl ColourDrop {
             press.drag = Some(ColourDrag::new(at.x, at.y, ms, true, self.threshold));
             // pulled out of the colour button's centre, or from where a swatch was pressed; a pen
             // moving the pointer drags a pen's dot
-            let from = if swatch { press.origin } else { rect.center() };
+            let from = if swatch { press.origin } else { centre };
             let pen = crate::pen::mouse_pen().is_some();
             let blob = ColourBlob::new(from.x, from.y, !swatch, pen, reduce_motion(), ms);
             let button = self.button.unwrap_or(from);
@@ -247,8 +250,8 @@ impl ColourDrop {
             self.band = Band::Dropped(Instant::now());
             return;
         }
-        let at =
-            at.map(|a| rested.unwrap_or(a)).filter(|p| p.y > pc::BAR_HEIGHT && !avoid.is_some_and(|a| a.contains(*p)));
+        let bar = crate::panel::bar_shown(ctx);
+        let at = at.map(|a| rested.unwrap_or(a)).filter(|p| p.y > bar && !avoid.is_some_and(|a| a.contains(*p)));
         let poured = match (at, dot) {
             (Some(at), Some((_, rgb))) => {
                 let ppp = ctx.pixels_per_point();
@@ -421,9 +424,10 @@ impl ColourDrop {
     }
 }
 
-/// Whether window point `p` (points) is over one of the bars: the top bar, or the side bar.
+/// Whether window point `p` (points) is over one of the bars as they show: the top bar, or the side
+/// bar.
 fn over_bar(ctx: &egui::Context, p: Pos2) -> bool {
-    p.y <= pc::BAR_HEIGHT || crate::panel::side_bar_shown_at(ctx).is_some_and(|bar| bar.contains(p))
+    p.y <= crate::panel::bar_shown(ctx) || crate::panel::side_bar_shown_at(ctx).is_some_and(|bar| bar.contains(p))
 }
 
 /// Fills `shape` in `colour`: its triangles, their edges smoothed by its rims drawn a pixel wide.

@@ -598,20 +598,21 @@ private fun SwitchRow(label: String, checked: Boolean, onToggle: () -> Unit) {
 }
 
 @Composable
-internal fun SliderRow(label: String, value: Float, shown: String, onChange: (Float) -> Unit) {
+internal fun SliderRow(label: String, value: Float, shown: String, onEnd: () -> Unit = {}, onChange: (Float) -> Unit) {
     Column(Modifier.fillMaxWidth().height(59.dp)) {
         Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 13.dp, top = 9.dp)) {
             MenuLabel(label, modifier = Modifier.weight(1f))
             MenuLabel(shown)
         }
-        MenuSlider(value, onChange, Modifier.padding(top = 9.dp))
+        MenuSlider(value, onChange, onEnd, Modifier.padding(top = 9.dp))
     }
 }
 
-/** A thin slider: blue up to a small white knob, grey after it. */
+/** A thin slider: blue up to a small white knob, grey after it; [onEnd] as the finger lets go. */
 @Composable
-private fun MenuSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Modifier) {
+private fun MenuSlider(value: Float, onChange: (Float) -> Unit, onEnd: () -> Unit, modifier: Modifier = Modifier) {
     val change by rememberUpdatedState(onChange)
+    val end by rememberUpdatedState(onEnd)
     Box(
         modifier.fillMaxWidth().height(14.dp)
             .pointerInput(Unit) {
@@ -628,6 +629,7 @@ private fun MenuSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifi
                         change(at(c.position.x))
                         c.consume()
                     }
+                    end()
                 }
             }
             .drawBehind {

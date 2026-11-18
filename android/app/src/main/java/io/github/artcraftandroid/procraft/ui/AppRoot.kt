@@ -48,9 +48,11 @@ import io.github.artcraftandroid.procraft.core.ToolKind
 /** The canvas screen: the canvas, the bars over it, and the panel that is open. */
 @Composable
 fun AppRoot(vm: CanvasViewModel) {
-    val interfaceSize = fittedInterfaceSize(vm.plugins, vm.pluginList)
+    // inside the status bar and the camera's cutout, while a plugin asks
+    val keptClear = clearance(vm.plugins, vm.pluginList)
+    val interfaceSize = fittedInterfaceSize(vm.plugins, vm.pluginList, keptClear)
     androidx.compose.runtime.SideEffect { vm.interfaceShownAt(interfaceSize) }
-    ProCraftTheme(interfaceSize) {
+    ProCraftTheme(interfaceSize, keptClear) {
         if (vm.screen == Screen.GALLERY) {
             ZoomingGallery(vm, overlay = false)
             // a share from the gallery shows its card there, and a file brought in its own
@@ -76,12 +78,13 @@ fun AppRoot(vm: CanvasViewModel) {
                 else -> vm.closeArtwork()
             }
         }
-        // panels over the canvas are frosted
+        // panels over the canvas are frosted (where it is on the screen: the window's corner, and
+        // in from it by what the interface keeps clear of)
         val window = androidx.compose.ui.platform.LocalView.current.rootView
-        androidx.compose.runtime.DisposableEffect(window) {
+        androidx.compose.runtime.DisposableEffect(window, keptClear) {
             vm.backdrops.windowOnScreen = {
                 val at = IntArray(2).also(window::getLocationOnScreen)
-                androidx.compose.ui.geometry.Offset(at[0].toFloat(), at[1].toFloat())
+                androidx.compose.ui.geometry.Offset(at[0].toFloat(), at[1].toFloat()) + keptClear.corner
             }
             onDispose { vm.backdrops.windowOnScreen = { androidx.compose.ui.geometry.Offset.Zero } }
         }
@@ -107,11 +110,11 @@ fun AppRoot(vm: CanvasViewModel) {
                 // the drawing guide is the canvas's: under every bar and panel
                 GuideOverlay(vm)
                 if (vm.transforming) TransformOverlay(vm)
-                if (vm.selecting) SelectionOverlay(vm, Pc.BarHeight)
+                if (vm.selecting) SelectionOverlay(vm, Pc.barShown)
                 vm.picking?.let { pick ->
                     val pickingZ = if (pick.fromReference) 1f else 0f
                     Loupe(pick, CanvasSpace.color(vm.colorRgb()), Modifier.zIndex(pickingZ))
-                    if (!vm.barsHidden) PickingBar(Modifier.offset(y = Pc.BarHeight).zIndex(pickingZ), pick.fromReference)
+                    if (!vm.barsHidden) PickingBar(Modifier.offset(y = Pc.barShown).zIndex(pickingZ), pick.fromReference)
                 }
                 // the bars fade out as the interface hides, and back
                 val barsShown = androidx.compose.animation.core.animateFloatAsState(if (vm.barsHidden) 0f else 1f, Motion.bars(), label = "bars").value
@@ -149,28 +152,34 @@ fun AppRoot(vm: CanvasViewModel) {
                     val fade = Modifier.graphicsLayer { alpha = barsShown }
                     val up = Modifier.graphicsLayer { translationY = -size.height * (1f - barsShown) }
                     val aside = Modifier.graphicsLayer { translationX = size.width * (1f - barsShown) * if (vm.rightHanded) 1f else -1f }
-                    val height = with(androidx.compose.ui.platform.LocalDensity.current) { Pc.BarHeight.toPx() }
-                    val topGlass = BarGlass(barsShown, androidx.compose.ui.geometry.Offset(0f, -height * (1f - barsShown)))
-                    TopBar(vm, Modifier.align(Alignment.TopCenter).then(rememberFrost(0.dp, topGlass)).then(up).then(fade))
-                    val sideBar = Pc.sideBarFit(maxHeight)
+                    // the top bar and the side bar each at the size a plugin may give them
+                    PartScaled(io.github.artcraftandroid.procraft.core.InterfacePart.TOP_BAR) {
+                        val height = with(androidx.compose.ui.platform.LocalDensity.current) { Pc.BarHeight.toPx() }
+                        val topGlass = BarGlass(barsShown, androidx.compose.ui.geometry.Offset(0f, -height * (1f - barsShown)))
+                        TopBar(vm, Modifier.align(Alignment.TopCenter).then(rememberFrost(0.dp, topGlass)).then(up).then(fade))
+                    }
+                    val side = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.SIDE_BAR)
+                    val sideBar = Pc.sideBarFit(maxHeight / side, Pc.barShown / side)
                     // a mode taking the screen slides it off its edge, and back when it ends
                     androidx.compose.animation.AnimatedVisibility(
                         vm.showSideBar && !vm.transforming && !vm.selecting && !vm.guideEditing && !vm.lightingStudioOpen && vm.cropRect == null && vm.textInfo == null &&
                             vm.opacityLayer == null &&
                             (vm.adjustment == null || vm.adjustPencil),
-                        Modifier.align(if (vm.rightHanded) Alignment.TopEnd else Alignment.TopStart).offset(y = sideBar.top),
+                        Modifier.align(if (vm.rightHanded) Alignment.TopEnd else Alignment.TopStart).offset(y = sideBar.top * side),
                         enter = Motion.sideBarIn(vm.rightHanded),
                         exit = Motion.sideBarOut(vm.rightHanded),
                     ) {
                         // where it is, for a dragged colour over it
                         DisposableEffect(Unit) { onDispose { vm.sideBarBounds = null } }
-                        SideBar(
-                            vm,
-                            aside.then(fade).onGloballyPositioned { vm.sideBarBounds = it.boundsInWindow() },
-                            right = vm.rightHanded,
-                            trackHeight = sideBar.track,
-                            shown = barsShown,
-                        )
+                        PartScaled(io.github.artcraftandroid.procraft.core.InterfacePart.SIDE_BAR) {
+                            SideBar(
+                                vm,
+                                aside.then(fade).onGloballyPositioned { vm.sideBarBounds = it.boundsInWindow().translate(-keptClear.corner) },
+                                right = vm.rightHanded,
+                                trackHeight = sideBar.track,
+                                shown = barsShown,
+                            )
+                        }
                     }
                 }
                 NoticeBand(vm)
@@ -190,6 +199,9 @@ fun AppRoot(vm: CanvasViewModel) {
                 // the Reference window floats over the bars and the canvas's own marks; the panels,
                 // menus and pages opened later come over it
                 ReferenceWindow(vm)
+                // the colour panel dragged out by its grabber: a window over the canvas until closed,
+                // under the panels, which open over it
+                FloatingColors(vm, maxWidth, maxHeight)
                 // each panel hangs from its button: colour, layers, then the tool that opened the library;
                 // it grows out of its arrow as it opens and fades as it closes
                 PanelPresence(vm.panel, Panel.NONE, fading = vm.panelFading, onFaded = { vm.panelFading = false }) { shown, alpha, scale, origin ->
@@ -206,39 +218,50 @@ fun AppRoot(vm: CanvasViewModel) {
                         Panel.NONE -> 0.dp to 0
                     }
                     val fromLeft = shown == Panel.ACTIONS || shown == Panel.ADJUSTMENTS
-                    val buttonX = if (fromLeft) Pc.actionCentre(button, maxWidth) else maxWidth - Pc.toolCentreFromRight(button, maxWidth)
+                    // its button where the top bar shows it, at the bar's size
+                    val bar = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.TOP_BAR)
+                    val buttonX = if (fromLeft) Pc.actionCentre(button, maxWidth / bar) * bar else maxWidth - Pc.toolCentreFromRight(button, maxWidth / bar) * bar
                     // panels keep clear of the side bar, on whichever side it is
-                    val clear = if (vm.showSideBar) Pc.SideBarWidth + Pc.PopoverGap else Pc.PopoverGap
-                    val place = if (vm.rightHanded) popoverPlace(width, buttonX, maxWidth, minRight = clear) else popoverPlace(width, buttonX, maxWidth, clear)
-                    val pivot = with(androidx.compose.ui.platform.LocalDensity.current) {
-                        origin + androidx.compose.ui.geometry.Offset((place.left + place.arrowX).toPx(), Pc.BarHeight.toPx())
+                    val clear = if (vm.showSideBar) Pc.sideBarShown + Pc.PopoverGap else Pc.PopoverGap
+                    // placed at the size it shows (the panels' size), and laid out at its own
+                    val k = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.PANELS)
+                    val place = if (vm.rightHanded) popoverPlace(width * k, buttonX, maxWidth, minRight = clear) else popoverPlace(width * k, buttonX, maxWidth, clear)
+                    val density = androidx.compose.ui.platform.LocalDensity.current
+                    val pivot = with(density) {
+                        origin + androidx.compose.ui.geometry.Offset((place.left + place.arrowX).toPx(), Pc.barShown.toPx())
                     }
-                    val at = Modifier.offset(x = place.left, y = Pc.BarHeight).graphicsLayer {
+                    val left = with(density) { place.left.roundToPx() }
+                    val top = with(density) { Pc.barShown.roundToPx() }
+                    val at = Modifier.offset { androidx.compose.ui.unit.IntOffset(left, top) }.graphicsLayer {
                         this.alpha = alpha
                         scaleX = scale
                         scaleY = scale
-                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(place.arrowX / width, 0f)
+                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(place.arrowX / (width * k), 0f)
                     }.then(if (vm.panel == Panel.NONE) Modifier.takingNoTouches() else Modifier)
+                    // the screen as a panel at its size measures it: the room under the top bar
+                    // as it shows, in the panel's own dp (the panels take the bar's height off it)
+                    val room = (maxHeight - Pc.barShown) / k + Pc.BarHeight
+                    val arrowX = place.arrowX / k
+                    PartScaled(io.github.artcraftandroid.procraft.core.InterfacePart.PANELS) {
                     ProvidePanelLook(PanelLook(alpha, scale, pivot)) {
                         when (shown) {
                             Panel.LAYERS -> if (vm.backgroundPicking) {
-                                ColorPanel(vm, place.arrowX, maxHeight, at, background = true)
+                                ColorPanel(vm, arrowX, room, at, background = true)
                                 // closed any way at all, the colour is kept
                                 androidx.compose.runtime.DisposableEffect(Unit) { onDispose { vm.endBackgroundPick() } }
                             } else {
-                                LayersPanel(vm, place.arrowX, at.heightIn(max = maxHeight - Pc.BarHeight - Pc.PopoverGap))
+                                LayersPanel(vm, arrowX, at.heightIn(max = room - Pc.BarHeight - Pc.PopoverGap))
                             }
-                            Panel.COLOR -> ColorPanel(vm, place.arrowX, maxHeight, at)
-                            Panel.BRUSHES -> BrushLibrary(vm, place.arrowX, at.height(maxHeight - Pc.BarHeight - 25.dp))
+                            Panel.COLOR -> ColorPanel(vm, arrowX, room, at)
+                            Panel.BRUSHES -> BrushLibrary(vm, arrowX, at.height(room - Pc.BarHeight - 25.dp))
                             // ending 25 above the screen's edge, their rows scrolling (as measured)
-                            Panel.ACTIONS -> ActionsPanel(vm, place.arrowX, at.heightIn(max = maxHeight - Pc.BarHeight - 25.dp))
-                            Panel.ADJUSTMENTS -> AdjustmentsPanel(vm, place.arrowX, at.heightIn(max = maxHeight - Pc.BarHeight - 25.dp))
+                            Panel.ACTIONS -> ActionsPanel(vm, arrowX, at.heightIn(max = room - Pc.BarHeight - 25.dp))
+                            Panel.ADJUSTMENTS -> AdjustmentsPanel(vm, arrowX, at.heightIn(max = room - Pc.BarHeight - 25.dp))
                             Panel.NONE -> Unit
                         }
                     }
+                    }
                 }
-                // the colour panel dragged out by its grabber: a window over the canvas until closed
-                FloatingColors(vm, maxWidth, maxHeight)
                 if (vm.transforming && !vm.barsHidden) {
                     TransformPopover(vm, maxWidth, maxHeight)
                     TransformNumeric(vm)
@@ -265,7 +288,12 @@ fun AppRoot(vm: CanvasViewModel) {
                     Box(Modifier.fillMaxSize()) {
                         // what its rows don't take stays on the panel, never reaching the canvas under it
                         val swallows = Modifier.pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent().changes.forEach { it.consume() } } }
-                        PluginPanelView(vm, Modifier.align(Alignment.TopEnd).padding(top = Pc.BarHeight + 12.dp, end = 12.dp).then(swallows))
+                        // floating, at the floating windows' size
+                        val box = this
+                        val k = Pc.partScale(io.github.artcraftandroid.procraft.core.InterfacePart.FLOATING)
+                        PartScaled(io.github.artcraftandroid.procraft.core.InterfacePart.FLOATING) {
+                            with(box) { PluginPanelView(vm, Modifier.align(Alignment.TopEnd).padding(top = (Pc.barShown + 12.dp) / k, end = 12.dp / k).then(swallows)) }
+                        }
                     }
                 }
                 ModelPicture(vm)
@@ -305,11 +333,11 @@ fun AppRoot(vm: CanvasViewModel) {
                 CopyPastePanel(vm)
                 QuickMenu(vm)
                 LayerChoice(vm)
-                if (!vm.barsHidden) QuickShapeBar(vm, Modifier.offset(y = Pc.BarHeight))
-                if (vm.opacityLayer != null && !vm.barsHidden) LayerOpacityBar(vm, Modifier.offset(y = Pc.BarHeight))
+                if (!vm.barsHidden) QuickShapeBar(vm, Modifier.offset(y = Pc.barShown))
+                if (vm.opacityLayer != null && !vm.barsHidden) LayerOpacityBar(vm, Modifier.offset(y = Pc.barShown))
                 if (vm.adjustment != null && !vm.barsHidden) {
-                    AdjustmentBar(vm, Modifier.offset(y = Pc.BarHeight))
-                    AdjustModes(vm, Modifier.align(Alignment.TopCenter).offset(y = Pc.BarHeight + 52.dp))
+                    AdjustmentBar(vm, Modifier.offset(y = Pc.barShown))
+                    AdjustModes(vm, Modifier.align(Alignment.TopCenter).offset(y = Pc.barShown + 52.dp))
                     AdjustmentMenu(vm, maxWidth, maxHeight)
                 }
                 // the adjustment's own panel rises from below the screen, and drops away
@@ -386,6 +414,7 @@ private fun BlockedDialog(vm: CanvasViewModel) {
                 CanvasViewModel.Blocked.MESH_LOCKED -> "Mesh is locked"
                 CanvasViewModel.Blocked.GROUP_HIDDEN -> "Group is hidden"
                 CanvasViewModel.Blocked.GROUP -> "Group is selected"
+                CanvasViewModel.Blocked.SEVERAL -> "Several layers are chosen"
                 CanvasViewModel.Blocked.ALPHA_LOCKED -> "Alpha Lock is on"
             }
         },
@@ -394,7 +423,8 @@ private fun BlockedDialog(vm: CanvasViewModel) {
                 CanvasViewModel.Blocked.LOCKED -> "“${l.name}” can't be changed while it is locked."
                 CanvasViewModel.Blocked.HIDDEN, CanvasViewModel.Blocked.GROUP_HIDDEN -> hiddenMessage(l.name, vm.blockedBy)
                 CanvasViewModel.Blocked.EMPTY_GROUP -> "“${l.name}” holds no layers to change."
-                CanvasViewModel.Blocked.GROUP -> "“${l.name}” is a group: choose one of its layers to paint on."
+                CanvasViewModel.Blocked.GROUP -> "“${l.name}” is a group: choose one of the layers in it."
+                CanvasViewModel.Blocked.SEVERAL -> "This works on one layer at a time: choose just one."
                 CanvasViewModel.Blocked.MESH_HIDDEN -> "“${vm.meantMeshName()}” can't be painted while it is hidden."
                 CanvasViewModel.Blocked.MESH_LOCKED -> "“${vm.meantMeshName()}” can't be painted while it is locked."
                 CanvasViewModel.Blocked.ALPHA_LOCKED -> "“${l.name}” can't be liquified while its alpha is locked."
@@ -489,7 +519,7 @@ private fun NoticeBand(vm: CanvasViewModel) {
         vm.noticeGone(n)
     }
     if (shown.value <= 0f && n == null) return
-    Box(Modifier.offset(y = Pc.BarHeight).fillMaxWidth().height(24.dp).clipToBounds()) {
+    Box(Modifier.offset(y = Pc.barShown).fillMaxWidth().height(24.dp).clipToBounds()) {
         // frosted over the canvas, as measured (a thin line under it doesn't show through); moved
         // as it is placed, so the frost follows it
         Box(

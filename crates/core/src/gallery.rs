@@ -17,8 +17,9 @@ const STACK: &str = "Stack";
 /// The stack the gallery's recovery puts what it finds in.
 const RECOVERED: &str = "Recovered Artworks";
 
-/// A saved artwork: its folder, its name and size, and when it was last changed (milliseconds
-/// since 1970).
+/// A saved artwork: its folder, its name and size, when it was last changed (milliseconds since
+/// 1970), and how many quarter turns clockwise it shows turned by (its thumbnail is kept so), as
+/// its canvas was left.
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct GalleryArtwork {
     pub dir: String,
@@ -26,6 +27,7 @@ pub struct GalleryArtwork {
     pub width: u32,
     pub height: u32,
     pub modified_ms: i64,
+    pub turns: u32,
 }
 
 /// Something the gallery shows: an artwork, or a stack of them (in their own order).
@@ -128,6 +130,17 @@ fn copy_dir(from: &Path, to: &Path, last: Option<&str>) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The artwork in `from` copied to `to`, its own file last (a copy half made isn't an artwork in
+/// the gallery yet) and as recent as the original's (not worked on yet).
+fn copy_artwork(from: &Path, to: &Path) -> std::io::Result<()> {
+    copy_dir(from, to, Some(ARTWORK_FILE))?;
+    let when = fs::metadata(from.join(ARTWORK_FILE)).and_then(|m| m.modified());
+    if let (Ok(when), Ok(file)) = (when, fs::File::options().write(true).open(to.join(ARTWORK_FILE))) {
+        let _ = file.set_modified(when);
+    }
+    Ok(())
+}
+
 fn read_artwork(dir: &Path) -> Option<GalleryArtwork> {
     let file = dir.join(ARTWORK_FILE);
     let json: serde_json::Value = serde_json::from_slice(&fs::read(&file).ok()?).ok()?;
@@ -139,6 +152,7 @@ fn read_artwork(dir: &Path) -> Option<GalleryArtwork> {
         width: side("width"),
         height: side("height"),
         modified_ms: modified(&file),
+        turns: json.get("turns").and_then(serde_json::Value::as_u64).map_or(0, |t| (t % 4) as u32),
     })
 }
 
@@ -353,18 +367,30 @@ impl ArtworkStore {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// A copy of the artwork in `dir`, under the same name, right after it; returns its folder.
+    /// A copy of the artwork in `dir`, under the same name, right after it; a stack's copy holds
+    /// a copy of each of its artworks, in its order. Returns its folder.
     pub fn duplicate(&self, dir: String) -> String {
         let dir = PathBuf::from(dir);
         let at = self.parent_of(&dir);
         let before = self.order(&at);
         let copy = at.join(fresh_name());
-        // the artwork's own file last: a copy half made isn't an artwork in the gallery yet
-        let _ = copy_dir(&dir, &copy, Some(ARTWORK_FILE));
-        // not worked on yet: as recent as the original
-        let when = fs::metadata(dir.join(ARTWORK_FILE)).and_then(|m| m.modified());
-        if let (Ok(when), Ok(file)) = (when, fs::File::options().write(true).open(copy.join(ARTWORK_FILE))) {
-            let _ = file.set_modified(when);
+        if dir.join(STACK_FILE).is_file() {
+            // each artwork in a folder of its own name, so no two in the gallery share one; the
+            // stack's own file last: a copy half made isn't a stack in the gallery yet
+            let _ = fs::create_dir_all(&copy);
+            let inside: Vec<String> = self
+                .order(&dir)
+                .iter()
+                .filter(|name| read_artwork(&dir.join(name)).is_some())
+                .filter_map(|name| {
+                    let fresh = fresh_name();
+                    copy_artwork(&dir.join(name), &copy.join(&fresh)).ok().map(|()| fresh)
+                })
+                .collect();
+            write_order(&copy, &inside);
+            let _ = fs::copy(dir.join(STACK_FILE), copy.join(STACK_FILE));
+        } else {
+            let _ = copy_artwork(&dir, &copy);
         }
         let place = before.iter().position(|n| *n == name_of(&dir)).map_or(0, |i| i + 1);
         let mut order = before;
@@ -857,6 +883,21 @@ mod tests {
         store.stack(vec![dir(3), dir(1)]);
         assert_eq!(shown(&store, None), names(&["C", "Stack[First,B]", "A"]));
         assert!(store.most_recent().is_some());
+        // a stack duplicated: right after it, a copy of each of its artworks in its order, each
+        // in a folder of its own
+        let stack = store.list(None)[1].dir().to_owned();
+        store.rename_stack(stack.clone(), "Pair".into());
+        let copy = store.duplicate(stack.clone());
+        assert_eq!(shown(&store, None), names(&["C", "Pair[First,B]", "Pair[First,B]", "A"]));
+        let inside = |dir: &str| -> Vec<String> {
+            store.list(Some(dir.to_owned())).iter().map(|e| name_of(Path::new(e.dir()))).collect()
+        };
+        let (was, now) = (inside(&stack), inside(&copy));
+        assert_eq!(now.len(), 2);
+        assert!(now.iter().all(|n| !was.contains(n)), "{was:?} {now:?}");
+        // deleted, its artworks go with it
+        store.delete(copy.clone());
+        assert_eq!(shown(&store, None), names(&["C", "Pair[First,B]", "A"]));
         let _ = fs::remove_dir_all(&root);
     }
 }

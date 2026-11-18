@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Each pen pointer's last lean: radians from upright, and the direction it leans (radians
-/// clockwise from screen-up), as the strokes take them.
+/// clockwise from screen-up), as the strokes take them; none for a pen that doesn't say.
 static LEANS: Mutex<Option<HashMap<u64, (f32, f32)>>> = Mutex::new(None);
 
 /// Each pen pointer's last pressure (0..1), for a pen that gives one.
@@ -51,10 +51,19 @@ pub struct MousePen {
 /// The pen moving the mouse pointer now, while a tablet's pen is what moves it.
 static MOUSE_PEN: Mutex<Option<MousePen>> = Mutex::new(None);
 
-/// The pen's latest readings under X11, each with where it put the mouse pointer (window pixels),
-/// newest last: the mouse's moves come apart from them (winit's own, on another connection), and
-/// each takes the reading made where it is, not the latest, which may be ahead of it or behind.
-static MOUSE_PEN_TRAIL: Mutex<VecDeque<((f32, f32), MousePen)>> = Mutex::new(VecDeque::new());
+/// The pen's latest readings under X11 and through WinTab, newest last: the mouse's moves come
+/// apart from them (winit's own, on another connection or as other messages), and each takes the
+/// reading made where it is, not the latest, which may be ahead of it or behind.
+static MOUSE_PEN_TRAIL: Mutex<VecDeque<Reading>> = Mutex::new(VecDeque::new());
+
+/// A reading of the pen moving the mouse pointer: where it put the pointer (window pixels), and
+/// where the pen itself was, finer than the pointer's whole pixels, if its tablet says.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Reading {
+    pointer: (f32, f32),
+    pen: MousePen,
+    fine: Option<(f32, f32)>,
+}
 /// How many readings the trail keeps: more than come in while a slow frame is drawn.
 #[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
 const TRAIL: usize = 64;
@@ -97,25 +106,38 @@ pub fn roll(id: u64) -> Option<f32> {
     ROLLS.lock().ok()?.as_ref()?.get(&id).copied()
 }
 
+/// The pointer of the pen near the window, if one is: a tablet's pen moving the mouse pointer
+/// (Windows Ink off, read through WinTab; X11; a Mac), whose lean the mouse's samples carry, or
+/// else the pen pointer last heard from.
+fn near() -> Option<u64> {
+    if mouse_pen().is_some() {
+        return Some(MOUSE);
+    }
+    *LATEST.lock().ok()?
+}
+
 /// The direction the pen near the window leans (radians clockwise from screen-up), if a pen is
-/// near.
+/// near: the brush cursor turns with it as the stamps do.
 pub fn azimuth() -> Option<f32> {
-    let id = (*LATEST.lock().ok()?)?;
-    Some(lean(id).map_or(0.0, |(_, towards)| towards))
+    Some(lean(near()?).map_or(0.0, |(_, towards)| towards))
 }
 
 /// How far the barrel of the pen near the window is turned (radians clockwise), if a pen that
 /// gives it is near.
 pub fn barrel() -> Option<f32> {
-    let id = (*LATEST.lock().ok()?)?;
-    roll(id)
+    roll(near()?)
 }
 
-/// Pointer `id`'s lean and roll as they now are; it is the pen last heard from.
+/// Pointer `id`'s lean (none: it doesn't say) and roll as they now are; it is the pen last heard
+/// from.
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
-fn keep_pose(id: u64, lean: (f32, f32), roll: Option<f32>) {
+fn keep_pose(id: u64, lean: Option<(f32, f32)>, roll: Option<f32>) {
     if let Ok(mut leans) = LEANS.lock() {
-        leans.get_or_insert_with(Default::default).insert(id, lean);
+        let leans = leans.get_or_insert_with(Default::default);
+        match lean {
+            Some(l) => leans.insert(id, l),
+            None => leans.remove(&id),
+        };
     }
     if let Ok(mut rolls) = ROLLS.lock() {
         let rolls = rolls.get_or_insert_with(Default::default);
@@ -130,7 +152,7 @@ fn keep_pose(id: u64, lean: (f32, f32), roll: Option<f32>) {
 }
 
 /// No pen is near the window any more.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 fn pen_gone() {
     if let Ok(mut latest) = LATEST.lock() {
         *latest = None;
@@ -190,9 +212,10 @@ pub(crate) fn pen_on_screen(id: u64, on_screen: bool) {
     }
 }
 
-/// Whether the first and second barrel buttons of the pen near the window are held now.
+/// Whether the first and second barrel buttons of the pen near the window are held now: the
+/// tablet pen moving the mouse pointer's (WinTab) while there is one, else the system's.
 pub fn buttons_held() -> [bool; 2] {
-    let Some(id) = LATEST.lock().ok().and_then(|l| *l) else { return [false; 2] };
+    let Some(id) = near() else { return [false; 2] };
     let flags = FLAGS.lock().ok().and_then(|f| f.as_ref()?.get(&id).copied()).unwrap_or(0);
     [flags & FLAG_BARREL != 0, flags & FLAG_SECOND_BARREL != 0]
 }
@@ -212,25 +235,50 @@ pub fn mouse_pen() -> Option<MousePen> {
 /// pixels) if it was lately, else as last read; none while it isn't a pen that moves it.
 pub fn mouse_pen_at(at: (f32, f32)) -> Option<MousePen> {
     let latest = mouse_pen()?;
+    Some(reading_at(at).map_or(latest, |r| r.pen))
+}
+
+/// Where the tablet pen moving the mouse pointer was (window pixels, finer than the pointer's
+/// whole ones), as it was read with the pointer at `at` lately; none if it wasn't, or its tablet
+/// doesn't say. Windows gives the pointer in whole pixels, and a slow line drawn through them
+/// would go in steps.
+pub fn mouse_pen_fine_at(at: (f32, f32)) -> Option<(f32, f32)> {
+    mouse_pen()?;
+    reading_at(at)?.fine
+}
+
+/// The latest reading of the pen moving the mouse pointer made with the pointer at `at`.
+fn reading_at(at: (f32, f32)) -> Option<Reading> {
     let near = |p: (f32, f32)| (p.0 - at.0).abs() < 1e-3 && (p.1 - at.1).abs() < 1e-3;
-    let there = MOUSE_PEN_TRAIL.lock().ok().and_then(|t| t.iter().rev().find(|(p, _)| near(*p)).map(|(_, pen)| *pen));
-    Some(there.unwrap_or(latest))
+    MOUSE_PEN_TRAIL.lock().ok()?.iter().rev().find(|r| near(r.pointer)).copied()
 }
 
 /// The pen moving the mouse pointer was read with the pointer at `at`, window pixels.
 #[cfg_attr(not(all(unix, not(target_os = "macos"))), allow(dead_code))]
 fn keep_mouse_pen_at(at: (f32, f32), pen: MousePen) {
+    keep_reading(Reading { pointer: at, pen, fine: None });
+}
+
+/// The pen moving the mouse pointer was read with the pointer at `at`, itself at `fine` (window
+/// pixels, finer than whole ones) if its tablet says.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn keep_fine_mouse_pen_at(at: (f32, f32), pen: MousePen, fine: Option<(f32, f32)>) {
+    keep_reading(Reading { pointer: at, pen, fine });
+}
+
+fn keep_reading(reading: Reading) {
     if let Ok(mut trail) = MOUSE_PEN_TRAIL.lock() {
         if trail.len() >= TRAIL {
             trail.pop_front();
         }
-        trail.push_back((at, pen));
+        trail.push_back(reading);
     }
 }
 
-/// What moves the mouse pointer now: a tablet's pen with its lean, or (none) something else.
+/// What moves the mouse pointer now: a tablet's pen with its lean (none: its tablet doesn't say),
+/// or (none) something else.
 #[cfg_attr(not(unix), allow(dead_code))]
-fn set_mouse_pen(pen: Option<(MousePen, (f32, f32))>) {
+fn set_mouse_pen(pen: Option<(MousePen, Option<(f32, f32)>)>) {
     if let Ok(mut p) = MOUSE_PEN.lock() {
         *p = pen.map(|(p, _)| p);
     }
@@ -242,8 +290,8 @@ fn set_mouse_pen(pen: Option<(MousePen, (f32, f32))>) {
     }
     if let Ok(mut leans) = LEANS.lock() {
         let leans = leans.get_or_insert_with(Default::default);
-        match pen {
-            Some((_, lean)) => leans.insert(MOUSE, lean),
+        match pen.and_then(|(_, lean)| lean) {
+            Some(lean) => leans.insert(MOUSE, lean),
             None => leans.remove(&MOUSE),
         };
     }
@@ -364,6 +412,16 @@ pub fn watch(_window: &winit::window::Window, _wake: winit::event_loop::EventLoo
 
 #[cfg(not(any(windows, unix)))]
 pub fn watch(_window: &winit::window::Window, _wake: winit::event_loop::EventLoopProxy<()>) {}
+
+/// The window fills its screen (F11), or no longer does. On Windows the window's own procedure
+/// (which reads the pen) then lets it grow over the task bar too, as the system asks how big it may
+/// be.
+pub fn set_full_screen(on: bool) {
+    #[cfg(windows)]
+    system::set_full_screen(on);
+    #[cfg(not(windows))]
+    let _ = on;
+}
 
 /// Stops reading the pen, before the window's connection closes.
 pub fn stop() {
@@ -520,7 +578,7 @@ mod tablet_events {
             let tilt = event.tilt();
             let (x, y) = super::tablet_tilt((tilt.x, tilt.y));
             let pen = MousePen { pressure: event.pressure().clamp(0.0, 1.0), eraser: eraser.get() };
-            super::set_mouse_pen(Some((pen, super::lean_of(x, y))));
+            super::set_mouse_pen(Some((pen, Some(super::lean_of(x, y)))));
             // a side button held is the barrel's
             let sides = NSEventButtonMask::PenLowerSide | NSEventButtonMask::PenUpperSide;
             super::pen_flags(MOUSE, if event.buttonMask().intersects(sides) { FLAG_BARREL } else { 0 });
@@ -596,7 +654,9 @@ mod tablet {
                     let now = super::pen_reading(axes, &super::axis_values(&e.valuator_mask, &values), was);
                     last.insert(e.deviceid, now);
                     let pen = MousePen { pressure: now.pressure, eraser: axes.eraser };
-                    super::set_mouse_pen(Some((pen, super::lean_of(now.tilt_x, now.tilt_y))));
+                    let tilts = axes.tilt_x.is_some() || axes.tilt_y.is_some();
+                    let lean = tilts.then(|| super::lean_of(now.tilt_x, now.tilt_y));
+                    super::set_mouse_pen(Some((pen, lean)));
                     // where it put the pointer, as winit has it (fixed point, 16 bits of fraction)
                     let at = |v: xinput::Fp1616| (f64::from(v) / 65536.0) as f32;
                     super::keep_mouse_pen_at((at(e.event_x), at(e.event_y)), pen);
@@ -648,18 +708,25 @@ mod tablet {
 mod system {
     use std::collections::BTreeSet;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicIsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
-    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-    use windows::Win32::UI::Controls::{POINTER_DEVICE_INFO, POINTER_DEVICE_TYPE, POINTER_DEVICE_TYPE_INTEGRATED_PEN};
+    use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow};
+    use windows::Win32::UI::Controls::{
+        FEEDBACK_PEN_BARRELVISUALIZATION, FEEDBACK_PEN_DOUBLETAP, FEEDBACK_PEN_PRESSANDHOLD, FEEDBACK_PEN_RIGHTTAP,
+        FEEDBACK_PEN_TAP, POINTER_DEVICE_INFO, POINTER_DEVICE_TYPE, POINTER_DEVICE_TYPE_INTEGRATED_PEN,
+        SetWindowFeedbackSetting,
+    };
     use windows::Win32::UI::Input::Pointer::{
         GetPointerDevice, GetPointerFrameInfo, GetPointerInfo, GetPointerPenInfo, GetPointerType, POINTER_INFO,
         POINTER_PEN_INFO,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, POINTER_INPUT_TYPE, PT_PEN, PT_TOUCH, SetWindowLongPtrW,
-        WM_ACTIVATE, WM_ENDSESSION, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WNDPROC,
+        CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, MINMAXINFO, POINTER_INPUT_TYPE, PT_PEN, PT_TOUCH, RemovePropW,
+        SetPropW, SetWindowLongPtrW, WM_ACTIVATE, WM_DESTROY, WM_ENDSESSION, WM_GETMINMAXINFO, WM_LBUTTONDOWN,
+        WM_LBUTTONUP, WM_MOUSEMOVE, WM_POINTERDOWN, WM_POINTERLEAVE, WM_POINTERUP, WM_POINTERUPDATE, WNDPROC,
     };
+    use windows::core::{PCWSTR, w};
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     /// What the pen info gives (`penMask`): its pressure, out of 1024, its turn and its tilts.
@@ -672,9 +739,45 @@ mod system {
     /// A pointer's flags, as a message's and as a frame gives them: the system took it back, and
     /// what it did is to be undone.
     const POINTER_FLAG_CANCELED: u32 = 0x8000;
+    /// A mouse message's buttons held (its `wparam`): the left, right and middle, and the two
+    /// side ones.
+    const MOUSE_BUTTONS: usize = 0x0001 | 0x0002 | 0x0010 | 0x0020 | 0x0040;
+
+    /// The pen's gestures the system makes of a pen held still or tapped, as its tablet service
+    /// asks a window for them (the window's property of this name, or its answer to
+    /// `WM_TABLET_QUERYSYSTEMGESTURESTATUS`): press and hold for a right click, the ripples shown
+    /// for a tap and for the barrel button, and flicks, all off. A pen held still on the canvas
+    /// paints there.
+    const PEN_SERVICE: PCWSTR = w!("MicrosoftTabletPenServiceProperty");
+    const WM_TABLET_QUERYSYSTEMGESTURESTATUS: u32 = 0x02CC;
+    const TABLET_DISABLE_PRESSANDHOLD: usize = 0x0000_0001;
+    const TABLET_DISABLE_PENTAPFEEDBACK: usize = 0x0000_0008;
+    const TABLET_DISABLE_PENBARRELFEEDBACK: usize = 0x0000_0010;
+    const TABLET_DISABLE_FLICKS: usize = 0x0001_0000;
+    const PEN_GESTURES_OFF: usize = TABLET_DISABLE_PRESSANDHOLD
+        | TABLET_DISABLE_PENTAPFEEDBACK
+        | TABLET_DISABLE_PENBARRELFEEDBACK
+        | TABLET_DISABLE_FLICKS;
 
     /// winit's procedure for the window, called after ours.
     static WINIT: AtomicIsize = AtomicIsize::new(0);
+
+    /// The window fills its screen (F11).
+    static FULL_SCREEN: AtomicBool = AtomicBool::new(false);
+
+    pub fn set_full_screen(on: bool) {
+        FULL_SCREEN.store(on, Ordering::Relaxed);
+    }
+
+    /// The whole of the screen `hwnd` is on (most of it, if it spans more than one), the task bar's
+    /// strip with it.
+    fn whole_screen(hwnd: HWND) -> Option<RECT> {
+        // SAFETY: the window is this thread's own; the nearest screen is always one
+        let screen = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        // SAFETY: `info` is an info to fill, its size said
+        unsafe { GetMonitorInfoW(screen, &mut info) }.as_bool().then_some(info.rcMonitor)
+    }
 
     /// The pen devices named in the log so far.
     static LOGGED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
@@ -688,8 +791,36 @@ mod system {
         // kept, is called for every message after ours
         let winit = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, ours as usize as isize) };
         WINIT.store(winit, Ordering::Relaxed);
+        quiet_pen_gestures(hwnd);
         // a tablet whose driver has Windows Ink off: its pen read through WinTab
         super::wintab::open(hwnd);
+    }
+
+    /// The system's own handling of a pen held still or tapped on `hwnd` turned off: no ring
+    /// growing round a pen held still to make a right click, no ripples for its taps and barrel
+    /// button, no flicks. They are for clicking with a pen as with a mouse; on a canvas a pen held
+    /// still is painting.
+    fn quiet_pen_gestures(hwnd: HWND) {
+        let off: i32 = 0;
+        for feedback in [
+            FEEDBACK_PEN_PRESSANDHOLD,
+            FEEDBACK_PEN_TAP,
+            FEEDBACK_PEN_DOUBLETAP,
+            FEEDBACK_PEN_RIGHTTAP,
+            FEEDBACK_PEN_BARRELVISUALIZATION,
+        ] {
+            // SAFETY: the window is this thread's own; the setting is a BOOL, as large as said (a
+            // system without the setting leaves it as it was)
+            let _ = unsafe {
+                SetWindowFeedbackSetting(hwnd, feedback, 0, size_of::<i32>() as u32, Some((&raw const off).cast()))
+            };
+        }
+        // SAFETY: the window is this thread's own; the property's value is the flags themselves,
+        // taken off again as the window goes
+        if let Err(e) = unsafe { SetPropW(hwnd, PEN_SERVICE, Some(HANDLE(PEN_GESTURES_OFF as *mut core::ffi::c_void))) }
+        {
+            log::warn!("the pen's press and hold stays on: {e}");
+        }
     }
 
     /// Notes what the other pointers in `id`'s frame are, and any taken back. winit takes a whole
@@ -719,7 +850,7 @@ mod system {
 
     /// The kind of device pen `id` belongs to, as the system has it: built into a screen or not
     /// (from the digitizer's own report), with its name in the log the first time it is heard
-    /// from.
+    /// from, and whether the system gives its pressure.
     fn pen_device(id: u32) -> Option<POINTER_DEVICE_TYPE> {
         let mut pointer = POINTER_INFO::default();
         // SAFETY: `pointer` is an info to fill for this pointer
@@ -731,7 +862,11 @@ mod system {
         let end = name.iter().position(|c| *c == 0).unwrap_or(name.len());
         let name = String::from_utf16_lossy(name.get(..end).unwrap_or_default());
         if LOGGED.lock().is_ok_and(|mut logged| logged.insert(name.clone())) {
-            log::info!("pen: {name} (device type {})", device.pointerDeviceType.0);
+            let mut info = POINTER_PEN_INFO::default();
+            // SAFETY: `info` is a pen info to fill for this pointer
+            let gives = unsafe { GetPointerPenInfo(id, &mut info) }.is_ok() && info.penMask & PEN_MASK_PRESSURE != 0;
+            let pressure = if gives { "with pressure" } else { "no pressure" };
+            log::info!("pen: {name} (device type {}, {pressure})", device.pointerDeviceType.0);
         }
         Some(device.pointerDeviceType)
     }
@@ -745,13 +880,53 @@ mod system {
         if msg == WM_ENDSESSION && wparam.0 != 0 {
             crate::startup::gpu_ended();
         }
+        // filling its screen, the window may be as big as all of it, maximised too: Windows would
+        // keep it to the screen less the task bar, and the task bar's strip would show black
+        if msg == WM_GETMINMAXINFO && FULL_SCREEN.load(Ordering::Relaxed) {
+            // SAFETY: the message's `lparam` is the sizes for the window to fill, this message's own
+            let sizes = unsafe { (lparam.0 as *mut MINMAXINFO).as_mut() };
+            if let (Some(sizes), Some(screen)) = (sizes, whole_screen(hwnd)) {
+                let size = POINT { x: screen.right - screen.left, y: screen.bottom - screen.top };
+                sizes.ptMaxPosition = POINT { x: screen.left, y: screen.top };
+                sizes.ptMaxSize = size;
+                sizes.ptMaxTrackSize = size;
+                return LRESULT(0);
+            }
+        }
+        // the pen's gestures, as the window's property has them (a system that asks)
+        if msg == WM_TABLET_QUERYSYSTEMGESTURESTATUS {
+            return LRESULT(PEN_GESTURES_OFF as isize);
+        }
+        if msg == WM_DESTROY {
+            // SAFETY: the property this window was given
+            let _ = unsafe { RemovePropW(hwnd, PEN_SERVICE) };
+        }
         // WinTab's packets: the pen as the mouse, with its pressure (Windows Ink off)
         if super::wintab::message(hwnd, msg, wparam, lparam) {
             return LRESULT(0);
         }
-        // the window active again: its WinTab context goes on top
-        if msg == WM_ACTIVATE && wparam.0 & 0xFFFF != 0 {
-            super::wintab::activated();
+        // the window coming to the front (the low word not WA_INACTIVE) or going back: its WinTab
+        // context is seen to once winit and the system have done with it, the keyboard given to it
+        if msg == WM_ACTIVATE {
+            let result = to_winit(hwnd, msg, wparam, lparam);
+            super::wintab::activated(hwnd, wparam.0 & 0xFFFF != 0);
+            return result;
+        }
+        // a tablet's pen moving the mouse (Windows Ink off) pressing, and up again: the mouse with
+        // no button held (its keys and buttons in `wparam`)
+        match msg {
+            WM_LBUTTONDOWN => super::wintab::pressed(),
+            WM_MOUSEMOVE | WM_LBUTTONUP if wparam.0 & MOUSE_BUTTONS == 0 => super::wintab::pen_up(hwnd),
+            _ => {}
+        }
+        // the system's pen gone out of reach, or out of the window: none is near now, so the brush
+        // cursor no longer turns as it last leaned (the mouse's moving it)
+        if msg == WM_POINTERLEAVE {
+            let mut kind = POINTER_INPUT_TYPE::default();
+            // SAFETY: `kind` is a type to fill for the pointer leaving (the low word of `wparam`)
+            if unsafe { GetPointerType((wparam.0 & 0xFFFF) as u32, &mut kind) }.is_ok() && kind == PT_PEN {
+                super::pen_gone();
+            }
         }
         let mut hovering = false;
         if msg == WM_POINTERDOWN || msg == WM_POINTERUPDATE || msg == WM_POINTERUP {
@@ -781,7 +956,7 @@ mod system {
             // SAFETY: `info` is a pen info to fill; a pointer that isn't a pen fails and is left
             if unsafe { GetPointerPenInfo(id, &mut info) }.is_ok() {
                 let tilted = info.penMask & (PEN_MASK_TILT_X | PEN_MASK_TILT_Y) != 0;
-                let lean = if tilted { super::lean_of(info.tiltX as f32, info.tiltY as f32) } else { (0.0, 0.0) };
+                let lean = tilted.then(|| super::lean_of(info.tiltX as f32, info.tiltY as f32));
                 // degrees clockwise
                 let roll = (info.penMask & PEN_MASK_ROTATION != 0).then(|| (info.rotation as f32).to_radians());
                 super::keep_pose(u64::from(id), lean, roll);
@@ -797,7 +972,12 @@ mod system {
             // SAFETY: the message as it came, to the system's default procedure
             return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
         }
-        // SAFETY: the procedure winit set, as SetWindowLongPtrW gave it back
+        to_winit(hwnd, msg, wparam, lparam)
+    }
+
+    /// The message on to winit's procedure for the window.
+    fn to_winit(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        // SAFETY: the procedure winit set, as SetWindowLongPtrW gave it back, for its own window
         let winit: WNDPROC = unsafe { std::mem::transmute::<isize, WNDPROC>(WINIT.load(Ordering::Relaxed)) };
         unsafe { CallWindowProcW(winit, hwnd, msg, wparam, lparam) }
     }
@@ -838,18 +1018,74 @@ mod tests {
         assert_eq!(pressure(921), None);
     }
 
+    /// The tests of what moves the mouse pointer, one at a time: it is the app's, not a test's.
+    pub(super) fn mouse_pointer_tests() -> std::sync::MutexGuard<'static, ()> {
+        static ONE: Mutex<()> = Mutex::new(());
+        ONE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn the_brush_cursor_turns_with_a_tablets_pen_moving_the_mouse_pointer_as_with_the_systems_pen() {
+        let _one = mouse_pointer_tests();
+        let turned = |towards: f32| azimuth().is_some_and(|a| (a - towards.to_radians()).abs() < 1e-4);
+        // the system's pen (Windows Ink on), leaning right, its barrel turned
+        set_mouse_pen(None);
+        keep_pose(941, Some(lean_of(30.0, 0.0)), Some(0.5));
+        assert!(turned(90.0), "{:?}", azimuth());
+        assert_eq!(barrel(), Some(0.5));
+        // a tablet's pen moving the mouse pointer (WinTab with Windows Ink off), leaning towards
+        // the user: the cursor turns with it, as its stroke's stamps do; it gives no roll
+        let pen = MousePen { pressure: 0.3, eraser: false };
+        set_mouse_pen(Some((pen, Some(lean_of(0.0, 30.0)))));
+        assert!(turned(180.0), "{:?}", azimuth());
+        assert_eq!(lean(MOUSE).map(|(_, towards)| towards), azimuth());
+        assert_eq!(barrel(), None);
+        // the pen gone from the tablet: the pen last heard from before it
+        set_mouse_pen(None);
+        assert!(turned(90.0), "{:?}", azimuth());
+        pen_gone();
+        assert_eq!((azimuth(), barrel()), (None, None));
+    }
+
+    #[test]
+    fn the_buttons_held_are_the_tablet_pens_while_it_moves_the_mouse_pointer() {
+        let _one = mouse_pointer_tests();
+        // set as they are, not pressed: the presses another test counts stay as they are
+        let hold = |id: u64, flags: u32| {
+            FLAGS.lock().unwrap().get_or_insert_with(Default::default).insert(id, flags);
+        };
+        // the system's pen (Windows Ink on), its first button held
+        set_mouse_pen(None);
+        keep_pose(951, Some(lean_of(0.0, 0.0)), None);
+        hold(951, FLAG_BARREL);
+        assert_eq!(buttons_held(), [true, false]);
+        // a tablet's pen moving the mouse pointer (WinTab), its second button held: its own
+        let pen = MousePen { pressure: 0.3, eraser: false };
+        set_mouse_pen(Some((pen, None)));
+        hold(MOUSE, FLAG_SECOND_BARREL);
+        assert_eq!(buttons_held(), [false, true]);
+        // gone from the tablet: the system's pen again
+        set_mouse_pen(None);
+        hold(MOUSE, 0);
+        assert_eq!(buttons_held(), [true, false]);
+        hold(951, 0);
+        pen_gone();
+        assert_eq!(buttons_held(), [false, false]);
+    }
+
     #[test]
     fn the_mouse_pointer_takes_the_pens_reading_made_where_it_is() {
+        let _one = mouse_pointer_tests();
         let pen = |pressure| MousePen { pressure, eraser: false };
         set_mouse_pen(None);
         keep_mouse_pen_at((10.0, 20.0), pen(0.2));
         assert_eq!(mouse_pen_at((10.0, 20.0)), None, "the mouse moves it");
-        set_mouse_pen(Some((pen(0.2), (0.0, 0.0))));
+        set_mouse_pen(Some((pen(0.2), None)));
         keep_mouse_pen_at((10.0, 20.0), pen(0.2));
         // read on ahead of the mouse's moves: each move takes the reading where it is
         for (x, pressure) in [(11.0, 0.3), (12.5, 0.5), (14.0, 0.7)] {
             let read = pen(pressure);
-            set_mouse_pen(Some((read, (0.0, 0.0))));
+            set_mouse_pen(Some((read, None)));
             keep_mouse_pen_at((x, 20.0), read);
         }
         assert_eq!(mouse_pen_at((10.0, 20.0)), Some(pen(0.2)));
@@ -859,12 +1095,19 @@ mod tests {
         assert_eq!(mouse_pen_at((10.0, 20.0)), Some(pen(0.9)));
         // somewhere not yet read: as last read
         assert_eq!(mouse_pen_at((30.0, 20.0)), Some(pen(0.7)));
+        // where the pen was finer than the pointer's whole pixels, where its tablet says
+        assert_eq!(mouse_pen_fine_at((12.5, 20.0)), None, "X11's readings say nothing of it");
+        keep_fine_mouse_pen_at((15.0, 20.0), pen(0.7), Some((15.375, 19.75)));
+        assert_eq!(mouse_pen_fine_at((15.0, 20.0)), Some((15.375, 19.75)));
+        assert_eq!(mouse_pen_at((15.0, 20.0)), Some(pen(0.7)));
+        assert_eq!(mouse_pen_fine_at((16.0, 20.0)), None, "not read there");
         set_mouse_pen(None);
         assert_eq!(mouse_pen_at((12.5, 20.0)), None);
+        assert_eq!(mouse_pen_fine_at((15.0, 20.0)), None, "the mouse moves it");
         // the system's pen messages starting: what WinTab said a moment before is let go
         #[cfg(windows)]
         {
-            set_mouse_pen(Some((pen(0.4), (0.0, 0.0))));
+            set_mouse_pen(Some((pen(0.4), None)));
             wintab::ink_pen();
             assert_eq!(mouse_pen(), None);
         }

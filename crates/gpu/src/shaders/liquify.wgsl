@@ -61,21 +61,17 @@ fn falloff(d: f32) -> f32 {
     return 2.0 * (1.0 - x) * (1.0 - x);
 }
 
-// what one stamp does at its own pixel
-@fragment
-fn fs_stamp(in: StampOut) -> @location(0) vec4<f32> {
-    let r = lu.stamp.z;
-    let away = in.local;
+// What a stamp (`r` its radius, `amount` how much, `way` its way, mode and how narrow a lobe is)
+// does `away` from its centre (canvas pixels), within its rim, the field `field_px` field pixels a
+// canvas pixel: how far it moves things, and how much it rebuilds.
+fn stamp_does(away: vec2<f32>, r: f32, amount: f32, way_mode: vec4<f32>, field_px: vec2<f32>) -> vec3<f32> {
     let dist = length(away);
-    if (dist >= r) {
-        discard;
-    }
     // no nearer than a part of a pixel of the field: a tiny stamp only just touches it
-    let f = falloff(max(dist, NEAREST / max(lu.canvas.z, lu.canvas.w)) / r) * lu.stamp.w;
-    let way = lu.way.xy;
+    let f = falloff(max(dist, NEAREST / max(field_px.x, field_px.y)) / r) * amount;
+    let way = way_mode.xy;
     var moved = vec2<f32>(0.0);
     var rebuilt = 0.0;
-    switch i32(lu.way.z + 0.5) {
+    switch i32(way_mode.z + 0.5) {
         // push: what is behind the brush comes on
         case 0: { moved = way * (-PUSH * f); }
         // twirl right and left: turned about the centre
@@ -85,7 +81,7 @@ fn fs_stamp(in: StampOut) -> @location(0) vec4<f32> {
         case 3: { moved = away * (DRAW * f); }
         case 4: { moved = away * (-DRAW * f); }
         case 5: {
-            let narrow = lu.way.w;
+            let narrow = way_mode.w;
             let towards = dot(away / max(dist, 1e-4), way);
             moved = away * (DRAW * f * clamp((towards - narrow) / (1.0 - narrow), 0.0, 1.0));
         }
@@ -98,7 +94,16 @@ fn fs_stamp(in: StampOut) -> @location(0) vec4<f32> {
         // reconstruct
         default: { rebuilt = f; }
     }
-    return vec4<f32>(moved, rebuilt, 0.0);
+    return vec3<f32>(moved, rebuilt);
+}
+
+// what one stamp does at its own pixel
+@fragment
+fn fs_stamp(in: StampOut) -> @location(0) vec4<f32> {
+    if (length(in.local) >= lu.stamp.z) {
+        discard;
+    }
+    return vec4<f32>(stamp_does(in.local, lu.stamp.z, lu.stamp.w, lu.way, lu.canvas.zw), 0.0);
 }
 
 @vertex
@@ -120,22 +125,112 @@ fn field_at(p: vec2<f32>) -> vec2<f32> {
     return mix(top, bottom, t.y);
 }
 
-// the field after a step: where the stamps send this pixel, the offset from there on top
-@fragment
-fn fs_step(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let sum = textureLoad(sums, vec2<i32>(pos.xy), 0);
-    let here = pos.xy + lu.area.xy;
-    var taken = 1.0;
+// how much of the field's pixel `here` a step takes: all, or as far as the selection does
+fn taken_at(here: vec2<f32>) -> f32 {
     if (lu.way.w > 0.5) {
-        taken = textureLoad(chosen, vec2<i32>(here / lu.canvas.zw), 0).r;
+        return textureLoad(chosen, vec2<i32>(here / lu.canvas.zw), 0).r;
     }
-    let moved = sum.xy * taken;
-    var offset = (moved + field_at(here + moved * lu.canvas.zw)) * lu.stamp.x;
+    return 1.0;
+}
+
+// the offset a step leaves at a pixel its stamps added up `sum` at (taken that far), the field
+// `carried` where they send it
+fn stepped(sum: vec3<f32>, moved: vec2<f32>, carried: vec2<f32>, taken: f32) -> vec2<f32> {
+    var offset = (moved + carried) * lu.stamp.x;
     if (sum.z > 0.0) {
         offset *= pow(REBUILD_KEEP, REBUILD_POWER * sum.z * taken);
         if (length(offset) < LEAST_OFFSET) {
             offset = vec2<f32>(0.0);
         }
     }
-    return vec4<f32>(offset, 0.0, 1.0);
+    return offset;
+}
+
+// the field after a step: where the stamps send this pixel, the offset from there on top
+@fragment
+fn fs_step(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let sum = textureLoad(sums, vec2<i32>(pos.xy), 0);
+    let here = pos.xy + lu.area.xy;
+    let taken = taken_at(here);
+    let moved = sum.xy * taken;
+    return vec4<f32>(stepped(sum.xyz, moved, field_at(here + moved * lu.canvas.zw), taken), 0.0, 1.0);
+}
+
+// ---- on a GPU that can't draw into floats: the stamps' sums and the field kept in integers
+// holding each float's bits, the sums added up in a pass of their own a lot of stamps at a time,
+// each stamp rounded into them as half floats are (as a blend into them adds it up)
+
+struct LiquifyLot {
+    // (stamps in the lot, 1 when the sums so far are read on from), the canvas and the step's part
+    // of the field (as `lu` has them)
+    head: vec4<f32>,
+    canvas: vec4<f32>,
+    area: vec4<f32>,
+    // each stamp's (centre x, y, radius, amount) then (way x, y, mode, how narrow a lobe is)
+    stamps: array<vec4<f32>, 512>,
+}
+
+@group(1) @binding(3) var<uniform> lot: LiquifyLot;
+@group(1) @binding(4) var sums_bits: texture_2d<u32>;
+@group(1) @binding(5) var field_bits: texture_2d<u32>;
+
+// `x` rounded to the nearest half float (ties to even), kept in a float: worked out on its bits,
+// so that no compiler takes a round trip through half floats for one that changes nothing
+fn to_half(x: f32) -> f32 {
+    if (abs(x) < 6.1035156e-5) {
+        // below half floats' normal range: their step there
+        return round(x * 16777216.0) / 16777216.0;
+    }
+    let b = bitcast<u32>(x);
+    let kept = b + 4095u + ((b >> 13u) & 1u);
+    return bitcast<f32>(kept & 0xffffe000u);
+}
+
+fn to_halves(v: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(to_half(v.x), to_half(v.y), to_half(v.z));
+}
+
+@fragment
+fn fs_sums_bits(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<u32> {
+    var sum = vec3<f32>(0.0);
+    if (lot.head.y > 0.5) {
+        sum = bitcast<vec4<f32>>(textureLoad(sums_bits, vec2<i32>(pos.xy), 0)).xyz;
+    }
+    // the pixel's middle on the canvas
+    let at = (pos.xy + lot.area.xy) / lot.canvas.zw;
+    for (var k = 0u; k < u32(lot.head.x); k++) {
+        let s = lot.stamps[2u * k];
+        let away = at - s.xy;
+        if (length(away) >= s.z) {
+            continue;
+        }
+        sum = to_halves(sum + to_halves(stamp_does(away, s.z, s.w, lot.stamps[2u * k + 1u], lot.canvas.zw)));
+    }
+    return bitcast<vec4<u32>>(vec4<f32>(sum, 0.0));
+}
+
+// the field (as bits) at `p` (field pixels), between its pixels
+fn field_bits_at(p: vec2<f32>) -> vec2<f32> {
+    let last = vec2<i32>(textureDimensions(field_bits)) - 1;
+    let at = p - 0.5;
+    let below = floor(at);
+    let t = at - below;
+    let a = clamp(vec2<i32>(below), vec2<i32>(0), last);
+    let b = clamp(vec2<i32>(below) + 1, vec2<i32>(0), last);
+    let top = mix(field_bits_texel(a), field_bits_texel(vec2<i32>(b.x, a.y)), t.x);
+    let bottom = mix(field_bits_texel(vec2<i32>(a.x, b.y)), field_bits_texel(b), t.x);
+    return mix(top, bottom, t.y);
+}
+
+fn field_bits_texel(q: vec2<i32>) -> vec2<f32> {
+    return bitcast<vec2<f32>>(textureLoad(field_bits, q, 0).xy);
+}
+
+@fragment
+fn fs_step_bits(@builtin(position) pos: vec4<f32>) -> @location(0) vec2<u32> {
+    let sum = bitcast<vec4<f32>>(textureLoad(sums_bits, vec2<i32>(pos.xy), 0));
+    let here = pos.xy + lu.area.xy;
+    let taken = taken_at(here);
+    let moved = sum.xy * taken;
+    return bitcast<vec2<u32>>(stepped(sum.xyz, moved, field_bits_at(here + moved * lu.canvas.zw), taken));
 }

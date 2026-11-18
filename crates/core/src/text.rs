@@ -3,9 +3,10 @@
 //! An edit is one undo step, back to the text and the pixels as it began. Inside an edit, each
 //! drag of a side of its box (its width) is a step of its own while the edit lasts.
 
-use procraft_engine::document::{Document, LayerId, LayerText, TextAlign};
+use procraft_engine::document::{Document, LayerId, LayerText, TextAlign, TextRun};
 use procraft_engine::geom::{Affine, IRect, Vec2};
 
+use crate::text_runs::{self, TextStyleChange, Typing};
 use crate::{CanvasSession, State};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -44,6 +45,74 @@ pub struct TextInfo {
     pub x: f32,
     pub y: f32,
     pub width: f32,
+    /// The look of each stretch of the text in turn, covering it all, when it isn't one look
+    /// throughout (the look above is then the first's); none when it is. The alignment, the
+    /// leading, upper case and running down are the whole text's.
+    pub runs: Vec<TextRunInfo>,
+}
+
+/// A stretch of text in a look of its own (see [`TextInfo::runs`]): how many characters it covers
+/// (as the core counts them) and its look.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct TextRunInfo {
+    pub len: u32,
+    pub font: String,
+    pub style: String,
+    pub size: f32,
+    pub kerning: f32,
+    pub tracking: f32,
+    pub baseline: f32,
+    pub opacity: f32,
+    pub underline: bool,
+    pub outline: bool,
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+}
+
+impl From<&TextRun> for TextRunInfo {
+    fn from(r: &TextRun) -> Self {
+        TextRunInfo {
+            len: r.len,
+            font: r.font.clone(),
+            style: r.style.clone(),
+            size: r.size,
+            kerning: r.kerning,
+            tracking: r.tracking,
+            baseline: r.baseline,
+            opacity: r.opacity,
+            underline: r.underline,
+            outline: r.outline,
+            r: r.color[0],
+            g: r.color[1],
+            b: r.color[2],
+        }
+    }
+}
+
+impl From<TextRunInfo> for TextRun {
+    fn from(r: TextRunInfo) -> Self {
+        TextRun {
+            len: r.len,
+            font: r.font,
+            style: r.style,
+            size: r.size,
+            kerning: r.kerning,
+            tracking: r.tracking,
+            baseline: r.baseline,
+            opacity: r.opacity,
+            underline: r.underline,
+            outline: r.outline,
+            color: [r.r, r.g, r.b],
+        }
+    }
+}
+
+impl TextInfo {
+    /// Each stretch of the text in its look, in order, covering it all (one when it keeps none).
+    pub(crate) fn each_run(&self) -> Vec<TextRun> {
+        LayerText::from(self.clone()).runs()
+    }
 }
 
 impl From<&LayerText> for TextInfo {
@@ -74,6 +143,7 @@ impl From<&LayerText> for TextInfo {
             x: t.origin[0],
             y: t.origin[1],
             width: t.width,
+            runs: t.runs.iter().map(TextRunInfo::from).collect(),
         }
     }
 }
@@ -103,6 +173,7 @@ impl From<TextInfo> for LayerText {
             color: [t.r, t.g, t.b],
             origin: [t.x, t.y],
             width: t.width,
+            runs: t.runs.into_iter().map(TextRun::from).collect(),
         }
     }
 }
@@ -125,13 +196,14 @@ const NARROWEST: f32 = 1.0;
 
 /// Text being edited: its layer, the document as the edit began, the changes to its box's width
 /// made since (to undo and redo one at a time while it lasts; the edit's one step takes them all
-/// once it ends), and a side being dragged.
+/// once it ends), a side being dragged, and what is typed (where, in which look).
 pub(crate) struct TextEdit {
     layer: LayerId,
     before: Document,
     steps: Vec<WidthStep>,
     undone: Vec<WidthStep>,
     side: Option<SideDrag>,
+    typing: Typing,
 }
 
 impl TextEdit {
@@ -249,7 +321,10 @@ impl CanvasSession {
         if let Some(canvas) = st.canvas.as_mut() {
             canvas.hold_layer(layer);
         }
-        st.text_edit = Some(TextEdit { layer, before, steps: Vec::new(), undone: Vec::new(), side: None });
+        // all of it chosen as it begins; what is typed takes the colour chosen now
+        let count = st.doc.layer(layer).and_then(|l| l.text.as_ref()).map_or(0, |t| t.text.chars().count());
+        let typing = Typing { chosen: (0, count), picked: None, colour: Some(st.color) };
+        st.text_edit = Some(TextEdit { layer, before, steps: Vec::new(), undone: Vec::new(), side: None, typing });
         // a new layer is clear: its first drawing needn't wipe the rest of it
         st.text_drawn = id.is_none().then_some(IRect::EMPTY);
         st.revision += 1;
@@ -257,15 +332,91 @@ impl CanvasSession {
         Some(layer.0)
     }
 
-    /// Changes the text being edited (one undo step when the edit ends).
-    pub fn set_text(&self, info: TextInfo) -> bool {
-        let mut st = self.shared.lock();
-        let Some(layer) = st.text_edit.as_ref().map(|e| e.layer) else { return false };
-        let ok = st.doc.set_text(layer, info.into());
-        if ok {
+    /// Changes the text being edited (one undo step when the edit ends): its words, box and the
+    /// whole text's look as `info` has them. Its words changed, the characters kept keep their
+    /// looks and those typed take the look where they went (see [`CanvasSession::text_select`]);
+    /// otherwise its runs are `info`'s (none: its look above throughout). The text as it now
+    /// stands; none when no text is being edited.
+    pub fn set_text(&self, info: TextInfo) -> Option<TextInfo> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let edit = st.text_edit.as_mut()?;
+        let layer = edit.layer;
+        let mut before = st.doc.layer(layer)?.text.clone()?;
+        let mut now = LayerText::from(info);
+        if now.text != before.text {
+            // text of one look given another with its words: what it had takes that look too
+            if before.runs.is_empty() && now.runs.is_empty() {
+                before.set_look(&now.run(0));
+            }
+            now.set_runs(text_runs::edited(&before, &now.text, &edit.typing));
+            // what was picked at the caret has been typed
+            edit.typing.picked = None;
+        } else {
+            let runs = now.runs();
+            now.set_runs(runs);
+        }
+        if st.doc.set_text(layer, now) {
             st.revision += 1;
         }
-        ok
+        edited(st).map(|(_, now)| now)
+    }
+
+    /// The characters chosen in the text being edited (`start`..`end`, as the core counts them;
+    /// the same for a caret): what is typed next goes there, in the look there. Told after each
+    /// change of the text, not before: a change is found against where they were.
+    pub fn text_select(&self, start: u32, end: u32) {
+        if let Some(edit) = self.shared.lock().text_edit.as_mut() {
+            edit.typing.choose(start as usize, end as usize);
+        }
+    }
+
+    /// Changes the look of characters `start`..`end` of the text being edited (as the core counts
+    /// them) by `change`; with none chosen (`start` == `end`), the look of what is typed there next
+    /// (and the whole text's, while it has no characters). The text as it now stands; none when no
+    /// text is being edited.
+    pub fn text_restyle(&self, start: u32, end: u32, change: TextStyleChange) -> Option<TextInfo> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let edit = st.text_edit.as_mut()?;
+        let layer = edit.layer;
+        let mut text = st.doc.layer(layer)?.text.clone()?;
+        let count = text.text.chars().count();
+        let (start, end) = ((start.min(end) as usize).min(count), (start.max(end) as usize).min(count));
+        if start < end {
+            text.set_runs(text_runs::restyled(&text.runs(), start, end, &change));
+        } else {
+            let mut look = match &edit.typing.picked {
+                Some(picked) if edit.typing.chosen == (start, start) => picked.clone(),
+                _ => text_runs::look_at(&text, start, start),
+            };
+            change.apply(&mut look);
+            if count == 0 {
+                text.set_look(&look);
+            }
+            edit.typing.chosen = (start, start);
+            edit.typing.picked = Some(look);
+        }
+        if st.doc.set_text(layer, text) {
+            st.revision += 1;
+        }
+        edited(st).map(|(_, now)| now)
+    }
+
+    /// The look the style sheet shows for characters `start`..`end` of the text being edited (as
+    /// the core counts them): the first one's, underline and outline on only when every one has
+    /// them; with none chosen, the look typed there next. Its length is how many are chosen; none
+    /// when no text is being edited.
+    pub fn text_look(&self, start: u32, end: u32) -> Option<TextRunInfo> {
+        let st = self.shared.lock();
+        let edit = st.text_edit.as_ref()?;
+        let text = st.doc.layer(edit.layer)?.text.as_ref()?;
+        let (start, end) = (start.min(end) as usize, start.max(end) as usize);
+        let look = match &edit.typing.picked {
+            Some(picked) if start == end && edit.typing.chosen == (start, start) => picked.clone(),
+            _ => text_runs::look_at(text, start, end),
+        };
+        Some(TextRunInfo::from(&look))
     }
 
     /// Draws the text being edited into its layer, here (a caller may run it off its main
@@ -435,6 +586,26 @@ impl CanvasSession {
 }
 
 impl CanvasSession {
+    /// The colour chosen while text is edited: what is typed from now on takes it, and the
+    /// characters chosen (when any are) change to it, as text with none yet does. Whether the
+    /// text changed (to draw again).
+    pub(crate) fn text_colour_chosen(&self, colour: [f32; 3]) -> bool {
+        let (start, end, empty) = {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            let Some(edit) = st.text_edit.as_mut() else { return false };
+            edit.typing.colour = Some(colour);
+            let (start, end) = edit.typing.chosen;
+            let empty = st.doc.layer(edit.layer).and_then(|l| l.text.as_ref()).is_none_or(|t| t.text.is_empty());
+            (start, end, empty)
+        };
+        if start == end && !empty {
+            return false;
+        }
+        let [r, g, b] = colour;
+        self.text_restyle(start as u32, end as u32, TextStyleChange::Colour { r, g, b }).is_some()
+    }
+
     /// A width change inside the edit undone (`undo`) or redone: the side it moved goes back (or
     /// again) by as much, wherever the text has since been moved.
     fn text_box_step(&self, undo: bool) -> Option<String> {
@@ -524,8 +695,11 @@ mod tests {
     use procraft_engine::view::View;
     use procraft_gpu::Gpu;
 
+    use procraft_engine::document::{LayerText, TextRun};
+
     use super::{TextAlignment, TextInfo, TextSide};
     use crate::CanvasSession;
+    use crate::TextStyleChange;
 
     /// A session on a headless GPU, its canvas shown through `view`; none without a GPU.
     fn session(view: Affine) -> Option<std::sync::Arc<CanvasSession>> {
@@ -563,6 +737,7 @@ mod tests {
             x: 100.0,
             y: 50.0,
             width: 200.0,
+            runs: Vec::new(),
         }
     }
 
@@ -622,7 +797,7 @@ mod tests {
         assert_eq!(s.undo().as_deref(), Some("Transform"));
         // moved since, a drag undone moves its side back by as much
         let moved = TextInfo { x: 110.0, ..s.layer_text(id).unwrap() };
-        assert!(s.set_text(moved));
+        assert!(s.set_text(moved).is_some());
         assert_eq!(s.text_box_undo().as_deref(), Some("Transform"));
         assert_eq!((shape(&s).0, shape(&s).1), (110.0, 200.0));
         assert_eq!(s.text_box_undo(), None);
@@ -670,11 +845,116 @@ mod tests {
         assert_eq!(s.layer_text(id).map(|t| (t.x, t.width)), Some((100.0, 0.0)));
         // vertical, the box is as wide as its letters and its sides change that too
         let tall = TextInfo { vertical: true, ..s.layer_text(id).unwrap() };
-        assert!(s.set_text(tall));
+        assert!(s.set_text(tall).is_some());
         let column = crate::text_box(s.layer_text(id).unwrap())[2];
         assert!(s.text_side_begin(TextSide::Right, 0.0, 0.0));
         let now = s.text_side_drag(40.0, 0.0).unwrap();
         assert_eq!(now.width, column + 40.0);
         s.text_end(true);
+    }
+
+    /// Each run's length and family.
+    fn fonts(t: &TextInfo) -> Vec<(u32, String)> {
+        t.each_run().into_iter().map(|r| (r.len, r.font)).collect()
+    }
+
+    #[test]
+    fn a_look_picked_with_letters_chosen_is_theirs_alone_and_what_is_typed_takes_the_look_there() {
+        let s = CanvasSession::new(400, 400);
+        let id = s.text_begin(None, text("ab rd")).unwrap();
+        // "rd" chosen (a double-tap chooses a word): another typeface for it alone
+        s.text_select(3, 5);
+        let now = s.text_restyle(3, 5, TextStyleChange::Font { family: "serif".to_owned() }).unwrap();
+        assert_eq!(now.font, "inter");
+        assert_eq!(fonts(&now), [(3, "inter".to_owned()), (2, "serif".to_owned())]);
+        assert_eq!(s.layer_text(id), Some(now.clone()));
+        // the style sheet shows the letters chosen's look, and with a caret the look typed there
+        assert_eq!(s.text_look(3, 5).map(|l| (l.font, l.len)), Some(("serif".to_owned(), 2)));
+        assert_eq!(s.text_look(0, 2).map(|l| l.font).as_deref(), Some("inter"));
+        assert_eq!(s.text_look(5, 5).map(|l| l.font).as_deref(), Some("serif"));
+        // underline shows on only while every letter chosen has it
+        s.text_restyle(4, 5, TextStyleChange::Underline { on: true });
+        assert!(s.text_look(4, 5).is_some_and(|l| l.underline));
+        assert!(s.text_look(3, 5).is_some_and(|l| !l.underline));
+        s.text_restyle(3, 5, TextStyleChange::Underline { on: false });
+
+        // with only a caret, a look picked is what is typed there next
+        s.text_select(1, 1);
+        s.text_restyle(1, 1, TextStyleChange::Size { size: 40.0 });
+        assert_eq!(s.text_look(1, 1).map(|l| l.size), Some(40.0));
+        assert_eq!(s.layer_text(id).map(|t| t.each_run().len()), Some(2), "the text itself unchanged");
+        let typed = s.set_text(TextInfo { text: "axb rd".to_owned(), ..now }).unwrap();
+        s.text_select(2, 2);
+        let sizes: Vec<(u32, f32)> = typed.each_run().into_iter().map(|r| (r.len, r.size)).collect();
+        assert_eq!(sizes, [(1, 20.0), (1, 40.0), (2, 20.0), (2, 20.0)]);
+        // typing on, after it: its look
+        let typed = s.set_text(TextInfo { text: "axyb rd".to_owned(), ..typed }).unwrap();
+        s.text_select(3, 3);
+        assert_eq!(typed.each_run().get(1).map(|r| (r.len, r.size)), Some((2, 40.0)));
+
+        // a colour chosen: the letters chosen take it, and so does what is typed from then on
+        s.text_select(0, 1);
+        s.set_color(1.0, 0.0, 0.0);
+        let red = s.layer_text(id).unwrap();
+        assert_eq!(red.each_run().first().map(|r| (r.len, r.color)), Some((1, [1.0, 0.0, 0.0])));
+        assert_eq!(red.each_run().get(1).map(|r| r.color), Some([0.0, 0.0, 0.0]));
+        s.text_select(7, 7);
+        let more = s.set_text(TextInfo { text: "axyb rdz".to_owned(), ..red }).unwrap();
+        let last = more.each_run().last().cloned().unwrap();
+        assert_eq!((last.len, last.font.as_str(), last.color), (1, "serif", [1.0, 0.0, 0.0]));
+
+        // all of it chosen and given one look: one look throughout, kept as no runs
+        s.text_select(0, 8);
+        for change in [
+            TextStyleChange::Font { family: "inter".to_owned() },
+            TextStyleChange::Size { size: 20.0 },
+            TextStyleChange::Colour { r: 0.0, g: 0.0, b: 0.0 },
+        ] {
+            s.text_restyle(0, 8, change);
+        }
+        let one = s.layer_text(id).unwrap();
+        assert!(one.runs.is_empty() && one.font == "inter" && one.size == 20.0, "{one:?}");
+        s.text_end(true);
+    }
+
+    #[test]
+    fn a_text_kept_before_it_could_have_runs_reads_as_one_look() {
+        let old = r#"{"text":"Hello","font":"serif","style":"Bold","size":30.0,"color":[1.0,0.0,0.0]}"#;
+        let kept: LayerText = serde_json::from_str(old).unwrap();
+        let runs = kept.runs();
+        assert!(kept.runs.is_empty());
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            runs.first().map(|r| (r.len, r.font.as_str(), r.size, r.color)),
+            Some((5, "serif", 30.0, [1.0, 0.0, 0.0]))
+        );
+        // and runs kept with it come back as they were
+        let mut two = kept.clone();
+        let base = kept.run(0);
+        two.set_runs(vec![TextRun { len: 2, ..base.clone() }, TextRun { len: 3, size: 12.0, ..base }]);
+        let back: LayerText = serde_json::from_str(&serde_json::to_string(&two).unwrap()).unwrap();
+        assert_eq!(back.runs().iter().map(|r| (r.len, r.size)).collect::<Vec<_>>(), [(2, 30.0), (3, 12.0)]);
+        // runs that don't cover the text are let go, its look above kept
+        let wrong: LayerText =
+            serde_json::from_str(r#"{"text":"Hi","size":30.0,"runs":[{"len":5,"size":9.0}]}"#).unwrap();
+        assert_eq!(wrong.sanitized().runs().first().map(|r| (r.len, r.size)), Some((2, 30.0)));
+    }
+
+    #[test]
+    fn an_edit_with_runs_goes_back_whole_on_undo() {
+        crate::add_text_font(include_bytes!("../../../android/app/src/main/assets/fonts/Inter-Regular.ttf").to_vec());
+        let Some(s) = session(Affine::IDENTITY) else { return };
+        let id = s.text_begin(None, text("Hello there")).unwrap();
+        s.text_end(true);
+        s.text_begin(Some(id), s.layer_text(id).unwrap()).unwrap();
+        s.text_select(6, 11);
+        s.text_restyle(6, 11, TextStyleChange::Size { size: 40.0 });
+        s.draw_text_into_layer();
+        s.text_end(true);
+        assert_eq!(s.layer_text(id).map(|t| t.each_run().len()), Some(2));
+        assert_eq!(s.undo().as_deref(), Some("Text editing"));
+        assert_eq!(s.layer_text(id).map(|t| (t.runs.len(), t.size)), Some((0, 20.0)));
+        assert_eq!(s.redo().as_deref(), Some("Text editing"));
+        assert_eq!(s.layer_text(id).map(|t| t.each_run().len()), Some(2));
     }
 }

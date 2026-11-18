@@ -36,6 +36,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -72,14 +73,53 @@ private val WideContentEnd = 28.dp
 private val CardEdge get() = if (Pc.light) Color(0xFFDADADA) else Color(0xFF373737)
 private val PageInk get() = if (Pc.light) Color(0xFF3E3E3E) else Color(0xFF797979)
 
+/**
+ * A thin bar at a scrolling list's right edge, as far down as the list is scrolled: shown for a
+ * moment when the list first shows (if there is more of it than its box holds) and while it moves,
+ * then fading out, so a list longer than its box is seen to scroll. Put before `verticalScroll`.
+ */
+@Composable
+private fun Modifier.scrollHint(state: androidx.compose.foundation.ScrollState): Modifier {
+    val shown = remember { androidx.compose.animation.core.Animatable(0f) }
+    val scrolling = state.isScrollInProgress
+    val more = state.maxValue > 0
+    androidx.compose.runtime.LaunchedEffect(more, scrolling) {
+        if (!more) return@LaunchedEffect
+        shown.snapTo(1f)
+        if (!scrolling) {
+            kotlinx.coroutines.delay(1200)
+            shown.animateTo(0f, androidx.compose.animation.core.tween(400))
+        }
+    }
+    return drawWithContent {
+        drawContent()
+        val seen = shown.value
+        val max = state.maxValue
+        if (seen <= 0f || max <= 0 || max == Int.MAX_VALUE) return@drawWithContent
+        val box = size.height
+        val length = (box * box / (box + max)).coerceAtLeast(24.dp.toPx())
+        val top = (box - length) * state.value / max
+        val width = 3.dp.toPx()
+        drawRoundRect(
+            ScrollHintInk.copy(alpha = ScrollHintInk.alpha * seen),
+            topLeft = Offset(size.width - width - 2.dp.toPx(), top),
+            size = Size(width, length),
+            cornerRadius = CornerRadius(width / 2),
+        )
+    }
+}
+
+private val ScrollHintInk get() = if (Pc.light) Color(0x66000000) else Color(0x80FFFFFF)
+
 /** What gestures can do, by icon and name on a card headed "Gesture controls" (a wide screen's). */
 @Composable
 private fun GesturePagesCard(page: GesturePurpose, onPage: (GesturePurpose) -> Unit) {
     val shape = RoundedCornerShape(20.dp)
+    val scroll = rememberScrollState()
     Column(Modifier.padding(start = 10.dp, top = 10.dp, bottom = 10.dp).width(320.dp).fillMaxHeight().clip(shape).background(RailFill).border(1.dp, CardEdge, shape)) {
         Text("Gesture controls", color = Ink, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.padding(start = 24.dp, top = 19.dp))
         Column(
-            Modifier.verticalScroll(rememberScrollState()).padding(start = 8.dp, end = 8.dp, top = 17.dp, bottom = 8.dp),
+            Modifier.scrollHint(scroll).verticalScroll(scroll).padding(start = 8.dp, end = 8.dp, top = 17.dp, bottom = 8.dp),
             verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
             for (p in GesturePurpose.entries) {
@@ -131,7 +171,8 @@ fun GestureControls(vm: CanvasViewModel) {
         if (wide) {
             GesturePagesCard(page) { page = it }
         } else {
-            Column(Modifier.width(81.dp).fillMaxHeight().background(RailFill).verticalScroll(rememberScrollState()).padding(start = 8.dp, top = 46.dp, bottom = 20.dp)) {
+            val rail = rememberScrollState()
+            Column(Modifier.width(81.dp).fillMaxHeight().background(RailFill).scrollHint(rail).verticalScroll(rail).padding(start = 8.dp, top = 46.dp, bottom = 20.dp)) {
                 for (p in GesturePurpose.entries) {
                     val chosen = p == page
                     Box(

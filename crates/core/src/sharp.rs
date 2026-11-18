@@ -6,19 +6,30 @@
 //! picture shows over the canvas in its place. Anything that changes the canvas or the view takes it
 //! away at once, and it is made again when things settle. The canvas's own pixels stay as they are:
 //! saving, exporting, thumbnails and picking colours read those.
+//!
+//! A layer of many items takes longer to lay again than a frame lasts, so the picture is made a
+//! slice at a time, a frame each ([`SLICE`]), and shows once it is whole: the canvas keeps drawing
+//! and taking input meanwhile, and a change or a move of the view leaves what was begun. The canvas
+//! it is made on is the target's size, the picture at its top left, and is kept from one to the
+//! next: zooming in and out doesn't make a canvas for each picture.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use procraft_engine::document::LayerId;
+use procraft_engine::brush::Brush;
+use procraft_engine::document::{Document, LayerId};
 use procraft_engine::geom::{Affine, Vec2};
 use procraft_gpu::{Canvas, Resample};
 
 use crate::State;
+use crate::plugin_layers::Item;
 
 /// Zoomed in to this many screen pixels a canvas pixel or more, plugins' layers are drawn sharp.
 pub(crate) const SHARP_FROM: f32 = 1.5;
 /// How long the canvas and the view stay as they are before the sharp picture is made.
 const SETTLE: Duration = Duration::from_millis(120);
+/// How long a frame spends laying items on the sharp picture's canvas, at most (and at least one).
+const SLICE: Duration = Duration::from_millis(6);
 /// The most pixels the sharp picture may have, and the most its canvas's layers may take.
 const MOST_PIXELS: u64 = 24 << 20;
 const MOST_BYTES: u64 = 384 << 20;
@@ -40,6 +51,35 @@ pub(crate) struct SharpCanvas {
     layers: Vec<LayerId>,
 }
 
+/// A sharp picture being made, a slice a frame: what it is for, its canvas (lent to the session
+/// while items are laid on it) and document, and how far along it is.
+pub(crate) struct Making {
+    key: Shown,
+    canvas: Option<Canvas>,
+    layers: Vec<LayerId>,
+    doc: Document,
+    /// Canvas pixels to the sharp canvas's, and back.
+    to_sharp: Affine,
+    from_sharp: Affine,
+    /// The canvas rectangle it shows (left, top, width, height in canvas pixels), its size, and
+    /// the canvas pixels it reaches.
+    rect: [f32; 4],
+    size: (u32, u32),
+    visible: procraft_engine::geom::IRect,
+    /// How raster layers' pixels are redrawn on it.
+    resample: Resample,
+    /// The layers shown, in order, and which is next.
+    shown: Vec<LayerId>,
+    at: usize,
+    /// The plugin layer being laid: the items of it that reach the picture, whether it has been
+    /// begun (held and wiped), and the next item.
+    items: Option<Vec<Item>>,
+    begun: bool,
+    next: usize,
+    /// The items' brushes, made once.
+    brushes: Vec<(Arc<Vec<u8>>, Brush)>,
+}
+
 /// The sharp picture's state.
 #[derive(Default)]
 pub(crate) struct Sharp {
@@ -49,8 +89,25 @@ pub(crate) struct Sharp {
     pending: Option<(Shown, Instant)>,
     /// What it couldn't be made for (too big, say): not tried again until something changes.
     failed: Option<Shown>,
-    /// How many sharp pictures were made.
+    /// The picture being made, a slice a frame.
+    making: Option<Making>,
+    /// How long a slice is, if not [`SLICE`] (the tests').
+    #[cfg(test)]
+    pub(crate) slice: Option<Duration>,
+    /// How many sharp pictures were made, and how many canvases to make them on.
     pub(crate) made: u64,
+    pub(crate) canvases: u64,
+}
+
+impl Sharp {
+    /// How long a frame spends laying items.
+    fn slice(&self) -> Duration {
+        #[cfg(test)]
+        if let Some(slice) = self.slice {
+            return slice;
+        }
+        SLICE
+    }
 }
 
 /// Where the part of the canvas on a target shows: the canvas rectangle's top left and the size
@@ -86,7 +143,7 @@ fn region(to_screen: Affine, size: (u32, u32), canvas: (u32, u32)) -> Option<(Ve
 impl State {
     /// Keeps the sharp picture over the canvas as it should be this frame, drawn into a target of
     /// `size` through `to_screen`: taken away as anything changes, made again once things settle
-    /// (a frame asked for then).
+    /// (a frame asked for then), a slice a frame.
     pub(crate) fn keep_sharp(&mut self, size: (u32, u32), to_screen: Affine) {
         let crisp = to_screen.scale_factor() >= self.display_scale * 0.999;
         let wanted = self.sharp_wanted(to_screen);
@@ -110,16 +167,21 @@ impl State {
         if self.sharp.shown == Some(key) || self.sharp.failed == Some(key) {
             return;
         }
+        // being made for what shows now: on with it
+        if let Some(making) = self.sharp.making.take() {
+            if making.key == key {
+                self.go_on_making(making);
+                return;
+            }
+            self.leave_making(making);
+        }
         self.drop_sharp(false);
         match self.sharp.pending {
             Some((pending, since)) if pending == key && since.elapsed() >= SETTLE => {
                 self.sharp.pending = None;
-                if self.make_sharp(size, to_screen, crisp) {
-                    let composites = self.canvas.as_ref().map_or(0, Canvas::composites);
-                    self.sharp.shown = Some(Shown { composites, ..key });
-                    self.sharp.made += 1;
-                } else {
-                    self.sharp.failed = Some(key);
+                match self.begin_sharp(key, to_screen) {
+                    Some(making) => self.go_on_making(making),
+                    None => self.sharp.failed = Some(key),
                 }
             }
             Some((pending, since)) if pending == key => {
@@ -138,12 +200,16 @@ impl State {
         self.frame_due = Some(self.frame_due.map_or(at, |due| due.min(at)));
     }
 
-    /// Takes the sharp picture away (and with `all`, the canvas it is made on).
+    /// Takes the sharp picture away, and what was being made (and with `all`, the canvas it is
+    /// made on).
     fn drop_sharp(&mut self, all: bool) {
         if self.sharp.shown.take().is_some()
             && let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref())
         {
             canvas.set_sharp(gpu, None);
+        }
+        if let Some(making) = self.sharp.making.take() {
+            self.leave_making(making);
         }
         if all {
             self.sharp.held = None;
@@ -178,91 +244,203 @@ impl State {
             && !self.plugin_layer_off(layer)
     }
 
-    /// Makes the sharp picture for a target of `size` through `to_screen` (raster layers' pixels
-    /// crisp or smoothed as the screen shows them) and shows it: false if it couldn't.
-    fn make_sharp(&mut self, size: (u32, u32), to_screen: Affine, crisp: bool) -> bool {
-        let Some((origin, (w, h), scale)) = region(to_screen, size, (self.doc.width(), self.doc.height())) else {
-            return false;
-        };
-        let Some(gpu) = self.gpu.clone() else { return false };
-        let pixels = u64::from(w) * u64::from(h);
+    /// Begins the sharp picture `key` says (a target of its size through `to_screen`, raster
+    /// layers' pixels crisp or smoothed as the screen shows them): its canvas, and the layers to
+    /// draw on it. None if it can't be made.
+    fn begin_sharp(&mut self, key: Shown, to_screen: Affine) -> Option<Making> {
+        let (origin, (w, h), scale) = region(to_screen, key.size, (self.doc.width(), self.doc.height()))?;
+        let gpu = self.gpu.clone()?;
         let layers: Vec<LayerId> = self.doc.pixel_layer_ids().collect();
+        // the canvas it is made on, the picture its top left: the target's size and a pixel or two
+        // (a picture's edges round out), or the picture's if bigger (the view turned), so zooming
+        // doesn't make one of every size; one kept is used again while it is as big and has these
+        // layers
+        let kept = self.sharp.held.take().filter(|k| {
+            let (kw, kh) = k.canvas.size();
+            kw >= w && kh >= h && k.layers == layers
+        });
+        let fits = (w.max(key.size.0.saturating_add(2)), h.max(key.size.1.saturating_add(2)));
+        let (cw, ch) = kept.as_ref().map_or(fits, |k| k.canvas.size());
+        let pixels = u64::from(cw) * u64::from(ch);
         let most = gpu.max_texture_size();
-        if pixels > MOST_PIXELS || w > most || h > most || pixels * 4 * (layers.len() as u64 + 8) > MOST_BYTES {
-            return false;
+        if pixels > MOST_PIXELS || cw > most || ch > most || pixels * 4 * (layers.len() as u64 + 8) > MOST_BYTES {
+            return None;
         }
-        // the canvas it is made on: this size, with these layers (else made again)
-        let doc = self.doc.resized(w, h);
-        let kept = self.sharp.held.take().filter(|k| k.canvas.size() == (w, h) && k.layers == layers);
-        let mut sharp = match kept {
-            Some(kept) => kept,
+        let doc = self.doc.resized(cw, ch);
+        let mut canvas = match kept {
+            Some(kept) => kept.canvas,
             None => match Canvas::new(&gpu, &doc) {
-                Ok(canvas) => SharpCanvas { canvas, layers: layers.clone() },
+                Ok(canvas) => {
+                    self.sharp.canvases += 1;
+                    canvas
+                }
                 Err(e) => {
                     log::warn!("the sharp picture's canvas: {e}");
-                    return false;
+                    return None;
                 }
             },
         };
         let to_sharp = Affine { a: scale, b: 0.0, c: 0.0, d: scale, e: -origin.x * scale, f: -origin.y * scale };
-        let Some(from_sharp) = to_sharp.inverse() else { return false };
+        let from_sharp = to_sharp.inverse()?;
         let visible = procraft_engine::geom::IRect::new(
             origin.x.floor() as i32,
             origin.y.floor() as i32,
             (origin.x + w as f32 / scale).ceil() as i32,
             (origin.y + h as f32 / scale).ceil() as i32,
         );
-        // each plugin layer's items that reach it, and every other layer's pixels as shown
-        let resample = if crisp { Resample::Nearest } else { Resample::Bilinear };
-        let mut laid = Vec::new();
-        for &id in &layers {
-            if self.doc.unseen(id).is_some() {
-                continue;
+        canvas.draw_scaled([origin.x, origin.y], scale);
+        // each plugin layer's items that reach it laid there, and every other layer's pixels
+        // redrawn there as shown
+        let shown = layers.iter().copied().filter(|id| self.doc.unseen(*id).is_none()).collect();
+        Some(Making {
+            key,
+            canvas: Some(canvas),
+            layers,
+            doc,
+            to_sharp,
+            from_sharp,
+            rect: [origin.x, origin.y, w as f32 / scale, h as f32 / scale],
+            size: (w, h),
+            visible,
+            resample: if key.crisp { Resample::Nearest } else { Resample::Bilinear },
+            shown,
+            at: 0,
+            items: None,
+            begun: false,
+            next: 0,
+            brushes: Vec::new(),
+        })
+    }
+
+    /// Goes on making `making` for a slice of a frame, and shows the picture once it is whole (a
+    /// frame asked for at once till then).
+    fn go_on_making(&mut self, mut making: Making) {
+        let slice = self.sharp.slice();
+        let done = self.make_sharp(&mut making, slice);
+        // the canvas's layers read for it were brought up to date: as it is now, it goes on
+        let composites = self.canvas.as_ref().map_or(0, Canvas::composites);
+        making.key.composites = composites;
+        match done {
+            Some(false) => {
+                self.sharp.making = Some(making);
+                self.needs_frame = true;
             }
-            if self.sharp_items(id)
-                && let Some(items) = self.layer_items(id)
-            {
-                laid.push((id, self.items_reaching(id, items, visible)));
-                continue;
+            Some(true) => {
+                let key = making.key;
+                if self.show_made(making) {
+                    self.sharp.shown = Some(key);
+                    self.sharp.made += 1;
+                } else {
+                    self.sharp.failed = Some(key);
+                }
             }
-            let Some(canvas) = self.canvas.as_mut() else { return false };
-            if let Some(view) = canvas.layer_to_read(&gpu, &mut self.doc, id) {
-                sharp.canvas.redraw_from(id, view, canvas.size(), from_sharp, resample);
+            None => {
+                self.sharp.failed = Some(making.key);
+                self.leave_making(making);
             }
         }
-        sharp.canvas.draw_scaled([origin.x, origin.y], scale);
+    }
+
+    /// Draws `making`'s layers in turn on its canvas for `slice` (a layer's pixels, or an item of a
+    /// plugin's layer, at least): true once all are, none if it can't go on.
+    fn make_sharp(&mut self, making: &mut Making, slice: Duration) -> Option<bool> {
+        let started = Instant::now();
+        let gpu = self.gpu.clone()?;
+        let mut done = true;
+        let mut worked = false;
+        while let Some(&id) = making.shown.get(making.at) {
+            if worked && started.elapsed() >= slice {
+                done = false;
+                break;
+            }
+            if making.items.is_none() {
+                if self.sharp_items(id)
+                    && let Some(all) = self.layer_items(id)
+                {
+                    making.items = Some(self.items_reaching(id, all, making.visible));
+                    (making.begun, making.next) = (false, 0);
+                } else {
+                    let (main, canvas) = (self.canvas.as_mut()?, making.canvas.as_mut()?);
+                    if let Some(view) = main.layer_to_read(&gpu, &mut self.doc, id) {
+                        canvas.redraw_from(id, view, main.size(), making.from_sharp, making.resample);
+                    }
+                    making.at += 1;
+                    worked = true;
+                    continue;
+                }
+            }
+            if !self.lay_sharp(making, id, started, slice) {
+                done = false;
+                break;
+            }
+            (making.items, making.at, worked) = (None, making.at + 1, true);
+        }
+        // what was queued on it drawn now, a slice at a time
+        if let Some(canvas) = making.canvas.as_mut() {
+            canvas.render(&gpu, &mut making.doc, None);
+        }
+        Some(done)
+    }
+
+    /// Lays the items of plugin layer `id` that `making` holds in turn on its canvas, till the
+    /// slice begun at `started` is over (one at least): true once all are.
+    fn lay_sharp(&mut self, making: &mut Making, id: LayerId, started: Instant, slice: Duration) -> bool {
         // laid there as here, the artwork and its canvas lent to it meanwhile
-        let mut doc = doc;
-        std::mem::swap(&mut self.doc, &mut doc);
-        let mut lent = Some(sharp.canvas);
-        std::mem::swap(&mut self.canvas, &mut lent);
-        self.lay_to = Some(to_sharp);
-        for (id, items) in &laid {
+        std::mem::swap(&mut self.doc, &mut making.doc);
+        std::mem::swap(&mut self.canvas, &mut making.canvas);
+        self.lay_to = Some(making.to_sharp);
+        if !making.begun {
             if let Some(canvas) = self.canvas.as_mut() {
-                canvas.hold_layer_quietly(*id);
-                canvas.wipe_layer(*id);
+                canvas.hold_layer_quietly(id);
+                canvas.wipe_layer(id);
             }
-            let mut brushes = Vec::new();
-            for item in items {
-                self.lay_clipped(*id, item, &mut brushes);
-            }
-            if let Some(canvas) = self.canvas.as_mut() {
-                canvas.release_layer(true, None);
-            }
+            making.begun = true;
         }
-        self.flush();
+        let mut done = true;
+        let mut laid = false;
+        while let Some(item) = making.items.as_ref().and_then(|items| items.get(making.next)) {
+            if laid && started.elapsed() >= slice {
+                done = false;
+                break;
+            }
+            self.lay_clipped(id, item, &mut making.brushes);
+            making.next += 1;
+            laid = true;
+        }
+        if done && let Some(canvas) = self.canvas.as_mut() {
+            canvas.release_layer(true, None);
+            making.begun = false;
+        }
         self.lay_to = None;
-        std::mem::swap(&mut self.canvas, &mut lent);
-        std::mem::swap(&mut self.doc, &mut doc);
-        let Some(mut canvas) = lent else { return false };
+        std::mem::swap(&mut self.canvas, &mut making.canvas);
+        std::mem::swap(&mut self.doc, &mut making.doc);
+        done
+    }
+
+    /// Shows the picture `making` made over the canvas, where it is on it, and keeps its canvas
+    /// for the next: false if it couldn't.
+    fn show_made(&mut self, making: Making) -> bool {
+        let Making { canvas, layers, rect, size, .. } = making;
+        let (Some(mut canvas), Some(gpu)) = (canvas, self.gpu.clone()) else { return false };
         canvas.forget_history();
-        // shown over the canvas, where it is on it
-        let rect = [origin.x, origin.y, w as f32 / scale, h as f32 / scale];
         if let Some(main) = self.canvas.as_mut() {
-            main.set_sharp(&gpu, Some((canvas.composite_texture(), (w, h), rect)));
+            main.set_sharp(&gpu, Some((canvas.composite_texture(), size, rect)));
         }
         self.sharp.held = Some(SharpCanvas { canvas, layers });
         true
+    }
+
+    /// Leaves the picture `making` was making unfinished: its canvas kept for the next (the layer
+    /// it was laying let go of, and what that kept forgotten).
+    fn leave_making(&mut self, making: Making) {
+        let Making { canvas, layers, mut doc, begun, .. } = making;
+        let (Some(mut canvas), Some(gpu)) = (canvas, self.gpu.as_ref()) else { return };
+        if begun {
+            canvas.release_layer(true, None);
+            canvas.render(gpu, &mut doc, None);
+        }
+        canvas.forget_history();
+        self.sharp.held = Some(SharpCanvas { canvas, layers });
     }
 }
 
@@ -270,6 +448,11 @@ impl State {
 impl Sharp {
     /// Whether it holds no canvas to make the picture on.
     pub(crate) fn held_none(&self) -> bool {
-        self.held.is_none()
+        self.held.is_none() && self.making.is_none()
+    }
+
+    /// Whether a picture is being made.
+    pub(crate) fn making(&self) -> bool {
+        self.making.is_some()
     }
 }

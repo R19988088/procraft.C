@@ -2,10 +2,10 @@ package io.github.artcraftandroid.procraft.canvas
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.util.Log
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import io.github.artcraftandroid.procraft.AppLog
 import io.github.artcraftandroid.procraft.core.CanvasSession
 import io.github.artcraftandroid.procraft.core.MobileException
 import io.github.artcraftandroid.procraft.core.PenSample
@@ -47,7 +47,7 @@ class PadSurfaceView(context: Context, private val vm: CanvasViewModel) : Surfac
             uncoverWhenDrawn(pad)
         } catch (e: MobileException) {
             NativeWindows.release(id)
-            Log.e("ProCraft", "attaching the pad", e)
+            AppLog.e("ProCraft", "attaching the pad", e)
         }
     }
 
@@ -84,7 +84,9 @@ class PadSurfaceView(context: Context, private val vm: CanvasViewModel) : Surfac
                 strokePointer = e.getPointerId(0)
                 // the first stroke of one's own takes the sample scribble's place
                 pad.beginOwnStroke()
-                pad.strokeBegin(kindOf(e), samples(e, 0))
+                val kind = kindOf(e)
+                if (kind != PointerKind.FINGER) pad.setPenTiltKnown(tiltKnown(e))
+                pad.strokeBegin(kind, samples(e, 0))
             }
             MotionEvent.ACTION_MOVE -> {
                 val i = e.findPointerIndex(strokePointer)

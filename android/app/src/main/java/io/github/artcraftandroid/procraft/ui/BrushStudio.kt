@@ -51,6 +51,7 @@ import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import android.content.res.Configuration
@@ -420,6 +421,7 @@ private fun StudioParts(vm: CanvasViewModel) {
         message = { "The pair becomes two brushes again, side by side in the set. It can't be undone." },
         action = "Uncombine",
         destructive = false,
+        icon = PcIcons.AlertQuestion,
         onCancel = { parting = null },
         onAction = {
             parting = null
@@ -429,6 +431,8 @@ private fun StudioParts(vm: CanvasViewModel) {
     var list by remember { mutableStateOf(false) }
     var at by remember { mutableStateOf(IntOffset.Zero) }
     var rowY by remember { mutableFloatStateOf(0f) }
+    // the Secondary card held: where the press was (in the window), the Uncombine callout under it
+    var callout by remember { mutableStateOf<Offset?>(null) }
     Column(
         Modifier.fillMaxWidth().height(PartsHeight).onGloballyPositioned {
             val p = it.positionInWindow()
@@ -453,7 +457,7 @@ private fun StudioParts(vm: CanvasViewModel) {
         PcPopup(
             textScale = MATCHED_POPUP_TEXT,
             popupPositionProvider = place,
-            onDismissRequest = { if (!list) cards = false },
+            onDismissRequest = { if (!list && callout == null) cards = false },
             properties = androidx.compose.ui.window.PopupProperties(focusable = !list),
         ) {
             Column(Modifier.width(PartCardWidth).clip(RoundedCornerShape(12.dp)).background(StudioTabs), verticalArrangement = Arrangement.spacedBy(PartGap)) {
@@ -468,16 +472,33 @@ private fun StudioParts(vm: CanvasViewModel) {
                     Spacer(Modifier.width(6.dp))
                     Icon(PcIcons.ChevronRight, contentDescription = null, tint = StudioDim, modifier = Modifier.size(24.dp))
                 }
-                PartCard(vm, 1, "Secondary", second = true)
-                Box(
-                    Modifier.fillMaxWidth().height(CombineRow).tap {
-                        cards = false
-                        parting = Unit
-                    }.padding(start = 11.dp),
-                    contentAlignment = Alignment.CenterStart,
-                ) {
-                    Text("Uncombine", color = Pc.Accent, fontSize = 17.sp, maxLines = 1)
-                }
+                PartCard(vm, 1, "Secondary", second = true, onHold = { callout = it })
+            }
+        }
+    }
+    callout?.let { press ->
+        val density = LocalDensity.current
+        val place = remember(press) {
+            object : androidx.compose.ui.window.PopupPositionProvider {
+                override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize, layoutDirection: LayoutDirection, popupContentSize: IntSize) =
+                    IntOffset((press.x - popupContentSize.width / 2f).roundToInt(), (press.y + with(density) { CalloutDrop.toPx() }).roundToInt())
+            }
+        }
+        PcPopup(
+            textScale = MATCHED_POPUP_TEXT,
+            popupPositionProvider = place,
+            onDismissRequest = { callout = null },
+            properties = androidx.compose.ui.window.PopupProperties(focusable = true),
+        ) {
+            Box(
+                Modifier.size(CalloutWidth, CalloutHeight).clip(RoundedCornerShape(CalloutHeight / 2)).background(CalloutFill).tap {
+                    callout = null
+                    cards = false
+                    parting = Unit
+                },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("Uncombine", color = CalloutInk, fontSize = 15.sp, maxLines = 1)
             }
         }
     }
@@ -489,11 +510,25 @@ private fun StudioParts(vm: CanvasViewModel) {
     }
 }
 
-/** A part as a card: blue when it shows; tapped, it shows, the cards staying. */
+/** The Uncombine callout a held Secondary card shows: its size, how far under the press it hangs, its light fill and dark word. */
+private val CalloutWidth = 104.dp
+private val CalloutHeight = 36.dp
+private val CalloutDrop = 10.dp
+private val CalloutFill = Color(0xFFE9E9E9)
+private val CalloutInk = Color(0xFF1C1C1C)
+
+/** A part as a card: blue when it shows; tapped, it shows, the cards staying; held, [onHold] gets where (in the window). */
 @Composable
-private fun PartCard(vm: CanvasViewModel, i: Int, name: String, second: Boolean) {
+private fun PartCard(vm: CanvasViewModel, i: Int, name: String, second: Boolean, onHold: ((Offset) -> Unit)? = null) {
     val on = second == vm.studioSecond
-    Box(Modifier.fillMaxWidth().height(PartCardHeight).clip(RoundedCornerShape(12.dp)).background(if (on) Pc.Accent else PartCardFill).tap { vm.showStudioPart(second) }) {
+    var corner by remember { mutableStateOf(Offset.Zero) }
+    val pressing = if (onHold == null) {
+        Modifier.tap { vm.showStudioPart(second) }
+    } else {
+        Modifier.onGloballyPositioned { corner = it.positionInWindow() }
+            .pointerInput(Unit) { detectTapGestures(onTap = { vm.showStudioPart(second) }, onLongPress = { onHold(corner + it) }) }
+    }
+    Box(Modifier.fillMaxWidth().height(PartCardHeight).clip(RoundedCornerShape(12.dp)).background(if (on) Pc.Accent else PartCardFill).then(pressing)) {
         vm.studioParts.getOrNull(i)?.let {
             Image(it, contentDescription = null, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize().padding(horizontal = 30.dp, vertical = 20.dp))
         }
@@ -1805,7 +1840,8 @@ private fun NodeMenu(points: List<Offset>, index: Int, box: androidx.compose.ui.
     }
 }
 
-private val NodeMenuFill = Color(0xFF101010)
-private val NodeMenuHalo = 16.dp
-private val NodeMenuWidth = 70.dp
-private val NodeMenuRow = 36.dp
+/** A node menu's look (a curve's, the guide editor's handles'): its fill, the room round it for its shadow, its width and its rows' height. */
+internal val NodeMenuFill = Color(0xFF101010)
+internal val NodeMenuHalo = 16.dp
+internal val NodeMenuWidth = 70.dp
+internal val NodeMenuRow = 36.dp

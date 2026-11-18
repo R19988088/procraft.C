@@ -321,6 +321,7 @@ mod tests {
             time_lapse: None,
             reference: Some(&window),
             reference_picture: Some(png.get_ref()),
+            turns: 0,
         });
         let package = std::env::temp_dir().join(format!("procraft-reference-package-{}.procraft", std::process::id()));
         std::fs::write(&package, &bytes).unwrap();
@@ -398,6 +399,7 @@ mod tests {
             time_lapse: None,
             reference: Some(&window),
             reference_picture: None,
+            turns: 0,
         });
         let package = std::env::temp_dir().join(format!("procraft-reference-3d-{}.procraft", std::process::id()));
         std::fs::write(&package, &bytes).unwrap();

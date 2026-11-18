@@ -44,8 +44,10 @@ pub enum Trigger {
 }
 
 /// One switch on a page: its name (a trigger's, or a setting of its own), what it says and does,
-/// whether it starts on, whether it has a delay slider under it, and whether it needs a pen's
-/// button held down (an app whose pen only taps, as a double-tap does, leaves that switch out).
+/// whether it starts on, whether it has a delay slider under it, whether it needs a pen's button
+/// held down (an app whose pen only taps, as a double-tap does, leaves that switch out), and whether
+/// it is only for a pen's own second button (an app whose pen squeezes in its place has the
+/// squeeze on its four pages alone, and leaves that switch out).
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct GestureOption {
     pub key: String,
@@ -55,6 +57,7 @@ pub struct GestureOption {
     pub trigger: Option<Trigger>,
     pub delayed: bool,
     pub held_button: bool,
+    pub second_button: bool,
 }
 
 /// The pages in order, with their names as kept, titles and headings.
@@ -111,12 +114,19 @@ fn opt(t: Trigger, detail: &str, default: bool) -> GestureOption {
         trigger: Some(t),
         delayed: t == Trigger::Hold,
         held_button: false,
+        second_button: false,
     }
 }
 
 /// A switch for the pen's button held down.
 fn held(t: Trigger, detail: &str) -> GestureOption {
     GestureOption { held_button: true, ..opt(t, detail, false) }
+}
+
+/// The pen's second button's switch beside its first's, on a page that has no squeeze: a pen with
+/// two buttons can set either to whatever the first can do.
+fn second(o: GestureOption) -> GestureOption {
+    GestureOption { second_button: true, ..o }
 }
 
 /// A setting of a page's own.
@@ -129,6 +139,7 @@ fn own(key: &str, label: &str, detail: &str, default: bool, delayed: bool) -> Ge
         trigger: None,
         delayed,
         held_button: false,
+        second_button: false,
     }
 }
 
@@ -167,6 +178,7 @@ pub fn gesture_options(purpose: GesturePurpose) -> Vec<GestureOption> {
             opt(T::ModifyPen, "Pen strokes erase while □ is held down", false),
             // off, the button switches to the eraser and back (as a pen's double-tap does)
             held(T::PenDoubleTap, "Pen strokes erase while the pen button is held down"),
+            second(held(T::PenSqueeze, "Pen strokes erase while the second pen button is held down")),
         ],
         GesturePurpose::Assisted => vec![
             opt(T::TapModify, "Turns drawing assist on or off for this layer", false),
@@ -175,6 +187,7 @@ pub fn gesture_options(purpose: GesturePurpose) -> Vec<GestureOption> {
             opt(T::ModifyTouch, "Finger strokes follow the guide while □ is held down", false),
             opt(T::ModifyPen, "Pen strokes follow the guide while □ is held down", false),
             opt(T::PenDoubleTap, "Turns drawing assist on or off for this layer", false),
+            second(opt(T::PenSqueeze, "Turns drawing assist on or off for this layer", false)),
         ],
         GesturePurpose::Eyedropper => vec![
             opt(T::TapModify, "Opens or closes the eyedropper", true),
@@ -210,6 +223,7 @@ pub fn gesture_options(purpose: GesturePurpose) -> Vec<GestureOption> {
             opt(T::ThreeSwipe, "Three fingers swiped down show or hide the interface", false),
             opt(T::FourTap, "Four fingers tapped show or hide the interface", true),
             opt(T::PenDoubleTap, "Shows or hides the interface", false),
+            second(opt(T::PenSqueeze, "Shows or hides the interface", false)),
             own("AUTO", "Automatic Full Screen", "The interface steps aside while you paint", false, true),
         ],
         GesturePurpose::ClearLayer => vec![
@@ -217,6 +231,7 @@ pub fn gesture_options(purpose: GesturePurpose) -> Vec<GestureOption> {
             opt(T::ThreeSwipe, "Three fingers swiped down clear the layer", false),
             opt(T::FourTap, "Four fingers tapped clear the layer", false),
             opt(T::PenDoubleTap, "Clears the layer", false),
+            second(opt(T::PenSqueeze, "Clears the layer", false)),
             opt(T::Hold, "A finger kept still on the canvas clears the layer", false),
         ],
         GesturePurpose::CopyPaste => vec![
@@ -227,6 +242,7 @@ pub fn gesture_options(purpose: GesturePurpose) -> Vec<GestureOption> {
             opt(T::ThreeSwipe, "Three fingers swiped down open the copy and paste menu", true),
             opt(T::FourTap, "Four fingers tapped open the copy and paste menu", false),
             opt(T::PenDoubleTap, "Opens the copy and paste menu", false),
+            second(opt(T::PenSqueeze, "Opens the copy and paste menu", false)),
             opt(T::Hold, "A finger kept still on the canvas opens the copy and paste menu", false),
         ],
         GesturePurpose::LayerSelect => vec![
@@ -523,12 +539,46 @@ mod tests {
         assert_eq!(again.touch_settings(650.0).pen_button, Some(GestureAction::Erase));
         again.reset_all();
         assert_eq!(again.touch_settings(650.0).pen_button, None);
-        // the only switch that needs a pen's button held down
+        // the only switches that need a pen's button held down: the first's and the second's
         let held: Vec<(GesturePurpose, String)> = gesture_purposes()
             .into_iter()
             .flat_map(|p| gesture_options(p).into_iter().filter(|o| o.held_button).map(move |o| (p, o.key)))
             .collect();
-        assert_eq!(held, [(GesturePurpose::Erase, "PEN_DOUBLE_TAP".to_owned())]);
+        assert_eq!(
+            held,
+            [(GesturePurpose::Erase, "PEN_DOUBLE_TAP".to_owned()), (GesturePurpose::Erase, "PEN_SQUEEZE".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_pen_s_second_button_can_do_whatever_its_first_can() {
+        let pages = |key: &str| -> Vec<GesturePurpose> {
+            gesture_purposes().into_iter().filter(|&p| gesture_options(p).iter().any(|o| o.key == key)).collect()
+        };
+        let (first, second) = (pages("PEN_DOUBLE_TAP"), pages("PEN_SQUEEZE"));
+        assert!(first.iter().all(|p| second.contains(p)), "{first:?} {second:?}");
+        // the squeeze it stands for elsewhere has its four pages; the rest are a second button's own
+        let own: Vec<GesturePurpose> =
+            gesture_purposes().into_iter().filter(|&p| gesture_options(p).iter().any(|o| o.second_button)).collect();
+        use GesturePurpose as P;
+        assert_eq!(own, [P::Erase, P::Assisted, P::FullScreen, P::ClearLayer, P::CopyPaste]);
+        let squeezed: Vec<&GesturePurpose> = second.iter().filter(|p| !own.contains(p)).collect();
+        assert_eq!(squeezed, [&P::Eyedropper, &P::Quickshape, &P::Quickmenu, &P::LayerSelect]);
+        for o in gesture_purposes().into_iter().flat_map(gesture_options).filter(|o| o.second_button) {
+            assert_eq!((o.trigger, o.label.as_str()), (Some(Trigger::PenSqueeze), "Pen second button"));
+        }
+        // set, the second does it, one page at a time, and the first is left as it was
+        let g = GestureSettings::new(KeptGestures::default());
+        g.set(P::Quickmenu, "PEN_SQUEEZE".into(), true);
+        let changed = g.set(P::ClearLayer, "PEN_SQUEEZE".into(), true);
+        assert_eq!(changed.get("QUICKMENU.PEN_SQUEEZE"), Some(&false));
+        assert_eq!(g.touch_settings(650.0).pen_second_button, Some(GestureAction::ClearLayer));
+        g.set(P::Erase, "PEN_SQUEEZE".into(), true);
+        let t = g.touch_settings(650.0);
+        assert_eq!((t.pen_button, t.pen_second_button), (None, Some(GestureAction::Erase)));
+        g.set(P::Erase, "PEN_DOUBLE_TAP".into(), true);
+        assert_eq!(g.touch_settings(650.0).pen_second_button, Some(GestureAction::Erase));
+        assert_eq!(g.touch_settings(650.0).pen_button, Some(GestureAction::Erase));
     }
 
     #[test]

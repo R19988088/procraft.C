@@ -163,17 +163,17 @@ pub mod pc {
         [measured, (8.0, 14.0)].into_iter().find(|&gaps| needs(gaps) <= width).unwrap_or((2.0, 4.0))
     }
 
-    /// The side bar in a window `height` tall: its top from the window's, and how long each of its
-    /// two tracks is. At `SIDE_BAR_CENTRE` with its measured tracks wherever that clears the top
-    /// bar; in a shorter window just under the top bar, its tracks giving up what it is short of,
-    /// so that all of it can be reached.
-    pub fn side_bar_fit(height: f32) -> (f32, f32) {
+    /// The side bar in a window `height` tall under a top bar reaching `bar_bottom` down: its top
+    /// from the window's, and how long each of its two tracks is. At `SIDE_BAR_CENTRE` with its
+    /// measured tracks wherever that clears the top bar; in a shorter window just under the top
+    /// bar, its tracks giving up what it is short of, so that all of it can be reached.
+    pub fn side_bar_fit(height: f32, bar_bottom: f32) -> (f32, f32) {
         let top = height * SIDE_BAR_CENTRE - SIDE_BAR_HEIGHT / 2.0;
-        if top >= BAR_HEIGHT {
+        if top >= bar_bottom {
             return (top, SLIDER_HEIGHT);
         }
         let rest = SIDE_BAR_HEIGHT - SLIDER_HEIGHT * 2.0;
-        (BAR_HEIGHT, ((height - BAR_HEIGHT - SHORT_SIDE_BAR_FOOT - rest) / 2.0).clamp(SHORTEST_TRACK, SLIDER_HEIGHT))
+        (bar_bottom, ((height - bar_bottom - SHORT_SIDE_BAR_FOOT - rest) / 2.0).clamp(SHORTEST_TRACK, SLIDER_HEIGHT))
     }
 }
 
@@ -518,12 +518,32 @@ pub struct Look {
     icons: HashMap<(&'static str, u32), TextureHandle>,
     /// Each drawn shape's texture and what it was drawn from.
     shapes: HashMap<&'static str, (u64, TextureHandle)>,
+    /// How many times as big as its points what is drawn on a layer shows, where that isn't 1: a
+    /// part of the interface a plugin sizes. Its icons and shapes are drawn for the pixels they
+    /// show on.
+    zooms: HashMap<egui::LayerId, f32>,
 }
 
 impl Look {
+    /// What is drawn on `layer` from now on shows `zoom` times as big as its points (1: as they
+    /// are).
+    pub fn set_zoom(&mut self, layer: egui::LayerId, zoom: f32) {
+        if zoom == 1.0 {
+            self.zooms.remove(&layer);
+        } else {
+            self.zooms.insert(layer, zoom);
+        }
+    }
+
+    /// How many pixels a point of what `ui` draws shows on.
+    fn pixels_per_point(&self, ui: &Ui) -> f32 {
+        let ppp = ui.ctx().pixels_per_point();
+        self.zooms.get(&ui.layer_id()).map_or(ppp, |zoom| ppp * zoom)
+    }
+
     /// `icon` shown `width` points across (its frame scaled to it), centred at `centre`, in `colour`.
     pub fn icon(&mut self, ui: &Ui, icon: &Icon, centre: Pos2, width: f32, colour: Color32) {
-        let ppp = ui.ctx().pixels_per_point();
+        let ppp = self.pixels_per_point(ui);
         let px = (width * ppp).round().max(1.0) as u32;
         let texture = self
             .icons
@@ -536,7 +556,7 @@ impl Look {
     /// `icon` stretched to fill `rect` (drawn as wide as it, then squeezed or stretched to its
     /// height), in `colour`.
     pub fn icon_in(&mut self, ui: &Ui, icon: &Icon, rect: Rect, colour: Color32) {
-        let ppp = ui.ctx().pixels_per_point();
+        let ppp = self.pixels_per_point(ui);
         let px = (rect.width() * ppp).round().max(1.0) as u32;
         let texture = self
             .icons
@@ -555,7 +575,7 @@ impl Look {
         rect: Rect,
         draw: impl FnOnce(&mut tiny_skia::Pixmap, tiny_skia::Transform),
     ) {
-        let ppp = ui.ctx().pixels_per_point();
+        let ppp = self.pixels_per_point(ui);
         let (w, h) = ((rect.width() * ppp).ceil().max(1.0) as u32, (rect.height() * ppp).ceil().max(1.0) as u32);
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         // drawn again when the interface turns light or dark
@@ -758,14 +778,14 @@ mod tests {
     #[test]
     fn the_side_bar_stays_as_measured_or_fits_under_the_top_bar() {
         // portrait top 333.5, landscape top 130
-        assert!((pc::side_bar_fit(1133.0).0 - 333.5).abs() < 0.1);
-        assert!((pc::side_bar_fit(744.0).0 - 130.0).abs() < 0.1);
+        assert!((pc::side_bar_fit(1133.0, pc::BAR_HEIGHT).0 - 333.5).abs() < 0.1);
+        assert!((pc::side_bar_fit(744.0, pc::BAR_HEIGHT).0 - 130.0).abs() < 0.1);
         for height in 580..2000 {
-            assert_eq!(pc::side_bar_fit(height as f32).1, pc::SLIDER_HEIGHT);
+            assert_eq!(pc::side_bar_fit(height as f32, pc::BAR_HEIGHT).1, pc::SLIDER_HEIGHT);
         }
         for height in 480..580 {
             let height = height as f32;
-            let (top, track) = pc::side_bar_fit(height);
+            let (top, track) = pc::side_bar_fit(height, pc::BAR_HEIGHT);
             assert_eq!(top, pc::BAR_HEIGHT);
             assert!(top + pc::SIDE_BAR_HEIGHT - (pc::SLIDER_HEIGHT - track) * 2.0 <= height, "{height}");
         }

@@ -125,20 +125,60 @@ fn copy_match(out: &mut Vec<u8>, start: usize, length: usize) {
 pub fn encode(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() / 4 + 16);
     for block in data.chunks(BLOCK) {
-        let packed = compress_block(block);
-        if packed.len() < block.len() {
-            out.extend_from_slice(b"bv41");
-            out.extend_from_slice(&(block.len() as u32).to_le_bytes());
-            out.extend_from_slice(&(packed.len() as u32).to_le_bytes());
-            out.extend_from_slice(&packed);
-        } else {
-            out.extend_from_slice(b"bv4-");
-            out.extend_from_slice(&(block.len() as u32).to_le_bytes());
-            out.extend_from_slice(block);
-        }
+        put_block(&mut out, block);
     }
     out.extend_from_slice(b"bv4$");
     out
+}
+
+/// One block in the framing onto `out`: compressed, or stored when that is smaller.
+fn put_block(out: &mut Vec<u8>, block: &[u8]) {
+    let packed = compress_block(block);
+    if packed.len() < block.len() {
+        out.extend_from_slice(b"bv41");
+        out.extend_from_slice(&(block.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(packed.len() as u32).to_le_bytes());
+        out.extend_from_slice(&packed);
+    } else {
+        out.extend_from_slice(b"bv4-");
+        out.extend_from_slice(&(block.len() as u32).to_le_bytes());
+        out.extend_from_slice(block);
+    }
+}
+
+/// [`encode`] of data given a piece at a time (rows read from a buffer, say), so that it is never
+/// all in memory at once: a block's worth is held at most. What [`Packer::finish`] gives is what
+/// `encode` gives of the pieces joined.
+#[derive(Default)]
+pub struct Packer {
+    out: Vec<u8>,
+    pending: Vec<u8>,
+}
+
+impl Packer {
+    /// The next piece.
+    pub fn push(&mut self, mut piece: &[u8]) {
+        while !piece.is_empty() {
+            let room = BLOCK - self.pending.len();
+            let (now, rest) = piece.split_at(room.min(piece.len()));
+            self.pending.extend_from_slice(now);
+            piece = rest;
+            if self.pending.len() == BLOCK {
+                put_block(&mut self.out, &self.pending);
+                self.pending.clear();
+            }
+        }
+    }
+
+    /// The stream, ended, and no bigger than it needs to be.
+    pub fn finish(mut self) -> Vec<u8> {
+        if !self.pending.is_empty() {
+            put_block(&mut self.out, &self.pending);
+        }
+        self.out.extend_from_slice(b"bv4$");
+        self.out.shrink_to_fit();
+        self.out
+    }
 }
 
 /// One LZ4 block, matches found greedily through a hash of 4-byte sequences.
@@ -262,6 +302,19 @@ mod tests {
                 assert_eq!(seed, byte_wise, "offset {offset}, length {length}");
             }
         }
+    }
+
+    #[test]
+    fn data_packed_a_piece_at_a_time_is_packed_as_if_whole() {
+        let data: Vec<u8> = (0..300_000u32).map(|i| if (i / 5000) % 3 == 0 { 0 } else { (i % 241) as u8 }).collect();
+        for piece in [1, 7, 4096, BLOCK - 1, BLOCK, BLOCK + 3, 100_000, 400_000] {
+            let mut packer = Packer::default();
+            for chunk in data.chunks(piece) {
+                packer.push(chunk);
+            }
+            assert!(packer.finish() == encode(&data), "pieces of {piece}");
+        }
+        assert_eq!(Packer::default().finish(), encode(&[]));
     }
 
     #[test]

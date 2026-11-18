@@ -7,7 +7,7 @@ use procraft_engine::input::Sample;
 use procraft_engine::stroke::Stamp;
 use procraft_engine::view::View;
 
-use crate::{CanvasSession, State};
+use crate::{CanvasSession, State, ViewCurve, ViewMotion};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum GuideType {
@@ -144,6 +144,22 @@ const ASSIST_SETTLE: f32 = 10.0;
 
 /// Vanishing points closer than this to the input (window pixels) are taken, not added.
 const VANISHING_REACH: f32 = 30.0;
+
+/// The guide editor shows the canvas fitted in this much of the window, centred, moving there
+/// (and back as it closes) over this long, slowing to a stop.
+const EDITOR_FIT: f32 = 0.6;
+const EDITOR_EASE_SECONDS: f32 = 0.3;
+/// A touch in the guide editor takes the handle it lands within this of (points).
+const HANDLE_REACH: f32 = 30.0;
+
+/// What a touch on the guide editor's canvas took: a perspective guide's point (by index), the
+/// guide's centre, or its turn handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GuideGrab {
+    Point(u32),
+    Centre,
+    Turn,
+}
 
 impl State {
     /// Stroke input kept to the guide when assisted drawing is on: along the guide direction
@@ -353,28 +369,8 @@ impl CanvasSession {
     /// Perspective: a tap at window point (`x`, `y`) adds a vanishing point (up to three); returns
     /// the index of the point there, to drag.
     pub fn touch_vanishing_point(&self, x: f32, y: f32) -> Option<u32> {
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
-        let p = st.to_canvas_point(x, y)?;
-        let to_screen = st.view?.to_screen();
-        let near = st
-            .doc
-            .guide
-            .vanishing
-            .iter()
-            .position(|v| to_screen.apply(Vec2::new(v[0], v[1])).distance(Vec2::new(x, y)) <= VANISHING_REACH);
-        if let Some(i) = near {
-            return Some(i as u32);
-        }
-        if st.doc.guide.vanishing.len() >= 3 {
-            return None;
-        }
-        st.doc.guide.vanishing.push([p.x, p.y]);
-        st.revision += 1;
-        self.shared.frame(st);
-        Some(st.doc.guide.vanishing.len() as u32 - 1)
+        self.vanishing_point_at(x, y, VANISHING_REACH, true)
     }
-
     pub fn move_vanishing_point(&self, index: u32, x: f32, y: f32) -> GuideInfo {
         let to = self.shared.lock().to_canvas_point(x, y);
         self.change_guide(|g| {
@@ -392,25 +388,43 @@ impl CanvasSession {
         })
     }
 
-    /// Opens the guide editor: the guide as it was is kept to go back to, and the canvas fits
-    /// inside the window rectangle `left`..`right` × `top`..`bottom`.
-    pub fn guide_edit_begin(&self, left: f32, top: f32, right: f32, bottom: f32) -> GuideInfo {
+    /// The guide's centre back in the middle of the canvas and upright: what a tap on the centre
+    /// of a grid, isometric or symmetry guide offers.
+    pub fn reset_guide_place(&self) -> GuideInfo {
+        let middle = {
+            let st = self.shared.lock();
+            [st.doc.width() as f32 / 2.0, st.doc.height() as f32 / 2.0]
+        };
+        self.change_guide(|g| {
+            g.centre = middle;
+            g.angle = 0.0;
+        })
+    }
+
+    /// Opens the guide editor: the guide as it was is kept to go back to, and the canvas moves to
+    /// fit upright in the middle 0.6 of the window, slowing to a stop over 0.3 s (the guide read
+    /// meanwhile is where it has got to). Two fingers move and zoom it from there as on the canvas,
+    /// a quick pinch in fitting it to the whole window (see [`CanvasSession::set_touch_guide_editing`]).
+    pub fn guide_edit_begin(&self) -> GuideInfo {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
         st.finish_stroke();
-        st.guide_before = Some((st.doc.guide.clone(), st.view));
+        // (settling somewhere, the view goes back there)
+        let before = st.view_motion.take().map(|m| m.to).or(st.view);
+        st.guide_before = Some((st.doc.guide.clone(), before));
         if st.doc.guide.centre == [0.0, 0.0] {
             st.doc.guide.centre = [st.doc.width() as f32 / 2.0, st.doc.height() as f32 / 2.0];
         }
-        let size = ((right - left).max(1.0) as u32, (bottom - top).max(1.0) as u32);
-        let fitted = View::fit((st.doc.width(), st.doc.height()), size);
-        st.view = Some(View::from_affine(fitted.to_screen().then(Affine::translate(Vec2::new(left, top)))));
+        let (w, h) = (st.window_size.0 as f32, st.window_size.1 as f32);
+        let (side, band) = (w * (1.0 - EDITOR_FIT) / 2.0, h * (1.0 - EDITOR_FIT) / 2.0);
+        let fitted = View::fit_inside((st.doc.width(), st.doc.height()), st.window_size, [side, band, side, band]);
+        st.ease_view_to(fitted);
         self.shared.frame(st);
         st.guide_info()
     }
 
     /// Closes the guide editor: `keep` keeps the changes, otherwise the guide goes back. The view
-    /// goes back as it was either way.
+    /// goes back as it was either way, as it came.
     pub fn guide_edit_end(&self, keep: bool) -> GuideInfo {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
@@ -418,11 +432,105 @@ impl CanvasSession {
             if !keep {
                 st.doc.guide = guide;
             }
-            st.view = view;
+            match view {
+                Some(view) => st.ease_view_to(view),
+                None => st.view = None,
+            }
         }
         st.revision += 1;
         self.shared.frame(st);
         st.guide_info()
+    }
+}
+
+impl State {
+    /// The view moves to `to` over the guide editor's time, slowing to a stop.
+    fn ease_view_to(&mut self, to: View) {
+        let start = std::time::Instant::now();
+        self.view_motion =
+            self.view.map(|from| ViewMotion { from, to, start, curve: ViewCurve::EaseOut(EDITOR_EASE_SECONDS) });
+        if self.view_motion.is_none() {
+            self.view = Some(to);
+        }
+    }
+}
+
+impl CanvasSession {
+    /// Perspective: a touch at window point (`x`, `y`) takes the vanishing point within `reach`
+    /// window pixels, else (with `add`) adds one there (up to three); its index, to drag.
+    fn vanishing_point_at(&self, x: f32, y: f32, reach: f32, add: bool) -> Option<u32> {
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        let p = st.to_canvas_point(x, y)?;
+        let to_screen = st.view?.to_screen();
+        let near = st
+            .doc
+            .guide
+            .vanishing
+            .iter()
+            .position(|v| to_screen.apply(Vec2::new(v[0], v[1])).distance(Vec2::new(x, y)) <= reach);
+        if let Some(i) = near {
+            return Some(i as u32);
+        }
+        if !add || st.doc.guide.vanishing.len() >= 3 {
+            return None;
+        }
+        st.doc.guide.vanishing.push([p.x, p.y]);
+        st.revision += 1;
+        self.shared.frame(st);
+        Some(st.doc.guide.vanishing.len() as u32 - 1)
+    }
+
+    /// A tap on the guide editor's canvas at window point (`x`, `y`) away from its handles: a
+    /// perspective guide with fewer than three points gets one there. Whether it did.
+    pub(crate) fn guide_tap(&self, x: f32, y: f32) -> bool {
+        if self.guide().kind != GuideType::Perspective {
+            return false;
+        }
+        let before = self.shared.lock().doc.guide.vanishing.len();
+        self.vanishing_point_at(x, y, 0.0, true).is_some() && self.shared.lock().doc.guide.vanishing.len() > before
+    }
+
+    /// Where handle `grab` is, window pixels: a tapped one's menu shows there.
+    pub(crate) fn guide_handle_at(&self, grab: GuideGrab) -> Option<(f32, f32)> {
+        let g = self.guide();
+        let point = match grab {
+            GuideGrab::Point(i) => g.vanishing.get(i as usize * 2..i as usize * 2 + 2),
+            GuideGrab::Centre => g.centre.get(..2),
+            GuideGrab::Turn => g.handle.get(..2),
+        };
+        match point {
+            Some([x, y]) => Some((*x, *y)),
+            _ => None,
+        }
+    }
+
+    /// A touch on the guide editor's canvas at window point (`x`, `y`), `scale` window pixels a
+    /// point: what it takes. A perspective guide's point there, else the turn handle or the centre
+    /// it lands near (a point is added by a tap, [`CanvasSession::guide_tap`], not by a touch).
+    pub(crate) fn guide_grab(&self, x: f32, y: f32, scale: f32) -> Option<GuideGrab> {
+        let reach = HANDLE_REACH * scale;
+        let g = self.guide();
+        if g.kind == GuideType::Perspective {
+            return self.vanishing_point_at(x, y, reach, false).map(GuideGrab::Point);
+        }
+        let near = |p: &[f32]| matches!(p, [px, py, ..] if (px - x).hypot(py - y) <= reach);
+        if near(&g.handle) {
+            Some(GuideGrab::Turn)
+        } else if near(&g.centre) {
+            Some(GuideGrab::Centre)
+        } else {
+            None
+        }
+    }
+
+    /// What a touch took in the guide editor, dragged to window point (`x`, `y`).
+    pub(crate) fn guide_drag(&self, grab: GuideGrab, x: f32, y: f32) {
+        match grab {
+            GuideGrab::Point(i) => _ = self.move_vanishing_point(i, x, y),
+            GuideGrab::Centre => _ = self.move_guide_centre(x, y),
+            GuideGrab::Turn => _ = self.turn_guide(x, y),
+        }
     }
 }
 
@@ -465,7 +573,7 @@ mod tests {
         let s = CanvasSession::new(400, 300);
         s.shared.lock().doc.dpi = 132.0;
         s.set_guide_on(true);
-        let before = s.guide_edit_begin(0.0, 0.0, 400.0, 300.0);
+        let before = s.guide_edit_begin();
         assert_eq!(
             (before.unit, before.size_text.as_str(), before.size_label.as_str()),
             (GuideUnit::Pixels, "71", "71px")
@@ -501,7 +609,7 @@ mod tests {
         let back = s.guide_edit_end(false);
         assert_eq!((back.size, back.unit, back.size_label.as_str()), (71.0, GuideUnit::Pixels, "71px"));
         // Done keeps them
-        s.guide_edit_begin(0.0, 0.0, 400.0, 300.0);
+        s.guide_edit_begin();
         s.set_guide_length("3".into(), GuideUnit::Centimeters);
         assert_eq!(s.guide_edit_end(true).size_label, "3cm");
     }

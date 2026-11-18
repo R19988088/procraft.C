@@ -35,6 +35,9 @@ pub struct Screen {
     pub last: bool,
     /// The system's on-screen keyboard, for a field focused by a finger or a pen.
     pub touch_keyboard: crate::touch_keyboard::TouchKeyboard,
+    /// Whether the interface was told it is on a touch screen, for a tablet's pen that moves the
+    /// mouse pointer.
+    pen_touch_screen: crate::input::PenTouchScreen,
 }
 
 /// A canvas drawn into a picture of its own (the surface's format), its size, and the
@@ -197,7 +200,16 @@ impl Screen {
             tried: 0,
             last,
             touch_keyboard: crate::touch_keyboard::TouchKeyboard::default(),
+            pen_touch_screen: crate::input::PenTouchScreen::default(),
         })
+    }
+
+    /// What the window's events gave the interface since its last frame; once a tablet's pen moves
+    /// the mouse pointer, it is told it is on a touch screen (see [`crate::input::PenTouchScreen`]).
+    pub fn take_input(&mut self) -> egui::RawInput {
+        let mut raw = self.egui.take_egui_input(&self.window);
+        self.pen_touch_screen.tell(&mut raw, crate::pen::mouse_pen().is_some());
+        raw
     }
 
     /// Whether the canvases' pipelines were made without a GPU error, once they are made (told
@@ -274,9 +286,7 @@ impl Screen {
     /// Whether `p` (window pixels) is on the interface rather than the canvas, which shows in
     /// `canvas` (points).
     pub fn over_interface(&self, p: (f32, f32), canvas: egui::Rect) -> bool {
-        let ctx = self.egui.egui_ctx();
-        let at = egui::pos2(p.0, p.1) / ctx.pixels_per_point();
-        !canvas.contains(at) || ctx.layer_id_at(at).is_some_and(|l| l.order != egui::Order::Background)
+        on_interface(self.egui.egui_ctx(), p, canvas)
     }
 
     /// Draws `pad` (the brush studio's drawing pad) into its own picture, `size` pixels (made again
@@ -366,8 +376,10 @@ impl Screen {
         let (format, screen) = (config.format, screen_profile(config));
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            // made again at the window's size as it now is: the window changing is what put the
+            // surface out of date, and made at its old size it would stay so
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.resize(size.0, size.1);
+                self.resize(window.width, window.height);
                 return Some(Duration::ZERO);
             }
             wgpu::CurrentSurfaceTexture::Timeout
@@ -431,6 +443,13 @@ impl Screen {
             (canvas, interface) => canvas.or(interface),
         }
     }
+}
+
+/// Whether `p` (window pixels) is on `ctx`'s interface rather than the canvas, which shows in
+/// `canvas` (points): off the canvas, or on anything shown over it.
+pub fn on_interface(ctx: &egui::Context, p: (f32, f32), canvas: egui::Rect) -> bool {
+    let at = egui::pos2(p.0, p.1) / ctx.pixels_per_point();
+    !canvas.contains(at) || ctx.layer_id_at(at).is_some_and(|l| l.order != egui::Order::Background)
 }
 
 #[cfg(test)]

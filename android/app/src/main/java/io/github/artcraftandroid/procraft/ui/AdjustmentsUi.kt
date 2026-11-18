@@ -262,10 +262,16 @@ private fun Adjustment.icon() = when (this) {
     Adjustment.PLUGIN -> PcIcons.Adjustments
 }
 
-/** The window's width, which the adjustment toolbars and the animation bar lay themselves out by (not its shape). */
+/**
+ * The window's width, which the adjustment toolbars and the animation bar lay themselves out by (not
+ * its shape), less what the interface keeps clear of across it.
+ */
 @Composable
-internal fun windowWidth(): Dp =
-    with(androidx.compose.ui.platform.LocalDensity.current) { androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.width.toDp() }
+internal fun windowWidth(): Dp {
+    val clear = LocalClearance.current
+    val width = androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.width - clear.left - clear.right
+    return with(androidx.compose.ui.platform.LocalDensity.current) { width.toDp() }
+}
 
 /**
  * Where each toolbar lays its sliders side by side (as measured in landscape; upright, stacked): the
@@ -854,7 +860,7 @@ private fun LiquifyPanelAndMenus(vm: CanvasViewModel, screenWidth: Dp, screenHei
                 Spacer(Modifier.height(4.dp))
                 Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(MenuGroup).padding(vertical = 8.dp)) {
                     val amount = if (vm.liquifyAmount >= 1f) "Max" else "${(vm.liquifyAmount * 100).roundToInt()}%"
-                    SliderRow("Amount", vm.liquifyAmount, amount) { vm.changeLiquifyAmount(it) }
+                    SliderRow("Amount", vm.liquifyAmount, amount, onEnd = vm::letGoLiquifyAmount) { vm.changeLiquifyAmount(it) }
                 }
             }
         }

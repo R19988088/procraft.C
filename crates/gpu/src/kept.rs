@@ -197,11 +197,8 @@ mod tests {
         let dir = folder("gpu");
         let file = dir.join(name);
         let first = Kept::open(&gpu.device, &gpu.adapter, &dir).unwrap();
-        let _ = crate::canvas::Pipelines::new(
-            &gpu.device,
-            crate::canvas::liquify_format(&gpu.adapter),
-            Some(first.cache.clone()),
-        );
+        let _ =
+            crate::canvas::Pipelines::new(&gpu.device, crate::canvas::Abilities::of(&gpu), Some(first.cache.clone()));
         first.made();
         first.save();
         let (kept, _) = read(&file).expect("the pipelines kept");
@@ -209,11 +206,8 @@ mod tests {
         // a second start loads it, and leaves the mark until its pipelines are made
         let second = Kept::open(&gpu.device, &gpu.adapter, &dir).unwrap();
         assert!(loading(&file).exists());
-        let _ = crate::canvas::Pipelines::new(
-            &gpu.device,
-            crate::canvas::liquify_format(&gpu.adapter),
-            Some(second.cache.clone()),
-        );
+        let _ =
+            crate::canvas::Pipelines::new(&gpu.device, crate::canvas::Abilities::of(&gpu), Some(second.cache.clone()));
         second.made();
         assert!(!loading(&file).exists());
         second.save();

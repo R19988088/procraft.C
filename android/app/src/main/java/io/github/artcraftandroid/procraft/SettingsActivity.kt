@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.keptPlugins
+import io.github.artcraftandroid.procraft.canvas.wideColorByDefault
 import io.github.artcraftandroid.procraft.ui.Pc
 import io.github.artcraftandroid.procraft.ui.Switch
 import io.github.artcraftandroid.procraft.ui.fittedInterfaceSize
@@ -117,6 +118,13 @@ private val Groups: List<Pair<String, List<Setting>>> = listOf(
         Toggle(
             CanvasViewModel.TAP_ASSISTANCE, "Tap Assistance - Initial Touch Location Support",
             "A tap lands where the finger first touched, even if it drifts before lifting.", false,
+        ),
+    ),
+    "Display" to listOf(
+        Toggle(
+            CanvasViewModel.WIDE_COLOR, "Wide Color",
+            "Display P3 canvases show their brightest colors. Turn off if the bars blur or colors look dull on this screen.",
+            wideColorByDefault(),
         ),
     ),
 )

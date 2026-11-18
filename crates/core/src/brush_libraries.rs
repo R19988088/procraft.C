@@ -6,16 +6,22 @@
 //! the index changes: cut short anywhere, the libraries are all still there.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use procraft_engine::brush::Brush;
 
-use crate::brush_library::{LibrarySet, library_writes};
+use crate::brush_library::{LibrarySet, library_writes, stamp};
 use crate::layers::ThumbnailImage;
 use crate::{BrushInfo, BrushSetInfo, CanvasSession};
 
-/// How many libraries not in use have their brushes kept read, for their cards' previews.
+/// How many libraries not in use are kept as read (or as left): for their cards' previews, and to
+/// bring one into use again without reading it.
 const READ_KEPT: usize = 4;
+
+/// Held while a library not in use is read from its files, so that its card's strokes, asked for
+/// all at once from several threads, read it once rather than once each (each read holding all
+/// its brushes' pictures: with hundreds of brushes brought in, that ran a tablet out of memory).
+static READING: Mutex<()> = Mutex::new(());
 
 /// The library as it ships is called this; a new one is called [`NEW_NAME`], and both are
 /// numbered after their name while another has it.
@@ -108,16 +114,34 @@ struct IndexFile<'a> {
     current: &'a str,
 }
 
+/// A library not in use as read from its files, or as it was left: its sets, what they hold (as
+/// [`crate::brush_library`] tells libraries apart), and its sets' file's size and time then (read
+/// again once those change: another session kept it since).
+#[derive(Clone)]
+struct Read {
+    id: String,
+    sets: Arc<Vec<LibrarySet>>,
+    told: u64,
+    stamp: Option<(u64, std::time::SystemTime)>,
+}
+
+impl Read {
+    /// Whether it is library `id` as its sets' file holds it now, the file's size and time `now`.
+    fn is(&self, id: &str, now: Option<(u64, std::time::SystemTime)>) -> bool {
+        self.id == id && now.is_some() && self.stamp == now
+    }
+}
+
 /// The libraries: in order, which the app has in use (by id) and which this session holds in the
 /// state (the same, unless another session brought another into use since), the folder they are
-/// kept in, and the brushes of a few not in use, read from their files (by id, the latest last).
-#[derive(Clone, Debug)]
+/// kept in, and a few not in use as read from their files or as left (the latest last).
+#[derive(Clone)]
 pub(crate) struct Libraries {
     list: Vec<Entry>,
     current: String,
     held: String,
     dir: Option<PathBuf>,
-    read: Vec<(String, Arc<Vec<Vec<Brush>>>)>,
+    read: Vec<Read>,
 }
 
 impl Default for Libraries {
@@ -314,8 +338,8 @@ impl CanvasSession {
         if id == held {
             return self.brush_preview(set, index, width, height);
         }
-        let brushes = self.library_brushes(&id, &dir?)?;
-        let brush = brushes.get(set as usize)?.get(index as usize)?.clone();
+        let (sets, _) = self.library_read(&id, &dir?)?;
+        let brush = sets.get(set as usize)?.brushes.get(index as usize)?.clone();
         self.drawn_preview(brush, width, height)
     }
 
@@ -438,7 +462,7 @@ impl CanvasSession {
             return false;
         }
         // its id may be a new library's later
-        self.shared.lock().libraries.read.retain(|(r, _)| *r != gone);
+        self.shared.lock().libraries.read.retain(|r| r.id != gone);
         // the index no longer has it: its files go (the first's stay, for an earlier version), and
         // its pictures and grains once nothing names them
         if gone != FIRST {
@@ -523,7 +547,7 @@ impl CanvasSession {
     fn bring_into_use(&self, dir: &Path, target: &str) -> bool {
         let (sets_file, choices_file) = files(dir, target);
         // read first: a library that can't be leaves the one in use as it is
-        let Some((library, told)) = self.library_at(&sets_file, target != FIRST) else { return false };
+        let Some((library, told)) = self.library_to_use(&sets_file, target) else { return false };
         let choices = std::fs::read_to_string(&choices_file).ok();
         let (held_sets, held_choices) = self.files_in_use(dir);
         let mut library = Some(library);
@@ -535,19 +559,28 @@ impl CanvasSession {
                 return false;
             }
             self.keep_card(dir);
+            let left_stamp = stamp(&held_sets);
             let mut st = self.shared.lock();
             // changed while it was being kept (a brush chosen meanwhile): kept again
             if !CanvasSession::library_is(&st, kept, &kept_choices) {
                 continue;
             }
             let Some(library) = library.take() else { return false };
+            // the one left kept as it is, as its files now hold it: its card, and coming back to
+            // it, read nothing again
+            let left = Read {
+                id: st.libraries.held.clone(),
+                sets: Arc::new(st.library.clone()),
+                told: kept,
+                stamp: left_stamp,
+            };
             st.reset_brush_choices();
             st.put_library(library.clone());
             st.library_kept = Some((sets_file.clone(), told));
             st.libraries.held = target.to_owned();
-            // read again once they are wanted: the one left was kept again
-            st.libraries.read.clear();
+            st.libraries.read.retain(|r| r.id != target);
             drop(st);
+            self.keep_read(left);
             if let Some(choices) = choices {
                 self.load_brush_choices(choices);
             }
@@ -563,23 +596,55 @@ impl CanvasSession {
         false
     }
 
-    /// Library `id`'s brushes, by set, read from its files in `dir` (or as read before).
-    pub(crate) fn library_brushes(&self, id: &str, dir: &Path) -> Option<Arc<Vec<Vec<Brush>>>> {
-        if let Some((_, read)) = self.shared.lock().libraries.read.iter().find(|(r, _)| r == id) {
-            return Some(Arc::clone(read));
+    /// Library `target` to bring into use from its sets' file at `path`, and what it holds: as
+    /// read or left before while the file is as it was then, else as
+    /// [`CanvasSession::library_at`] has it. None if it can't be read, or it is the first library
+    /// and holds no set.
+    fn library_to_use(&self, path: &Path, target: &str) -> Option<(Vec<LibrarySet>, u64)> {
+        let now = stamp(path);
+        let read = {
+            let st = self.shared.lock();
+            st.libraries.read.iter().find(|r| r.is(target, now)).map(|r| (Arc::clone(&r.sets), r.told))
+        };
+        match read {
+            Some((sets, told)) => (target != FIRST || !sets.is_empty()).then(|| (Arc::unwrap_or_clone(sets), told)),
+            None => self.library_at(path, target != FIRST),
         }
-        let json = std::fs::read_to_string(files(dir, id).0).ok()?;
+    }
+
+    /// Library `id` (not the one held) as read from its files in `dir`, and what it holds; as read
+    /// or left before while its files are as they were then. Read once however many ask at once.
+    pub(crate) fn library_read(&self, id: &str, dir: &Path) -> Option<(Arc<Vec<LibrarySet>>, u64)> {
+        let _reading = READING.lock().unwrap_or_else(PoisonError::into_inner);
+        let path = files(dir, id).0;
+        // (its time before reading: changed meanwhile, it is read again next time)
+        let now = stamp(&path);
+        let read = {
+            let st = self.shared.lock();
+            st.libraries.read.iter().find(|r| r.is(id, now)).map(|r| (Arc::clone(&r.sets), r.told))
+        };
+        if read.is_some() {
+            return read;
+        }
+        let json = std::fs::read_to_string(&path).ok()?;
         let folder = dir.join(crate::brush_pictures::FOLDER);
         let sets = crate::brush_library::read_library(self, &json, Some(&folder), true)?;
-        let read = Arc::new(sets.into_iter().map(|set| set.brushes).collect::<Vec<_>>());
+        let told = self.shared.lock().told_of(&sets);
+        let sets = Arc::new(sets);
+        self.keep_read(Read { id: id.to_owned(), sets: Arc::clone(&sets), told, stamp: now });
+        Some((sets, told))
+    }
+
+    /// `read` kept among the libraries not in use as read, in place of any earlier one of its
+    /// library; the longest kept goes past [`READ_KEPT`].
+    fn keep_read(&self, read: Read) {
         let mut st = self.shared.lock();
         let kept = &mut st.libraries.read;
-        kept.retain(|(r, _)| r != id);
-        kept.push((id.to_owned(), Arc::clone(&read)));
+        kept.retain(|r| r.id != read.id);
+        kept.push(read);
         if kept.len() > READ_KEPT {
             kept.remove(0);
         }
-        Some(read)
     }
 
     /// The library in use and its choices kept in its own files in `dir`, and its card where the

@@ -6,6 +6,9 @@ use crate::geom::{Affine, Vec2};
 pub const MIN_ZOOM: f32 = 0.02;
 pub const MAX_ZOOM: f32 = 64.0;
 
+/// A canvas let go within this of a right angle (radians, 5°) turns the rest of the way onto it.
+pub const TURN_SNAP: f32 = 5.0 * std::f32::consts::PI / 180.0;
+
 /// The canvas-to-screen map: a move, a uniform zoom and a rotation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct View {
@@ -92,6 +95,48 @@ impl View {
             .then(Affine::scale(zoom.clamp(MIN_ZOOM, MAX_ZOOM)))
             .then(Affine::translate(at));
         View { to_screen }
+    }
+
+    /// The view turned the rest of the way onto the nearest right angle about `pivot` (screen
+    /// pixels) if it is within [`TURN_SNAP`] of it, as a canvas let go settles; None if it is
+    /// farther from one, or on one already.
+    pub fn snapped_turn(&self, pivot: Vec2) -> Option<View> {
+        let r = self.rotation();
+        if !(r.is_finite() && pivot.is_finite()) {
+            return None;
+        }
+        let quarter = std::f32::consts::FRAC_PI_2;
+        let off = r.abs() % quarter;
+        if (TURN_SNAP..=quarter - TURN_SNAP).contains(&off) {
+            return None;
+        }
+        let turn = (r / quarter).round() * quarter - r;
+        if turn.abs() < 1e-6 {
+            return None;
+        }
+        let mut to = *self;
+        to.gesture(pivot, Vec2::ZERO, 1.0, turn);
+        Some(to)
+    }
+
+    /// How long the view takes to move to `to` on its own, seconds: 0.134, and up to 0.366 more
+    /// the farther it goes. How far is the mean of three parts, each at most a whole: the canvas
+    /// point at the screen's corner moving 1000 canvas pixels, the zoom changing by 1 (a change
+    /// `z` past that counting `1 - 1/z`), the turn changing by half a turn. None if it
+    /// doesn't move.
+    pub fn move_seconds(&self, to: &View) -> Option<f32> {
+        let part = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+        let corner = |v: &View| v.screen_to_canvas(Vec2::ZERO);
+        let shift = match (corner(self), corner(to)) {
+            (Some(a), Some(b)) => a.distance(b) / 1000.0,
+            _ => 0.0,
+        };
+        let zoom = (to.zoom() - self.zoom()).abs();
+        let zoom = if zoom >= 1.0 { 1.0 - 1.0 / zoom } else { zoom };
+        let turn = (to.rotation() - self.rotation() + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+            - std::f32::consts::PI;
+        let far = part((part(shift) + part(zoom) + part(turn.abs() / std::f32::consts::PI)) / 3.0);
+        (far > 0.0).then_some(0.134 + 0.366 * far)
     }
 
     /// A view mapping the canvas to the screen by `to_screen`.
@@ -201,5 +246,51 @@ mod tests {
         assert!((m.x - 200.0).abs() < 1e-3 && (m.y - 300.0).abs() < 1e-3);
         assert!((c.zoom() - 2.0).abs() < 1e-4 && (c.to_screen().rotation() - 0.5).abs() < 1e-4);
         assert!(View::centred(Vec2::new(f32::NAN, 0.0), 1.0, 0.0, (10, 10)).is_none());
+    }
+
+    #[test]
+    fn a_view_let_go_near_a_right_angle_turns_onto_it_about_the_pivot() {
+        let pivot = Vec2::new(300.0, 200.0);
+        let turned = |deg: f32| {
+            let mut v = View::fit((1000, 800), (600, 400));
+            v.gesture(Vec2::new(100.0, 50.0), Vec2::new(30.0, -20.0), 1.7, deg.to_radians());
+            v
+        };
+        // within 5° of a right angle, either side and any way round: onto it, the pivot kept
+        for (deg, onto) in [(3.0, 0.0), (-4.9, 0.0), (86.0, 90.0), (94.0, 90.0), (-92.0, -90.0), (183.0, 180.0)] {
+            let v = turned(deg);
+            let under = v.screen_to_canvas(pivot).unwrap();
+            let to = v.snapped_turn(pivot).unwrap_or_else(|| panic!("{deg}"));
+            let off = (to.rotation().to_degrees() - onto + 180.0).rem_euclid(360.0) - 180.0;
+            assert!(off.abs() < 1e-3, "{deg}: {}", to.rotation().to_degrees());
+            assert!(to.to_screen().apply(under).distance(pivot) < 1e-2, "{deg}");
+            assert!((to.zoom() - v.zoom()).abs() < 1e-4, "{deg}");
+        }
+        // farther, or on one already: left as it is
+        for deg in [5.1, 20.0, 45.0, 84.9, -100.0, 0.0, 90.0] {
+            assert!(turned(deg).snapped_turn(pivot).is_none(), "{deg}");
+        }
+        assert!(turned(3.0).snapped_turn(Vec2::new(f32::NAN, 0.0)).is_none());
+    }
+
+    #[test]
+    fn a_view_moves_on_its_own_longer_the_farther_it_goes() {
+        let v = View::fit((1000, 1000), (1000, 1000));
+        assert_eq!(v.move_seconds(&v), None);
+        // turned 5° about the middle: the corner, 707 canvas pixels out, goes 61.7; the turn 0.0873
+        let mut t = v;
+        t.gesture(Vec2::new(500.0, 500.0), Vec2::ZERO, 1.0, 5f32.to_radians());
+        let far = (0.0617 + 0.0873 / std::f32::consts::PI) / 3.0;
+        assert!((t.move_seconds(&v).unwrap() - (0.134 + 0.366 * far)).abs() < 1e-3);
+        // each part counts a whole at most: a long way is about half a second
+        let mut gone = v;
+        gone.gesture(Vec2::ZERO, Vec2::new(-2e6, 0.0), 1000.0, std::f32::consts::PI);
+        let far = (1.0 + (1.0 - 1.0 / 63.0) + 1.0) / 3.0;
+        let seconds = v.move_seconds(&gone).unwrap();
+        assert!((seconds - (0.134 + 0.366 * far)).abs() < 1e-3 && seconds < 0.5, "{seconds}");
+        // a zoom from 1 to 3 counts 1 - 1/2
+        let mut zoomed = v;
+        zoomed.gesture(Vec2::ZERO, Vec2::ZERO, 3.0, 0.0);
+        assert!((v.move_seconds(&zoomed).unwrap() - (0.134 + 0.366 * 0.5 / 3.0)).abs() < 1e-3);
     }
 }

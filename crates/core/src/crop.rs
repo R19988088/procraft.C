@@ -15,7 +15,7 @@ const CROP_SHRINK_SECONDS: f32 = 0.3;
 const LOST_SAID: &str =
     "The graphics stopped working. Go back to the gallery and open the artwork again: it comes back as last saved.";
 
-/// What the apps tell when a smudge stroke couldn't be begun.
+/// What the apps tell when a smudge stroke couldn't be begun, or couldn't go on.
 const SMUDGE_SAID: &str = "There isn't enough graphics memory to smudge on this canvas.";
 
 /// What a canvas holds besides its layers, in layers' worth: its stroke (two), composite and
@@ -176,7 +176,14 @@ impl CanvasSession {
         let refused = st.canvas.as_mut().is_some_and(Canvas::take_smudge_refused);
         let failed = st.crop_edit.failure.take().or_else(|| refused.then(|| SMUDGE_SAID.to_owned()));
         let failed = failed.or_else(|| st.filters.take_said());
-        failed.or_else(|| st.hooks.as_ref().and_then(|hooks| hooks.take_said()))
+        if failed.is_some() {
+            return failed;
+        }
+        // the plugins' list can wait on a plugin at work: asked with the canvas let go, so this
+        // poll (every few seconds) never holds up a touch meanwhile
+        let hooks = st.hooks.clone();
+        drop(guard);
+        hooks.and_then(|hooks| hooks.take_said())
     }
 
     /// The canvas's colour profile, by name.
@@ -487,15 +494,23 @@ mod tests {
     fn a_crop_past_the_budget_parks_what_doesnt_fit_and_loses_nothing() {
         let (Some(fits), Some(parks)) = (painted(120), painted(120)) else { return };
         let per = 80 * 70 * 4;
-        // room for one layer of the new size: the other two go compressed
-        for (x, angle) in [(10.0, 0.0), (10.5, 0.2)] {
+        // room for one layer of the new size: the other two go compressed. Moved by whole pixels,
+        // every pixel comes across as it was; resampled, those parked are worked out on the CPU and
+        // the rest on the GPU, whose float sums may round a level apart
+        for (x, angle, most) in [(10.0, 0.0, 0u8), (10.5, 0.2, 1)] {
             if let Some(c) = parks.shared.lock().canvas.as_mut() {
                 c.set_resident_budget(per);
             }
             assert!(fits.crop_canvas(x, 10.0, 80.0, 70.0, angle, false, 0, 0));
             assert!(parks.crop_canvas(x, 10.0, 80.0, 70.0, angle, false, 0, 0));
             assert_eq!(parks.shared.lock().canvas.as_ref().map(procraft_gpu::Canvas::parked_layers), Some(2));
-            assert_eq!(contents(&parks), contents(&fits));
+            let ((parked, size), (resident, resident_size)) = (contents(&parks), contents(&fits));
+            assert_eq!((parked.len(), size), (resident.len(), resident_size));
+            for (a, b) in parked.iter().zip(&resident) {
+                assert_eq!(a.len(), b.len());
+                let off = a.iter().zip(b).map(|(p, q)| p.abs_diff(*q)).max().unwrap_or(0);
+                assert!(off <= most, "{off} levels apart at {x}, {angle}");
+            }
             assert!(parks.undo().is_some());
             assert!(fits.undo().is_some());
         }

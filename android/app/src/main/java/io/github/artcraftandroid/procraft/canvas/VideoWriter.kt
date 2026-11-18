@@ -6,6 +6,7 @@ import android.media.MediaCodecList
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import io.github.artcraftandroid.procraft.AppLog
 import java.io.File
 import java.nio.ByteBuffer
 import kotlin.math.roundToInt
@@ -128,7 +129,7 @@ object VideoWriter {
             drain(true)
             return track >= 0
         } catch (e: Exception) {
-            android.util.Log.e("ProCraft", "video", e)
+            AppLog.e("ProCraft", "video", e)
             return false
         } finally {
             runCatching { codec.stop() }
@@ -193,7 +194,7 @@ object VideoWriter {
             }
             return track >= 0
         } catch (e: Exception) {
-            android.util.Log.e("ProCraft", "joining videos", e)
+            AppLog.e("ProCraft", "joining videos", e)
             return false
         } finally {
             runCatching { if (track >= 0) muxer.stop() }

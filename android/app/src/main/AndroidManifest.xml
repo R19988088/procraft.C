@@ -2,6 +2,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Save to Gallery on Android 8 and 9, which write into the shared Pictures and Movies
+         folders only with this; later versions need nothing to add to the media store -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
     <application
         android:allowBackup="false"
         android:enableOnBackInvokedCallback="true"
@@ -181,6 +187,13 @@
         <!-- the share sheet's Save to device: the system's picker over a see-through window -->
         <activity
             android:name=".SaveToDeviceActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!-- the share sheet's Save to Gallery: nothing shown but a note of how it went -->
+        <activity
+            android:name=".SaveToGalleryActivity"
             android:exported="false"
             android:excludeFromRecents="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />

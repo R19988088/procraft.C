@@ -293,19 +293,26 @@ impl Transform {
         }
     }
 
-    /// Scales the box, upright and keeping its proportions, to fit a `width` × `height` canvas,
-    /// centred.
+    /// Scales the box and content alike, keeping their proportions, their turn and any flip, so
+    /// that the box as it is turned (the upright rectangle around it, a warp's mesh too) just fits
+    /// a `width` × `height` canvas, centred on it.
     pub fn fit(&mut self, width: f32, height: f32) {
-        let [a, b, _, d] = self.now.frame;
-        let (w, h) = (a.distance(b), a.distance(d));
-        if w <= 0.0 || h <= 0.0 {
+        let mesh = self.now.warp.map(|m| m.to_vec()).unwrap_or_default();
+        let (mut low, mut high) = (Vec2::new(f32::MAX, f32::MAX), Vec2::new(f32::MIN, f32::MIN));
+        for p in self.now.frame.iter().chain(&mesh) {
+            low = Vec2::new(low.x.min(p.x), low.y.min(p.y));
+            high = Vec2::new(high.x.max(p.x), high.y.max(p.y));
+        }
+        let (w, h) = (high.x - low.x, high.y - low.y);
+        if !(w > 0.0 && h > 0.0) {
             return;
         }
         let k = (width / w).min(height / h);
-        let (w, h) = (w * k, h * k);
-        let (x, y) = ((width - w) / 2.0, (height - h) / 2.0);
-        let to = [Vec2::new(x, y), Vec2::new(x + w, y), Vec2::new(x + w, y + h), Vec2::new(x, y + h)];
-        self.change(|p| carry_all(p, to));
+        let middle = Vec2::new((low.x + high.x) / 2.0, (low.y + high.y) / 2.0);
+        let m = Affine::translate(Vec2::ZERO - middle)
+            .then(Affine { a: k, d: k, ..Affine::IDENTITY })
+            .then(Affine::translate(Vec2::new(width / 2.0, height / 2.0)));
+        self.change(|p| Some(map_placement(p, m)));
     }
 
     /// Moves the content one canvas pixel towards `toward`, along whichever axis it is further
@@ -823,8 +830,16 @@ mod tests {
         assert!(close(centre(t.frame()), Vec2::new(150.0, 200.0)));
         let [a, b, ..] = t.frame();
         assert!((angle(b - a) - std::f32::consts::FRAC_PI_4).abs() < 1e-4);
+        // fitted turned as it is: the turned box's upright bounds fill the canvas's side
         t.fit(1000.0, 1000.0);
-        assert!(quad_close(t.frame(), rect(250.0, 0.0, 500.0, 1000.0)));
+        let [a, b, ..] = t.frame();
+        assert!((angle(b - a) - std::f32::consts::FRAC_PI_4).abs() < 1e-4);
+        assert!(close(centre(t.frame()), Vec2::new(500.0, 500.0)));
+        let (w, h) = t.size();
+        let k = 1000.0 / (300.0 / std::f32::consts::SQRT_2);
+        assert!((w - 100.0 * k).abs() < 1e-2 && (h - 200.0 * k).abs() < 1e-2, "{w} {h}");
+        let xs = t.frame().map(|p| p.x);
+        assert!(xs.iter().any(|x| x.abs() < 1e-2) && xs.iter().any(|x| (x - 1000.0).abs() < 1e-2), "{xs:?}");
         t.reset();
         assert!(quad_close(t.content(), rect(100.0, 100.0, 100.0, 200.0)));
         // every action was a step
@@ -836,6 +851,45 @@ mod tests {
         // a reset with nothing changed is not a step
         t.reset();
         assert!(!t.can_undo());
+    }
+
+    #[test]
+    fn fit_to_canvas_keeps_flips_and_turns() {
+        // flipped across: fitted, the content's left edge is still on the box's right
+        let mut t = box_100x200();
+        t.flip_horizontal();
+        t.fit(1000.0, 1000.0);
+        assert!(quad_close(t.frame(), rect(250.0, 0.0, 500.0, 1000.0)));
+        let [a, b, c, d] = t.content();
+        assert!(close(a, Vec2::new(750.0, 0.0)) && close(b, Vec2::new(250.0, 0.0)), "{a:?} {b:?}");
+        assert!(close(c, Vec2::new(250.0, 1000.0)) && close(d, Vec2::new(750.0, 1000.0)), "{c:?} {d:?}");
+        // flipped up and down: its top is at the bottom
+        let mut t = box_100x200();
+        t.flip_vertical();
+        t.fit(1000.0, 1000.0);
+        let [a, b, ..] = t.content();
+        assert!(close(a, Vec2::new(250.0, 1000.0)) && close(b, Vec2::new(750.0, 1000.0)), "{a:?} {b:?}");
+        // a quarter turn: the turned box is 200 across and 100 down, so it fits the width
+        let mut t = box_100x200();
+        t.rotate(std::f32::consts::FRAC_PI_2);
+        t.fit(1000.0, 1000.0);
+        let [a, b, c, d] = t.frame();
+        assert!(close(a, Vec2::new(1000.0, 250.0)) && close(b, Vec2::new(1000.0, 750.0)), "{a:?} {b:?}");
+        assert!(close(c, Vec2::new(0.0, 750.0)) && close(d, Vec2::new(0.0, 250.0)), "{c:?} {d:?}");
+        assert!(quad_close(t.content(), t.frame()));
+        // turned and flipped: both kept
+        let mut t = box_100x200();
+        t.flip_horizontal();
+        t.rotate(std::f32::consts::FRAC_PI_2);
+        t.fit(1000.0, 1000.0);
+        let [fa, fb, fc, fd] = t.frame();
+        assert!(quad_close(t.content(), [fb, fa, fd, fc]));
+        assert!(close(fa, Vec2::new(1000.0, 250.0)));
+        // undone in one step, flipped as before
+        let before = t.content();
+        t.fit(500.0, 300.0);
+        assert!(t.undo());
+        assert!(quad_close(t.content(), before));
     }
 
     #[test]

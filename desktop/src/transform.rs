@@ -34,7 +34,11 @@ const SNAP_GUIDE: Themed = Themed(0xFFFF9F0A, 0xFFFF9500);
 const HELD_SCALE: f32 = 1.5;
 const HANDLE_RETURN: f32 = 0.5;
 
-const TOOLBAR_WIDTH: f32 = 728.0;
+/// The floating toolbar: clear of the window's sides by this much, its buttons this far in, and
+/// where the room beside the margins is narrower than this, the buttons' names go.
+const TOOLBAR_MARGIN: f32 = 8.0;
+const TOOLBAR_PADDING: f32 = 16.0;
+const NAMES_FROM: f32 = 700.0;
 const TOOLBAR_HEIGHT: f32 = 126.0;
 const TOOLBAR_BOTTOM: f32 = 25.0;
 const TOOLBAR_CORNER: f32 = 33.0;
@@ -45,9 +49,9 @@ const SEGMENT_TEXT: Themed = Themed(0xFFC1C1C1, 0xFF3B3B3B);
 const BUTTON_TEXT: Themed = Themed(0xFFA3A3A3, 0xFF414141);
 const BUTTON_DIMMED: Themed = Themed(0xFF575757, 0xFF989898);
 const SEGMENT_GAP: f32 = 11.33;
-/// The toolbar's buttons with room, and where the window is narrow; the gap between roomy ones.
+const SEGMENT_GAP_TIGHT: f32 = 2.0;
+/// The toolbar's buttons with room (narrower where the window is), and the gap between them.
 pub(crate) const BUTTON_ROOMY: f32 = 89.0;
-pub(crate) const BUTTON_WIDTH: f32 = 83.0;
 const BUTTON_HEIGHT: f32 = 60.0;
 const BUTTON_GAP: f32 = 19.0;
 /// The popovers over the toolbar.
@@ -366,8 +370,7 @@ impl Transform {
                 .active(self.popup == Popup::Interpolation),
             Button::new(&icons::TRANSFORM_RESET, "Reset", 44.0),
         ];
-        let tapped =
-            floating_toolbar(ctx, look, "transform toolbar", (BUTTON_ROOMY, BUTTON_WIDTH), &kinds, &buttons, 43.0)?;
+        let tapped = floating_toolbar(ctx, look, "transform toolbar", BUTTON_ROOMY, &kinds, &buttons, 43.0)?;
         Some(match tapped {
             Tapped::Background => Asked::Background,
             Tapped::Segment(k) => Asked::Kind(all.get(k).copied().unwrap_or(TransformKind::Freeform)),
@@ -388,7 +391,7 @@ impl Transform {
             return;
         }
         let index = if self.popup == Popup::Snapping { 0 } else { 5 };
-        let (tip_x, tip_y) = button_tip(ctx, (BUTTON_ROOMY, BUTTON_WIDTH), index, 7);
+        let (tip_x, tip_y) = button_tip(ctx, BUTTON_ROOMY, index, 7);
         let screen = ctx.content_rect();
         let body_height = match self.popup {
             Popup::Interpolation => 40.0 + 10.0 + 40.0 * 3.0 + 2.0,
@@ -530,31 +533,48 @@ impl Transform {
     }
 }
 
-/// A toolbar's width and its buttons' width for `count` buttons on a window `screen` wide: with
-/// room, `roomy` buttons 19 apart inside its padding; else across the window (8 clear of each
-/// side, at most 728) with `narrow` ones spread over it.
-fn toolbar_layout(screen: f32, count: usize, (roomy, narrow): (f32, f32)) -> (f32, f32) {
-    let n = count as f32;
-    let wide = roomy * n + BUTTON_GAP * (n - 1.0) + 32.0;
-    if wide <= screen - 16.0 { (wide, roomy) } else { (TOOLBAR_WIDTH.min(screen - 16.0), narrow) }
+/// How a floating toolbar is laid out: its width, its buttons' width, how big their icons are
+/// drawn (1: as measured) and whether their names show.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ToolbarFit {
+    width: f32,
+    button: f32,
+    icon_scale: f32,
+    names: bool,
 }
 
-/// The floating toolbar at the foot of the window for `count` buttons.
-fn toolbar_rect(ctx: &egui::Context, count: usize, widths: (f32, f32)) -> (Rect, f32) {
+/// A floating toolbar of `count` buttons in a window `screen` wide. With room, its buttons are
+/// `roomy` wide (as measured in landscape); where the window less 8 each side is narrower, it is
+/// that wide and its buttons share what is left inside its padding, 19 apart (on a 744 window:
+/// 728, as measured upright). Where the room beside the margins is under 700 the buttons' names
+/// go, and icons as big as `icon` are drawn smaller only where they would run into each other.
+fn toolbar_layout(screen: f32, count: usize, roomy: f32, icon: f32) -> ToolbarFit {
+    let n = count.max(1) as f32;
+    let gaps = BUTTON_GAP * (n - 1.0);
+    let room = screen - TOOLBAR_MARGIN * 2.0;
+    let width = (roomy * n + gaps + TOOLBAR_PADDING * 2.0).min(room).max(0.0);
+    let button = ((width - TOOLBAR_PADDING * 2.0 - gaps) / n).max(0.0);
+    let icon_scale = if icon > 0.0 { ((button + BUTTON_GAP) / icon).clamp(0.0, 1.0) } else { 1.0 };
+    ToolbarFit { width, button, icon_scale, names: room >= NAMES_FROM }
+}
+
+/// The floating toolbar at the foot of the window for `count` buttons, `roomy` wide with room,
+/// their icons at most `icon` across.
+fn toolbar_rect(ctx: &egui::Context, count: usize, roomy: f32, icon: f32) -> (Rect, ToolbarFit) {
     let screen = ctx.content_rect();
-    let (width, button) = toolbar_layout(screen.width(), count, widths);
+    let fit = toolbar_layout(screen.width(), count, roomy, icon);
     let bar = Rect::from_min_size(
-        pos2(screen.center().x - width / 2.0, screen.bottom() - TOOLBAR_BOTTOM - TOOLBAR_HEIGHT),
-        vec2(width, TOOLBAR_HEIGHT),
+        pos2(screen.center().x - fit.width / 2.0, screen.bottom() - TOOLBAR_BOTTOM - TOOLBAR_HEIGHT),
+        vec2(fit.width, TOOLBAR_HEIGHT),
     );
-    (bar, button)
+    (bar, fit)
 }
 
-/// Where a popover over button `index` of a toolbar of `count` points: its button's middle, at the
-/// top of the buttons.
-pub(crate) fn button_tip(ctx: &egui::Context, widths: (f32, f32), index: usize, count: usize) -> (f32, f32) {
-    let (bar, button) = toolbar_rect(ctx, count, widths);
-    (button_centre(bar, button, index, count), bar.top() + 16.0 + 34.0)
+/// Where a popover over button `index` of a toolbar of `count` (`roomy` wide with room) points:
+/// its button's middle, at the top of the buttons.
+pub(crate) fn button_tip(ctx: &egui::Context, roomy: f32, index: usize, count: usize) -> (f32, f32) {
+    let (bar, fit) = toolbar_rect(ctx, count, roomy, 0.0);
+    (button_centre(bar, fit.button, index, count), bar.top() + 16.0 + 34.0)
 }
 
 /// A toolbar button: its icon, name and icon size; lit while its popover is open; greyed when it
@@ -590,18 +610,19 @@ pub(crate) enum Tapped {
 
 /// The floating toolbar at the foot of the window (transform, selection): a row of `segments`
 /// (icon, name, chosen) in a pill, their icons `segment_icon` across, over `buttons` spread across
-/// it (with room `widths.0` wide, else `widths.1`). Returns what was tapped.
+/// it (`roomy` wide with room, narrower where the window is). Returns what was tapped.
 pub(crate) fn floating_toolbar(
     ctx: &egui::Context,
     look: &mut Look,
     id: &str,
-    widths: (f32, f32),
+    roomy: f32,
     segments: &[(&Icon, &str, bool)],
     buttons: &[Button],
     segment_icon: f32,
 ) -> Option<Tapped> {
-    let (bar, button) = toolbar_rect(ctx, buttons.len(), widths);
-    let roomy = widths.0;
+    let icon = buttons.iter().map(|b| b.size).fold(0.0, f32::max);
+    let (bar, fit) = toolbar_rect(ctx, buttons.len(), roomy, icon);
+    let button = fit.button;
     let mut tapped = None;
     egui::Area::new(Id::unique(id)).fixed_pos(bar.min).order(Order::Foreground).show(ctx, |ui| {
         // the bar's room claimed, so presses on it stay off the canvas
@@ -609,26 +630,38 @@ pub(crate) fn floating_toolbar(
             tapped = Some(Tapped::Background);
         }
         ui.painter().rect_filled(bar, TOOLBAR_CORNER, argb(TOOLBAR_FILL));
-        let widths: Vec<f32> = segments.iter().map(|(_, label, _)| segment_width(ui, label)).collect();
-        let row = widths.iter().sum::<f32>() + SEGMENT_GAP * (segments.len().max(1) - 1) as f32 + 4.0;
-        let pill = Rect::from_min_size(pos2(bar.center().x - row / 2.0, bar.top() + 16.0), vec2(row, 34.0));
-        ui.painter().rect_filled(pill, 17, argb(SEGMENT_TRACK));
-        ui.painter().rect_stroke(pill, 17, Stroke::new(0.5, argb(SEGMENT_EDGE)), egui::StrokeKind::Inside);
-        let mut x = pill.left() + 2.0;
-        for (k, ((icon, label, on), w)) in segments.iter().zip(widths).enumerate() {
-            let seg = Rect::from_min_size(pos2(x, pill.top() + 2.0), vec2(w, 30.0));
-            if segment(ui, look, seg, icon, label, *on, segment_icon) {
-                tapped = Some(Tapped::Segment(k));
+        // the pill tightened only where it doesn't fit, and drawn smaller where it still doesn't
+        let inner = bar.width() - TOOLBAR_PADDING * 2.0;
+        let names: Vec<f32> = segments.iter().map(|(_, label, _)| label_width(ui, label)).collect();
+        let row = |pad: SegmentPad| {
+            names.iter().map(|w| pad.width(*w)).sum::<f32>() + pad.gap * (segments.len().max(1) - 1) as f32 + 4.0
+        };
+        let pad = if row(SegmentPad::ROOMY) <= inner { SegmentPad::ROOMY } else { SegmentPad::TIGHT };
+        let k = if row(pad) > inner && inner > 0.0 { inner / row(pad) } else { 1.0 };
+        let (row, high) = (row(pad) * k, 34.0 * k);
+        let pill = Rect::from_min_size(
+            pos2(bar.center().x - row / 2.0, bar.top() + 16.0 + (34.0 - high) / 2.0),
+            vec2(row, high),
+        );
+        ui.painter().rect_filled(pill, high / 2.0, argb(SEGMENT_TRACK));
+        ui.painter().rect_stroke(pill, high / 2.0, Stroke::new(0.5, argb(SEGMENT_EDGE)), egui::StrokeKind::Inside);
+        let mut x = pill.left() + 2.0 * k;
+        for (n, ((icon, label, on), w)) in segments.iter().zip(&names).enumerate() {
+            let w = pad.width(*w) * k;
+            let seg = Rect::from_min_size(pos2(x, pill.top() + 2.0 * k), vec2(w, 30.0 * k));
+            if segment(ui, look, seg, (icon, label, *on), segment_icon, pad, k) {
+                tapped = Some(Tapped::Segment(n));
             }
-            x += w + SEGMENT_GAP;
+            x += w + pad.gap * k;
         }
         // a long name smaller only where the buttons are narrow
         let long = if button < roomy { 11.0 } else { 12.5 };
+        let top = bar.top() + 16.0 + 34.0;
         for (i, b) in buttons.iter().enumerate() {
             let centre = button_centre(bar, button, i, buttons.len());
-            let rect = Rect::from_min_size(pos2(centre - button / 2.0, pill.bottom()), vec2(button, BUTTON_HEIGHT));
+            let rect = Rect::from_min_size(pos2(centre - button / 2.0, top), vec2(button, BUTTON_HEIGHT));
             let label_size = if b.label.len() > 12 { long } else { 12.5 };
-            if toolbar_button(ui, look, rect, b, label_size) {
+            if toolbar_button(ui, look, rect, b, fit.names.then_some(label_size), fit.icon_scale) {
                 tapped = Some(Tapped::Button(i));
             }
         }
@@ -671,36 +704,62 @@ fn button_centre(bar: Rect, button: f32, index: usize, count: usize) -> f32 {
     bar.left() + 16.0 + (button + gap) * index as f32 + button / 2.0
 }
 
-fn segment_width(ui: &Ui, label: &str) -> f32 {
-    14.0 + 30.0
-        + 2.0
-        + ui.painter().layout_no_wrap(label.into(), Weight::Regular.font(13.0), Color32::WHITE).size().x
-        + 20.0
+/// A segment's name, 13 across.
+fn label_width(ui: &Ui, label: &str) -> f32 {
+    ui.painter().layout_no_wrap(label.into(), Weight::Regular.font(13.0), Color32::WHITE).size().x
 }
 
-/// One of the four ways: its icon (`size` across) and name, filled blue when chosen. True when
-/// tapped.
-fn segment(ui: &Ui, look: &mut Look, rect: Rect, icon: &Icon, label: &str, on: bool, size: f32) -> bool {
+/// The room round a segment's icon and name, and between segments: as measured, or tightened
+/// where the pill doesn't fit.
+#[derive(Clone, Copy)]
+struct SegmentPad {
+    start: f32,
+    end: f32,
+    gap: f32,
+}
+
+impl SegmentPad {
+    const ROOMY: SegmentPad = SegmentPad { start: 14.0, end: 20.0, gap: SEGMENT_GAP };
+    const TIGHT: SegmentPad = SegmentPad { start: 6.0, end: 8.0, gap: SEGMENT_GAP_TIGHT };
+
+    /// A segment's width with a name `name` across.
+    fn width(self, name: f32) -> f32 {
+        self.start + 30.0 + 2.0 + name + self.end
+    }
+}
+
+/// One of the four ways: its icon (`size` across) and name, filled blue when chosen, `pad` round
+/// them, all `k` times as big. True when tapped.
+fn segment(
+    ui: &Ui,
+    look: &mut Look,
+    rect: Rect,
+    (icon, label, on): (&Icon, &str, bool),
+    size: f32,
+    pad: SegmentPad,
+    k: f32,
+) -> bool {
     if on {
-        ui.painter().rect_filled(rect, 15, argb(pc::ACCENT));
+        ui.painter().rect_filled(rect, rect.height() / 2.0, argb(pc::ACCENT));
     }
     let ink = if on { Color32::WHITE } else { argb(SEGMENT_TEXT) };
-    look.icon(ui, icon, pos2(rect.left() + 14.0 + 15.0, rect.center().y), size, ink);
+    look.icon(ui, icon, pos2(rect.left() + (pad.start + 15.0) * k, rect.center().y), size * k, ink);
     text(
         ui.painter(),
-        pos2(rect.left() + 14.0 + 32.0, rect.center().y),
+        pos2(rect.left() + (pad.start + 32.0) * k, rect.center().y),
         Align2::LEFT_CENTER,
         label,
-        13.0,
+        13.0 * k,
         Weight::Regular,
         ink,
     );
     ui.interact(rect, ui.scope_id().with(("segment", label)), Sense::click()).clicked()
 }
 
-/// A toolbar button: its icon centred 30 below its top over its name; blue while its popover is
-/// open, grey when it can't be used. True when tapped.
-fn toolbar_button(ui: &Ui, look: &mut Look, rect: Rect, b: &Button, label_size: f32) -> bool {
+/// A toolbar button: its icon (`icon_scale` times its size) centred 30 below its top over its
+/// name (`label_size`; none in a narrow window); blue while its popover is open, grey when it
+/// can't be used. True when tapped.
+fn toolbar_button(ui: &Ui, look: &mut Look, rect: Rect, b: &Button, label_size: Option<f32>, icon_scale: f32) -> bool {
     let tint = if !b.enabled {
         argb(BUTTON_DIMMED)
     } else if b.active {
@@ -709,16 +768,18 @@ fn toolbar_button(ui: &Ui, look: &mut Look, rect: Rect, b: &Button, label_size: 
         argb(BUTTON_TEXT)
     };
     let ink = if b.enabled { argb(BUTTON_TEXT) } else { argb(BUTTON_DIMMED) };
-    look.icon(ui, b.icon, pos2(rect.center().x, rect.top() + 30.0), b.size, tint);
-    text(
-        ui.painter(),
-        pos2(rect.center().x, rect.top() + 50.0),
-        Align2::CENTER_CENTER,
-        b.label,
-        label_size,
-        Weight::Regular,
-        ink,
-    );
+    look.icon(ui, b.icon, pos2(rect.center().x, rect.top() + 30.0), b.size * icon_scale, tint);
+    if let Some(size) = label_size {
+        text(
+            ui.painter(),
+            pos2(rect.center().x, rect.top() + 50.0),
+            Align2::CENTER_CENTER,
+            b.label,
+            size,
+            Weight::Regular,
+            ink,
+        );
+    }
     b.enabled && ui.interact(rect, ui.scope_id().with(("toolbar button", b.label)), Sense::click()).clicked()
 }
 
@@ -788,6 +849,11 @@ fn ease_in_out(t: f32) -> f32 {
 /// A popover's slider row (59 tall): its name and value, then a thin slider, blue up to a small
 /// white knob. Returns the value set, while held.
 pub(crate) fn menu_slider(ui: &Ui, row: Rect, label: &str, value: f32, shown: &str) -> Option<f32> {
+    menu_slider_let_go(ui, row, label, value, shown).0
+}
+
+/// [`menu_slider`], and whether the pointer let go of it this frame (a drag's or a tap's end).
+pub(crate) fn menu_slider_let_go(ui: &Ui, row: Rect, label: &str, value: f32, shown: &str) -> (Option<f32>, bool) {
     let ink = argb(MENU_TEXT);
     text(ui.painter(), pos2(row.left() + 14.0, row.top() + 9.0), Align2::LEFT_TOP, label, 16.0, Weight::Regular, ink);
     text(ui.painter(), pos2(row.right() - 13.0, row.top() + 9.0), Align2::RIGHT_TOP, shown, 16.0, Weight::Regular, ink);
@@ -802,8 +868,9 @@ pub(crate) fn menu_slider(ui: &Ui, row: Rect, label: &str, value: f32, shown: &s
     ui.painter().rect_filled(knob, 5.5, Color32::WHITE);
     let response =
         ui.interact(bar.expand2(vec2(0.0, 6.0)), ui.scope_id().with(("menu slider", label)), Sense::click_and_drag());
-    let p = response.interact_pointer_pos()?;
-    Some(((p.x - start) / (end - start)).clamp(0.0, 1.0))
+    let let_go = response.drag_stopped() || response.clicked();
+    let value = response.interact_pointer_pos().map(|p| ((p.x - start) / (end - start)).clamp(0.0, 1.0));
+    (value, let_go)
 }
 
 fn interpolation_name(i: Interpolation, short: bool) -> &'static str {
@@ -812,5 +879,61 @@ fn interpolation_name(i: Interpolation, short: bool) -> &'static str {
         Interpolation::Nearest => "Nearest Neighbor",
         Interpolation::Bilinear => "Bilinear",
         Interpolation::Bicubic => "Bicubic",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The transform toolbar's and the selection toolbar's layouts in a window `width` wide.
+    fn transform(width: f32) -> ToolbarFit {
+        toolbar_layout(width, 7, BUTTON_ROOMY, 50.0)
+    }
+
+    fn selection(width: f32) -> ToolbarFit {
+        toolbar_layout(width, 8, 83.0, 44.0)
+    }
+
+    #[test]
+    fn with_room_the_toolbars_are_as_measured_in_landscape() {
+        for width in [1133.0, 1280.0, 2000.0] {
+            assert_eq!((transform(width).width, transform(width).button), (769.0, 89.0));
+            assert_eq!((selection(width).width, selection(width).button), (829.0, 83.0));
+            assert!(transform(width).names && selection(width).names);
+        }
+    }
+
+    #[test]
+    fn an_upright_window_has_the_toolbars_measured_upright() {
+        // 728 wide on a 744 window: buttons 83 wide, and the selection's 70 wide
+        let (t, s) = (transform(744.0), selection(744.0));
+        assert_eq!((t.width, s.width), (728.0, 728.0));
+        assert!((t.button - 83.0).abs() < 0.5 && (s.button - 70.0).abs() < 0.5, "{t:?} {s:?}");
+        assert!(t.names && s.names && t.icon_scale == 1.0 && s.icon_scale == 1.0);
+    }
+
+    /// Every window from 300 to 2000 wide: the toolbar fits it, its buttons never overlap (each
+    /// one's pitch at least as wide as it), names go under 716, and icons shrink only where they
+    /// would run into each other.
+    #[test]
+    fn the_toolbars_fit_every_window_and_their_buttons_never_overlap() {
+        for w in 300..=2000 {
+            let width = w as f32;
+            for (fit, count, icon) in [(transform(width), 7.0, 50.0), (selection(width), 8.0, 44.0)] {
+                assert!(fit.width <= width - 16.0 + 0.01, "{w}");
+                let row = fit.button * count + BUTTON_GAP * (count - 1.0) + 32.0;
+                assert!((fit.width - row).abs() < 0.01, "{w}");
+                assert_eq!(fit.names, w >= 716, "{w}");
+                let pitch = fit.button + BUTTON_GAP;
+                assert!(icon * fit.icon_scale <= pitch + 0.01, "{w}");
+                if pitch >= icon {
+                    assert_eq!(fit.icon_scale, 1.0, "{w}");
+                }
+            }
+        }
+        // a window 320 points across (a narrow one with the interface made larger)
+        let s = selection(320.0);
+        assert!(!s.names && s.button > 0.0 && s.width == 304.0);
     }
 }

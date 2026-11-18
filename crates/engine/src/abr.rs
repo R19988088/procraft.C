@@ -1,8 +1,10 @@
 //! Reading the brushes in Photoshop brush files (ABR): each sampled tip's grey image (white
-//! paints), with its preset's name, spacing, angle and roundness where the file gives them.
-//! Versions 1 and 2 (the tips one after another; their computed tips left out) and 6 and later (a
-//! section of samples, one of patterns and a descriptor of presets, computed round ones with their
-//! hardness too, and a preset's texture from the patterns).
+//! paints), with its preset's settings where the file gives them. Versions 1 and 2 (the tips one
+//! after another; their computed tips left out) and 6 and later: a section of samples, one of
+//! patterns and a descriptor of presets (Photoshop's action descriptor: typed values by key). A
+//! preset there has its tip (sampled, or computed round with its hardness), its shape dynamics,
+//! scattering, texture (a pattern from the file), dual brush (a second tip whose stroke masks the
+//! first's), transfer and colour dynamics, noise, and its tool's flow, opacity and blend mode.
 
 /// One brush tip from the file.
 #[derive(Clone, Debug, PartialEq)]
@@ -18,7 +20,7 @@ pub struct AbrTip {
 
 /// One of the file's brushes: a sampled tip, or (none) a computed round one, with its preset's
 /// name, spacing, angle and roundness where the file gives them, and a computed one's hardness.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct AbrBrush {
     pub name: String,
     pub tip: Option<AbrTip>,
@@ -31,14 +33,36 @@ pub struct AbrBrush {
     pub hardness: Option<f32>,
     /// Its tip's diameter, pixels, if the preset gives it.
     pub diameter: Option<f32>,
+    /// Whether its tip is drawn mirrored side to side, and top to bottom.
+    pub flipped: (bool, bool),
     /// The pattern the preset paints through, if it uses one that is in the file.
     pub texture: Option<AbrTexture>,
     /// What the pen's pressure changes.
     pub dynamics: AbrDynamics,
+    /// How its stamps are thrown off the stroke and how many fall at each step, if they are.
+    pub scatter: Option<AbrScatter>,
+    /// Its dual brush, if it has one on whose tip the file has: the second tip's own shape, size,
+    /// spacing and scattering (a dual brush has no dual brush, texture or dynamics of its own), and
+    /// how the two strokes combine ([`AbrBrush::dual_mode`]).
+    pub dual: Option<Box<AbrBrush>>,
+    /// How its dual brush's stroke combines with its own, by the preset's four-letter name for the
+    /// mode ("CBrn", "hardMix"...), if it says.
+    pub dual_mode: Option<String>,
+    /// How its tool lays paint on the layer, by its four-letter name ("Nrml", "Mltp"...), if its
+    /// tool's options say.
+    pub blend: Option<String>,
+    /// Its colour changed at random, if it is.
+    pub color: Option<AbrColor>,
+    /// Whether its tip's soft edges are speckled with noise.
+    pub noise: bool,
 }
 
 /// The control that turns a tip the way the stroke goes (the bristle brushes in real files have it).
 pub const ANGLE_BY_DIRECTION: i32 = 6;
+/// The control that is the pen's pressure.
+pub const BY_PRESSURE: i32 = 2;
+/// The control that is the pen's tilt.
+pub const BY_TILT: i32 = 3;
 
 /// What a preset's shape and paint dynamics have the pen's pressure change.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -49,18 +73,55 @@ pub struct AbrDynamics {
     pub size_control: i32,
     pub min_diameter: f32,
     pub size_jitter: f32,
-    /// What turns the tip ([`ANGLE_BY_DIRECTION`] the way the stroke goes), with shape dynamics on.
+    /// What turns the tip ([`ANGLE_BY_DIRECTION`] the way the stroke goes), with shape dynamics on,
+    /// and how far each stamp turns at random (a share of a whole turn).
     pub angle_control: i32,
+    pub angle_jitter: f32,
+    /// What flattens the tip, how far each stamp is flattened at random, and the roundness neither
+    /// takes it under (0 to 1).
+    pub roundness_control: i32,
+    pub roundness_jitter: f32,
+    pub min_roundness: f32,
+    /// Whether each stamp is mirrored at random side to side, and top to bottom.
+    pub flip_x: bool,
+    pub flip_y: bool,
     /// Whether its paint (transfer) dynamics are on; what controls the opacity and the flow, the
-    /// least of each, and how much the flow jitters.
+    /// least of each, and how much each jitters.
     pub paint: bool,
     pub opacity_control: i32,
     pub opacity_min: f32,
+    pub opacity_jitter: f32,
     pub flow_control: i32,
     pub flow_min: f32,
     pub flow_jitter: f32,
-    /// The flow its tool options keep, 0 to 1, if they do.
+    /// The flow and the opacity its tool options keep, 0 to 1, if they do.
     pub tool_flow: Option<f32>,
+    pub tool_opacity: Option<f32>,
+}
+
+/// How a preset scatters its stamps: each thrown as far as `amount` of its diameter from the
+/// stroke at most (across it, or `both_axes` along it too), `count` of them at each step (fewer by
+/// up to `count_jitter` of them at random), each as far as its control lets it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AbrScatter {
+    pub amount: f32,
+    pub both_axes: bool,
+    pub control: i32,
+    pub count: u32,
+    pub count_jitter: f32,
+    pub count_control: i32,
+}
+
+/// A preset's colour dynamics: how far each stamp's (or, not `per_tip`, each stroke's) hue,
+/// saturation and brightness go at random (0 to 1 each, a share of each one's whole range), and
+/// how far it goes to the background colour.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AbrColor {
+    pub hue: f32,
+    pub saturation: f32,
+    pub brightness: f32,
+    pub background: f32,
+    pub per_tip: bool,
 }
 
 /// A preset's texture: a pattern from the file, grey, and how the preset uses it.
@@ -79,12 +140,17 @@ pub struct AbrTexture {
     pub invert: bool,
     /// The least it shows (pressure and the like lower it to this), 0 to 1, if given.
     pub min_depth: Option<f32>,
+    /// What controls the depth (with `each_tip`; [`BY_PRESSURE`] the pen's pressure), and how far
+    /// it jitters from stamp to stamp (0 to 1).
+    pub depth_control: i32,
+    pub depth_jitter: f32,
     /// Its brightness (-150 to 150) and contrast (-50 to 100), as the preset keeps them.
     pub brightness: i32,
     pub contrast: i32,
     /// How it is laid over the paint, by the preset's four-letter name ("Mltp", "Hght"...), if given.
     pub blend: Option<String>,
-    /// Whether each stamp has it afresh (else it lies still under the stroke).
+    /// Whether each stamp is textured as it is laid (the pattern still fixed to the canvas), else
+    /// the stroke as a whole.
     pub each_tip: bool,
 }
 
@@ -95,6 +161,8 @@ const MOST_SIDE: u32 = 5000;
 const MOST_TIP_BYTES: usize = 256 << 20;
 /// The most bytes of patterns read, and of their copies the presets have together.
 const MOST_PATTERN_BYTES: usize = 256 << 20;
+/// The deepest a descriptor's objects and lists are read nested.
+const MOST_NESTED: u32 = 32;
 
 /// The sampled tips in an ABR file, in the file's order; none if it isn't one.
 pub fn read(bytes: &[u8]) -> Option<Vec<AbrTip>> {
@@ -106,23 +174,17 @@ pub fn read(bytes: &[u8]) -> Option<Vec<AbrTip>> {
 pub fn read_brushes(bytes: &[u8]) -> Option<Vec<AbrBrush>> {
     let mut r = Reader::new(bytes);
     let version = r.u16()?;
-    let sampled = |t: AbrTip| AbrBrush {
-        name: t.name.clone(),
-        spacing: t.spacing,
-        tip: Some(t),
-        angle: 0.0,
-        roundness: None,
-        hardness: None,
-        diameter: None,
-        texture: None,
-        dynamics: AbrDynamics::default(),
-    };
     match version {
         1 | 2 => Some(read_old(&mut r, version)?.into_iter().map(sampled).collect()),
         // 6, 7, 9 and 10 seen; any later one in the same sections is read the same way
         6.. if bytes.get(4..8) == Some(b"8BIM".as_slice()) => read_sections(&mut r),
         _ => None,
     }
+}
+
+/// A brush of a sampled tip alone.
+fn sampled(t: AbrTip) -> AbrBrush {
+    AbrBrush { name: t.name.clone(), spacing: t.spacing, tip: Some(t), ..AbrBrush::default() }
 }
 
 /// Versions 1 and 2: a count, then each tip: its kind, its length and (sampled) its image.
@@ -159,12 +221,13 @@ fn read_old(r: &mut Reader<'_>, version: u16) -> Option<Vec<AbrTip>> {
     Some(tips)
 }
 
-/// Version 6 on: "8BIM" sections; "samp" holds the tips by id, "desc" the presets.
+/// Version 6 on: "8BIM" sections; "samp" holds the tips by id, "patt" the patterns, "desc" the
+/// presets.
 fn read_sections(r: &mut Reader<'_>) -> Option<Vec<AbrBrush>> {
     let minor = r.u16()?;
     let mut samples: Vec<(String, u32, u32, Vec<u8>)> = Vec::new();
     let mut patterns: Vec<Pattern> = Vec::new();
-    let (mut presets, mut others): (Vec<Preset>, Vec<String>) = (Vec::new(), Vec::new());
+    let mut presets: Vec<Object> = Vec::new();
     while r.remaining() >= 12 {
         if r.take(4)? != b"8BIM" {
             break;
@@ -178,88 +241,410 @@ fn read_sections(r: &mut Reader<'_>) -> Option<Vec<AbrBrush>> {
         match key {
             b"samp" => samples = read_samples(data, minor),
             b"patt" => patterns = read_patterns(data),
-            b"desc" => (presets, others) = read_presets(data),
+            b"desc" => presets = read_presets(data),
             _ => {}
         }
     }
-    let mut out: Vec<AbrBrush> = Vec::new();
     // a sample only a dual brush names isn't a brush of its own
-    let mut used: Vec<bool> = samples.iter().map(|s| others.contains(&s.0)).collect();
-    let mut left = MOST_TIP_BYTES;
-    let mut patterns_left = MOST_PATTERN_BYTES;
-    let named = |name: &str, n: usize| {
-        if name.trim().is_empty() { format!("Brush {}", n + 1) } else { name.to_owned() }
-    };
+    let used = samples
+        .iter()
+        .map(|s| presets.iter().any(|p| p.at(&["dualBrush", "Brsh"]).and_then(|b| b.text("sampledData")) == Some(&s.0)))
+        .collect();
+    let mut library = Library { samples, used, tip_bytes: MOST_TIP_BYTES, patterns, pattern_bytes: MOST_PATTERN_BYTES };
+    let mut out: Vec<AbrBrush> = Vec::new();
+    let named =
+        |name: &str, n: usize| if name.trim().is_empty() { format!("Brush {}", n + 1) } else { name.to_owned() };
     for p in &presets {
-        // a sampled preset's tip, if its sample is there (and there is room for its copy)
-        let tip = match &p.sample {
-            None => None,
-            Some(id) => {
-                let Some(k) = samples.iter().position(|s| s.0 == *id) else { continue };
-                let (Some((_, width, height, pixels)), Some(u)) = (samples.get(k), used.get_mut(k)) else { continue };
-                let Some(rest) = left.checked_sub(pixels.len()) else { continue };
-                (left, *u) = (rest, true);
-                Some(AbrTip {
-                    name: named(&p.name, out.len()),
-                    spacing: p.spacing,
-                    width: *width,
-                    height: *height,
-                    pixels: pixels.clone(),
-                })
-            }
-        };
-        // its texture, if it uses one the file has (and there is room for its copy)
-        let texture = p
-            .texture
-            .as_ref()
-            .filter(|_| p.use_texture)
-            .and_then(|id| patterns.iter().find(|t| t.id == *id))
-            .filter(|t| patterns_left.checked_sub(t.pixels.len()).map(|l| patterns_left = l).is_some())
-            .map(|t| AbrTexture {
-                name: t.name.clone(),
-                width: t.width,
-                height: t.height,
-                pixels: t.pixels.clone(),
-                scale: p.texture_scale,
-                depth: p.texture_depth,
-                invert: p.texture_invert,
-                min_depth: p.texture_min_depth,
-                brightness: p.texture_brightness,
-                contrast: p.texture_contrast,
-                blend: p.texture_blend.clone(),
-                each_tip: p.texture_each_tip,
-            });
-        out.push(AbrBrush {
-            name: named(&p.name, out.len()),
-            tip,
-            spacing: p.spacing,
-            angle: p.angle,
-            roundness: p.roundness,
-            hardness: p.hardness,
-            diameter: p.diameter,
-            texture,
-            dynamics: p.dynamics,
-        });
+        let name = named(p.text("Nm  ").unwrap_or_default(), out.len());
+        // a sampled preset whose sample isn't there (or hasn't room for its copy) is left out
+        if let Some(b) = preset(p, name, &mut library) {
+            out.push(b);
+        }
     }
     // samples nothing names, as they are
+    let Library { samples, used, .. } = library;
     for ((_, width, height, pixels), u) in samples.into_iter().zip(used) {
         if !u {
             let name = named("", out.len());
-            let tip = AbrTip { name: name.clone(), spacing: None, width, height, pixels };
-            out.push(AbrBrush {
-                name,
-                tip: Some(tip),
-                spacing: None,
-                angle: 0.0,
-                roundness: None,
-                hardness: None,
-                diameter: None,
-                texture: None,
-                dynamics: AbrDynamics::default(),
-            });
+            out.push(sampled(AbrTip { name, spacing: None, width, height, pixels }));
         }
     }
     Some(out)
+}
+
+/// The file's samples and patterns as the presets take copies of them, with room left for more.
+struct Library {
+    samples: Vec<(String, u32, u32, Vec<u8>)>,
+    /// Whether a preset has taken each sample (or a dual brush names it).
+    used: Vec<bool>,
+    tip_bytes: usize,
+    patterns: Vec<Pattern>,
+    pattern_bytes: usize,
+}
+
+impl Library {
+    /// A copy of the sample `id` as a tip named `name` spaced `spacing` apart, if the file has it
+    /// and there is room for it.
+    fn tip(&mut self, id: &str, name: &str, spacing: Option<f32>) -> Option<AbrTip> {
+        let k = self.samples.iter().position(|s| s.0 == id)?;
+        let ((_, width, height, pixels), used) = (self.samples.get(k)?, self.used.get_mut(k)?);
+        self.tip_bytes = self.tip_bytes.checked_sub(pixels.len())?;
+        *used = true;
+        Some(AbrTip { name: name.to_owned(), spacing, width: *width, height: *height, pixels: pixels.clone() })
+    }
+
+    /// A copy of the pattern `id`, if the file has it and there is room for it.
+    fn pattern(&mut self, id: &str) -> Option<&Pattern> {
+        let p = self.patterns.iter().find(|t| t.id == id)?;
+        self.pattern_bytes = self.pattern_bytes.checked_sub(p.pixels.len())?;
+        Some(p)
+    }
+}
+
+/// A preset as a brush, named `name`: its tip (none if it names a sample the file hasn't), then
+/// all else it has on.
+fn preset(p: &Object, name: String, library: &mut Library) -> Option<AbrBrush> {
+    let mut b = shape(p.object("Brsh")?, &name, library)?;
+    b.name = name;
+    b.dynamics = dynamics(p);
+    if p.flag("useScatter") {
+        b.scatter = Some(scatter(p));
+    }
+    if let Some(d) = p.object("dualBrush").filter(|d| d.flag("useDualBrush")) {
+        let tip_name = d.at(&["Brsh"]).and_then(|t| t.text("Nm  ")).unwrap_or(&b.name).to_owned();
+        if let Some(mut dual) = d.object("Brsh").and_then(|t| shape(t, &tip_name, library)) {
+            dual.name = tip_name;
+            dual.dynamics.flip_x = d.flag("Flip");
+            dual.scatter = d.flag("useScatter").then(|| scatter(d));
+            b.dual = Some(Box::new(dual));
+            b.dual_mode = d.enumerated("BlnM").map(str::to_owned);
+        }
+    }
+    if p.flag("useTexture") {
+        b.texture = texture(p, library);
+    }
+    if p.flag("useColorDynamics") {
+        b.color = Some(AbrColor {
+            hue: p.percent("H   ").unwrap_or(0.0).clamp(0.0, 1.0),
+            saturation: p.percent("Strt").unwrap_or(0.0).clamp(0.0, 1.0),
+            brightness: p.percent("Brgh").unwrap_or(0.0).clamp(0.0, 1.0),
+            background: p.object("clVr").and_then(|v| v.percent("jitter")).unwrap_or(0.0).clamp(0.0, 1.0),
+            per_tip: p.get("colorDynamicsPerTip").is_none_or(|v| matches!(v, Value::Bool(true))),
+        });
+    }
+    b.noise = p.flag("Nose");
+    if let Some(tool) = p.object("toolOptions") {
+        b.dynamics.tool_flow = tool.number("flow").map(|v| (v as f32 / 100.0).clamp(0.0, 1.0));
+        b.dynamics.tool_opacity = tool.number("Opct").map(|v| (v as f32 / 100.0).clamp(0.0, 1.0));
+        b.blend = tool.enumerated("Md  ").map(str::to_owned);
+    }
+    Some(b)
+}
+
+/// A brush of a preset's tip (or a dual brush's): sampled, its sample's picture (none if the file
+/// hasn't it), or computed round with its hardness; its diameter, angle, roundness, spacing and
+/// whether it is mirrored.
+fn shape(t: &Object, name: &str, library: &mut Library) -> Option<AbrBrush> {
+    let spacing = t.percent("Spcn").filter(|s| *s > 0.0);
+    let tip = match t.text("sampledData") {
+        Some(id) => Some(library.tip(id, name, spacing)?),
+        None => None,
+    };
+    Some(AbrBrush {
+        name: name.to_owned(),
+        hardness: tip.is_none().then(|| t.percent("Hrdn").map(|v| v.clamp(0.0, 1.0))).flatten(),
+        tip,
+        spacing,
+        angle: t.number("Angl").map_or(0.0, |v| v.to_radians() as f32),
+        roundness: t.percent("Rndn").filter(|v| *v > 0.0 && *v <= 1.0),
+        diameter: t.number("Dmtr").filter(|v| *v > 0.0).map(|v| v as f32),
+        flipped: (t.flag("flipX"), t.flag("flipY")),
+        ..AbrBrush::default()
+    })
+}
+
+/// A dynamic setting's control (`bVTy`), jitter and least (each 0 to 1), as a "brVr" object keeps
+/// them; nothing for one the preset hasn't.
+fn varied(p: &Object, key: &str) -> (i32, f32, f32) {
+    let Some(v) = p.object(key) else { return (0, 0.0, 0.0) };
+    let share = |k: &str| v.percent(k).map_or(0.0, |x| x.clamp(0.0, 1.0));
+    (v.number("bVTy").map_or(0, |c| c as i32), share("jitter"), share("Mnm "))
+}
+
+/// A preset's shape and transfer dynamics, each with whether it is on.
+fn dynamics(p: &Object) -> AbrDynamics {
+    let share = |k: &str| p.percent(k).map_or(0.0, |x| x.clamp(0.0, 1.0));
+    let (size_control, size_jitter, _) = varied(p, "szVr");
+    let (angle_control, angle_jitter, _) = varied(p, "angleDynamics");
+    let (roundness_control, roundness_jitter, _) = varied(p, "roundnessDynamics");
+    let (opacity_control, opacity_jitter, opacity_min) = varied(p, "opVr");
+    let (flow_control, flow_jitter, flow_min) = varied(p, "prVr");
+    AbrDynamics {
+        tip: p.flag("useTipDynamics"),
+        size_control,
+        min_diameter: share("minimumDiameter"),
+        size_jitter,
+        angle_control,
+        angle_jitter,
+        roundness_control,
+        roundness_jitter,
+        min_roundness: share("minimumRoundness"),
+        flip_x: p.flag("flipX"),
+        flip_y: p.flag("flipY"),
+        paint: p.flag("usePaintDynamics"),
+        opacity_control,
+        opacity_min,
+        opacity_jitter,
+        flow_control,
+        flow_min,
+        flow_jitter,
+        tool_flow: None,
+        tool_opacity: None,
+    }
+}
+
+/// A preset's (or a dual brush's) scattering: how far (its jitter, which may pass 100%), on which
+/// axes, by what, and how many stamps a step.
+fn scatter(p: &Object) -> AbrScatter {
+    let (control, _, _) = varied(p, "scatterDynamics");
+    let amount = p.at(&["scatterDynamics"]).and_then(|v| v.percent("jitter")).unwrap_or(0.0);
+    let (count_control, count_jitter, _) = varied(p, "countDynamics");
+    AbrScatter {
+        amount: amount.clamp(0.0, 10.0),
+        both_axes: p.flag("bothAxes"),
+        control,
+        count: p.number("Cnt ").map_or(1, |c| c.round().clamp(1.0, 16.0) as u32),
+        count_jitter,
+        count_control,
+    }
+}
+
+/// A preset's texture, if it names a pattern the file has (and there is room for its copy).
+fn texture(p: &Object, library: &mut Library) -> Option<AbrTexture> {
+    let share = |k: &str| p.percent(k).map(|x| x.clamp(0.0, 1.0));
+    let (depth_control, depth_jitter, _) = varied(p, "textureDepthDynamics");
+    let t = library.pattern(p.at(&["Txtr"])?.text("Idnt")?)?;
+    Some(AbrTexture {
+        name: t.name.clone(),
+        width: t.width,
+        height: t.height,
+        pixels: t.pixels.clone(),
+        scale: p.percent("textureScale").filter(|v| *v > 0.0),
+        depth: share("textureDepth"),
+        invert: p.flag("InvT"),
+        min_depth: share("minimumDepth"),
+        depth_control,
+        depth_jitter,
+        brightness: p.number("textureBrightness").map_or(0, |v| v.clamp(-150.0, 150.0) as i32),
+        contrast: p.number("textureContrast").map_or(0, |v| v.clamp(-50.0, 100.0) as i32),
+        blend: p.enumerated("textureBlendMode").map(str::to_owned),
+        each_tip: p.flag("TxtC"),
+    })
+}
+
+/// The presets in the descriptor: its version, then an object whose "Brsh" list holds them. A
+/// damaged one ends the list (those before it are kept).
+fn read_presets(data: &[u8]) -> Vec<Object> {
+    let mut out = Vec::new();
+    // (what was read before a damaged part is kept either way)
+    let _ = presets_into(&mut Reader::new(data), &mut out);
+    out
+}
+
+fn presets_into(r: &mut Reader<'_>, out: &mut Vec<Object>) -> Option<()> {
+    r.u32()?;
+    r.unicode()?;
+    r.key()?;
+    for _ in 0..r.u32()? {
+        if r.key()? != "Brsh" {
+            value(r, 0)?;
+            continue;
+        }
+        if r.take(4)? != b"VlLs" {
+            return None;
+        }
+        for _ in 0..r.u32()? {
+            match value(r, 1)? {
+                Value::Object(o) if o.class == "brushPreset" => out.push(o),
+                _ => {}
+            }
+        }
+    }
+    Some(())
+}
+
+/// A descriptor's value, as far as presets need them.
+#[derive(Clone, Debug, PartialEq)]
+enum Value {
+    Object(Object),
+    /// A double, a whole number, or a unit's value (its unit left out: "#Prc" percent, "#Pxl"
+    /// pixels, "#Ang" degrees).
+    Number(f64),
+    Text(String),
+    /// An enumerated value's own name.
+    Enum(String),
+    Bool(bool),
+    /// What a preset's own settings don't use: a list, a reference, a class, raw data, units.
+    Other,
+}
+
+/// A descriptor's object: its class and its values by key, in order.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Object {
+    class: String,
+    items: Vec<(String, Value)>,
+}
+
+impl Object {
+    fn get(&self, key: &str) -> Option<&Value> {
+        self.items.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
+    fn object(&self, key: &str) -> Option<&Object> {
+        match self.get(key)? {
+            Value::Object(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    /// The object down the path of keys.
+    fn at(&self, path: &[&str]) -> Option<&Object> {
+        path.iter().try_fold(self, |o, k| o.object(k))
+    }
+
+    fn number(&self, key: &str) -> Option<f64> {
+        match self.get(key)? {
+            Value::Number(v) if v.is_finite() => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// A percent's value as a share (100% is 1).
+    fn percent(&self, key: &str) -> Option<f32> {
+        self.number(key).map(|v| (v / 100.0) as f32).filter(|v| v.is_finite())
+    }
+
+    fn text(&self, key: &str) -> Option<&str> {
+        match self.get(key)? {
+            Value::Text(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    fn enumerated(&self, key: &str) -> Option<&str> {
+        match self.get(key)? {
+            Value::Enum(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Whether the switch `key` is on (none is off).
+    fn flag(&self, key: &str) -> bool {
+        matches!(self.get(key), Some(Value::Bool(true)))
+    }
+}
+
+/// An object: its name (unused), class and values, each a key and a typed value.
+fn object(r: &mut Reader<'_>, nested: u32) -> Option<Object> {
+    if nested > MOST_NESTED {
+        return None;
+    }
+    r.unicode()?;
+    let class = r.key()?;
+    let mut items = Vec::new();
+    for _ in 0..r.u32()? {
+        let key = r.key()?;
+        items.push((key, value(r, nested)?));
+    }
+    Some(Object { class, items })
+}
+
+/// A typed value: its four-letter type, then the value as that type keeps it.
+fn value(r: &mut Reader<'_>, nested: u32) -> Option<Value> {
+    if nested > MOST_NESTED {
+        return None;
+    }
+    Some(match r.take(4)? {
+        b"Objc" | b"GlbO" => Value::Object(object(r, nested + 1)?),
+        b"VlLs" => {
+            for _ in 0..r.u32()? {
+                value(r, nested + 1)?;
+            }
+            Value::Other
+        }
+        b"doub" => Value::Number(r.f64()?),
+        b"UntF" => {
+            r.take(4)?;
+            Value::Number(r.f64()?)
+        }
+        b"UnFl" => {
+            r.take(4)?;
+            let n = r.u32()? as usize;
+            r.take(n.checked_mul(8)?)?;
+            Value::Other
+        }
+        b"long" => Value::Number(f64::from(r.i32()?)),
+        b"comp" => Value::Number(i64::from_be_bytes(r.take(8)?.try_into().ok()?) as f64),
+        b"bool" => Value::Bool(r.u8()? != 0),
+        b"TEXT" => Value::Text(r.unicode()?),
+        b"enum" => {
+            r.key()?;
+            Value::Enum(r.key()?)
+        }
+        b"type" | b"GlbC" => {
+            r.unicode()?;
+            r.key()?;
+            Value::Other
+        }
+        b"alis" | b"tdta" | b"Pth " => {
+            let n = r.u32()? as usize;
+            r.take(n)?;
+            Value::Other
+        }
+        b"obj " => {
+            reference(r)?;
+            Value::Other
+        }
+        _ => return None,
+    })
+}
+
+/// A reference, passed over: a count of items, each of its own form.
+fn reference(r: &mut Reader<'_>) -> Option<()> {
+    for _ in 0..r.u32()? {
+        match r.take(4)? {
+            b"prop" => {
+                r.unicode()?;
+                r.key()?;
+                r.key()?;
+            }
+            b"Clss" => {
+                r.unicode()?;
+                r.key()?;
+            }
+            b"Enmr" => {
+                r.unicode()?;
+                r.key()?;
+                r.key()?;
+                r.key()?;
+            }
+            b"rele" => {
+                r.unicode()?;
+                r.key()?;
+                r.i32()?;
+            }
+            b"Idnt" | b"indx" => {
+                r.u32()?;
+            }
+            b"name" => {
+                r.unicode()?;
+                r.key()?;
+                r.unicode()?;
+            }
+            _ => return None,
+        }
+    }
+    Some(())
 }
 
 /// The samples: each its id and its image (version 6.1: straight after a short rectangle; later:
@@ -442,250 +827,6 @@ fn unpack(packed: &[u8], row: usize, out: &mut Vec<u8>) {
     out.resize(end, 0);
 }
 
-/// A preset as the descriptor has it: its name, its sample's id (none for a computed tip), and its
-/// tip's spacing, angle, roundness and (computed) hardness.
-#[derive(Clone, Debug, Default)]
-struct Preset {
-    name: String,
-    sample: Option<String>,
-    spacing: Option<f32>,
-    angle: f32,
-    roundness: Option<f32>,
-    hardness: Option<f32>,
-    diameter: Option<f32>,
-    /// Whether its texture is on, and the pattern's id, scale, depth and inversion.
-    use_texture: bool,
-    texture: Option<String>,
-    texture_scale: Option<f32>,
-    texture_depth: Option<f32>,
-    texture_invert: bool,
-    texture_min_depth: Option<f32>,
-    texture_brightness: i32,
-    texture_contrast: i32,
-    texture_blend: Option<String>,
-    texture_each_tip: bool,
-    dynamics: AbrDynamics,
-}
-
-/// The presets in the descriptor, found by their keys in order. A preset's name comes first, then
-/// its own brush: a computed one's diameter, hardness, angle, roundness and spacing, or a sampled
-/// one's the same without hardness and then its sample's id. Brushes after it (a dual brush's)
-/// aren't the preset's: the samples they name come after the presets. Its texture comes after its
-/// brushes, so it goes to what was kept of the preset, and to the preset as it is still read.
-fn read_presets(data: &[u8]) -> (Vec<Preset>, Vec<String>) {
-    const KEYS: [&[u8]; 33] = [
-        b"brushPreset",
-        b"Nm  TEXT",
-        b"SpcnUntF#Prc",
-        b"sampledDataTEXT",
-        b"AnglUntF#Ang",
-        b"RndnUntF#Prc",
-        b"HrdnUntF#Prc",
-        b"computedBrush",
-        b"dualBrush",
-        b"useTexturebool",
-        b"TxtrObjc",
-        b"IdntTEXT",
-        b"textureScaleUntF#Prc",
-        b"textureDepthUntF#Prc",
-        b"InvTbool",
-        b"useTipDynamicsbool",
-        b"minimumDiameterUntF#Prc",
-        b"szVrObjc",
-        b"usePaintDynamicsbool",
-        b"opVrObjc",
-        b"prVrObjc",
-        b"bVTylong",
-        b"DmtrUntF#Pxl",
-        b"minimumDepthUntF#Prc",
-        b"textureBrightnesslong",
-        b"textureContrastlong",
-        b"textureBlendModeenum",
-        b"jitterUntF#Prc",
-        b"Mnm UntF#Prc",
-        b"flowlong",
-        b"TxtCbool",
-        b"angleDynamicsObjc",
-        // any other object: the end of a dynamics' own settings
-        b"Objc",
-    ];
-    let (mut out, mut others) = (Vec::new(), Vec::new());
-    // the preset being read, whether its brush is computed, and whether its brush is done
-    let (mut p, mut computed, mut done) = (Preset::default(), false, false);
-    let mut named = false;
-    // where the preset's own entries begin among those kept, whether its pattern is being read,
-    // and which of its dynamics' control is next
-    let (mut first, mut in_texture, mut controlled) = (0, false, None);
-    let mut at = 0;
-    let end = |p: &Preset, computed: bool, done: &mut bool, out: &mut Vec<Preset>| {
-        if computed && !*done {
-            out.push(p.clone());
-        }
-        *done = true;
-    };
-    while let Some((key, from)) = find(data, at, &KEYS) {
-        at = from;
-        let mut r = Reader::new(data.get(from..).unwrap_or_default());
-        let percent = |r: &mut Reader<'_>| r.f64().map(|v| (v / 100.0) as f32).filter(|v| v.is_finite());
-        match key {
-            // a preset's tool options keep a switch named so: not a new preset
-            0 if data.get(from..from + 4) == Some(&b"bool"[..]) => {}
-            // a new preset: its name is the next one
-            0 => {
-                end(&p, computed, &mut done, &mut out);
-                (p, computed, done, named) = (Preset::default(), false, false, false);
-                (first, in_texture, controlled) = (out.len(), false, None);
-            }
-            // its texture and dynamics, after its brushes
-            9..=21 | 23..=32 => {
-                let switch = |r: &mut Reader<'_>| r.u8().is_some_and(|v| v != 0);
-                let later = match key {
-                    9 => Later::TextureOn(switch(&mut r)),
-                    10 => {
-                        in_texture = true;
-                        continue;
-                    }
-                    11 if in_texture => Later::Pattern(r.unicode()),
-                    12 => Later::Scale(percent(&mut r).filter(|v| *v > 0.0)),
-                    13 => Later::Depth(percent(&mut r).map(|v| v.clamp(0.0, 1.0))),
-                    14 => Later::Invert(switch(&mut r)),
-                    15 => Later::TipDynamics(switch(&mut r)),
-                    16 => Later::MinDiameter(percent(&mut r).map_or(0.0, |v| v.clamp(0.0, 1.0))),
-                    17 | 19 | 20 | 31 => {
-                        controlled = Some(key);
-                        continue;
-                    }
-                    18 => Later::PaintDynamics(switch(&mut r)),
-                    23 => Later::MinDepth(percent(&mut r).map(|v| v.clamp(0.0, 1.0))),
-                    24 => Later::Brightness(r.i32().unwrap_or(0)),
-                    25 => Later::Contrast(r.i32().unwrap_or(0)),
-                    26 => Later::Blend(enum_value(&mut r)),
-                    21 => match controlled {
-                        Some(of) => Later::Control(of, r.i32().unwrap_or(0)),
-                        None => continue,
-                    },
-                    27 => match controlled {
-                        Some(of) => Later::Jitter(of, percent(&mut r).map_or(0.0, |v| v.clamp(0.0, 1.0))),
-                        None => continue,
-                    },
-                    28 => match controlled {
-                        Some(of) => Later::Minimum(of, percent(&mut r).map_or(0.0, |v| v.clamp(0.0, 1.0))),
-                        None => continue,
-                    },
-                    29 => Later::ToolFlow(r.i32().map(|v| (v as f32 / 100.0).clamp(0.0, 1.0))),
-                    30 => Later::EachTip(switch(&mut r)),
-                    32 => {
-                        controlled = None;
-                        continue;
-                    }
-                    _ => continue,
-                };
-                later.set(&mut p);
-                for kept in out.get_mut(first..).into_iter().flatten() {
-                    later.set(kept);
-                }
-            }
-            3 if done => others.extend(r.unicode()),
-            _ if done => {}
-            1 if !named => {
-                p.name = r.unicode().unwrap_or_default();
-                named = true;
-            }
-            2 => p.spacing = percent(&mut r).filter(|s| *s > 0.0),
-            3 => {
-                if let Some(sample) = r.unicode() {
-                    out.push(Preset { sample: Some(sample), ..p.clone() });
-                }
-                done = true;
-            }
-            4 => p.angle = r.f64().filter(|v| v.is_finite()).map_or(0.0, |v| v.to_radians() as f32),
-            5 => p.roundness = percent(&mut r).filter(|v| *v > 0.0 && *v <= 1.0),
-            6 => p.hardness = percent(&mut r).map(|v| v.clamp(0.0, 1.0)),
-            22 => p.diameter = r.f64().filter(|v| v.is_finite() && *v > 0.0).map(|v| v as f32),
-            7 => computed = true,
-            8 => end(&p, computed, &mut done, &mut out),
-            _ => {}
-        }
-    }
-    end(&p, computed, &mut done, &mut out);
-    (out, others)
-}
-
-/// One of a preset's settings that come after its brushes (its texture and dynamics), as read.
-enum Later {
-    TextureOn(bool),
-    Pattern(Option<String>),
-    Scale(Option<f32>),
-    Depth(Option<f32>),
-    Invert(bool),
-    TipDynamics(bool),
-    MinDiameter(f32),
-    PaintDynamics(bool),
-    MinDepth(Option<f32>),
-    Brightness(i32),
-    Contrast(i32),
-    Blend(Option<String>),
-    EachTip(bool),
-    /// The size's (key 17), opacity's (19) or flow's (20) control, jitter and least.
-    Control(usize, i32),
-    Jitter(usize, f32),
-    Minimum(usize, f32),
-    ToolFlow(Option<f32>),
-}
-
-impl Later {
-    fn set(&self, p: &mut Preset) {
-        let d = &mut p.dynamics;
-        match self {
-            Later::TextureOn(v) => p.use_texture = *v,
-            Later::Pattern(id) => p.texture.clone_from(id),
-            Later::Scale(v) => p.texture_scale = *v,
-            Later::Depth(v) => p.texture_depth = *v,
-            Later::Invert(v) => p.texture_invert = *v,
-            Later::TipDynamics(v) => d.tip = *v,
-            Later::MinDiameter(v) => d.min_diameter = *v,
-            Later::PaintDynamics(v) => d.paint = *v,
-            Later::MinDepth(v) => p.texture_min_depth = *v,
-            Later::Brightness(v) => p.texture_brightness = *v,
-            Later::Contrast(v) => p.texture_contrast = *v,
-            Later::Blend(v) => p.texture_blend.clone_from(v),
-            Later::EachTip(v) => p.texture_each_tip = *v,
-            Later::Control(17, v) => d.size_control = *v,
-            Later::Control(19, v) => d.opacity_control = *v,
-            Later::Control(31, v) => d.angle_control = *v,
-            Later::Control(_, v) => d.flow_control = *v,
-            Later::Jitter(17, v) => d.size_jitter = *v,
-            Later::Jitter(20, v) => d.flow_jitter = *v,
-            Later::Minimum(19, v) => d.opacity_min = *v,
-            Later::Minimum(20, v) => d.flow_min = *v,
-            Later::Jitter(..) | Later::Minimum(..) => {}
-            Later::ToolFlow(v) => d.tool_flow = *v,
-        }
-    }
-}
-
-/// An enumerated value's name: its type's key, then its own (each a 4-letter key when its length
-/// reads 0, else that many letters).
-fn enum_value(r: &mut Reader<'_>) -> Option<String> {
-    let key = |r: &mut Reader<'_>| {
-        let n = r.u32()? as usize;
-        let bytes = r.take(if n == 0 { 4 } else { n.min(64) })?;
-        Some(String::from_utf8_lossy(bytes).into_owned())
-    };
-    key(r)?;
-    key(r)
-}
-
-/// Where the first of `keys` next appears in `data` from `from`: which one, and just past it.
-fn find(data: &[u8], from: usize, keys: &[&[u8]]) -> Option<(usize, usize)> {
-    let rest = data.get(from..)?;
-    (0..rest.len()).find_map(|i| {
-        keys.iter()
-            .position(|k| rest.get(i..).is_some_and(|r| r.starts_with(k)))
-            .map(|k| (k, from + i + keys.get(k).map_or(0, |k| k.len())))
-    })
-}
-
 /// Reads big-endian numbers and runs of bytes in order; None past the end.
 struct Reader<'a> {
     bytes: &'a [u8],
@@ -727,6 +868,13 @@ impl<'a> Reader<'a> {
         Some(f64::from_be_bytes(self.take(8)?.try_into().ok()?))
     }
 
+    /// A descriptor's key: its length, then that many letters (a length of 0: four).
+    fn key(&mut self) -> Option<String> {
+        let n = self.u32()? as usize;
+        let bytes = self.take(if n == 0 { 4 } else { n })?;
+        Some(String::from_utf8_lossy(bytes).into_owned())
+    }
+
     /// A count of UTF-16 units, then the units (a trailing nul left off).
     fn unicode(&mut self) -> Option<String> {
         let n = self.u32()? as usize;
@@ -754,58 +902,154 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_damaged_file_is_refused_not_a_crash() {
-        let good = version6();
-        assert!(read(&good).is_some());
-        crate::damaged::survives("ABR", &good, |b| {
-            let _ = read(b);
-        });
+    /// A descriptor's value as a test writes it.
+    enum V {
+        Obj(&'static str, Vec<(&'static str, V)>),
+        List(Vec<V>),
+        /// A unit and its value ("#Prc" percent, "#Pxl" pixels, "#Ang" degrees).
+        Unit(&'static str, f64),
+        Long(i32),
+        Text(String),
+        Bool(bool),
+        Enum(&'static str, &'static str),
+    }
+
+    fn text(s: &str) -> V {
+        V::Text(s.to_owned())
+    }
+    fn percent(v: f64) -> V {
+        V::Unit("#Prc", v)
+    }
+    /// A dynamic setting: its control, jitter and least (percent).
+    fn varied(control: i32, jitter: f64, least: f64) -> V {
+        V::Obj(
+            "brVr",
+            vec![
+                ("bVTy", V::Long(control)),
+                ("fStp", V::Long(25)),
+                ("jitter", percent(jitter)),
+                ("Mnm ", percent(least)),
+            ],
+        )
+    }
+
+    /// A key: four letters as a length of 0 and them, any other as its length and its letters.
+    fn key(out: &mut Vec<u8>, k: &str) {
+        put32(out, if k.len() == 4 { 0 } else { k.len() as u32 });
+        out.extend_from_slice(k.as_bytes());
+    }
+
+    fn put(out: &mut Vec<u8>, v: &V) {
+        match v {
+            V::Obj(class, items) => {
+                out.extend_from_slice(b"Objc");
+                object(out, class, items);
+            }
+            V::List(items) => {
+                out.extend_from_slice(b"VlLs");
+                put32(out, items.len() as u32);
+                for i in items {
+                    put(out, i);
+                }
+            }
+            V::Unit(unit, v) => {
+                out.extend_from_slice(b"UntF");
+                out.extend_from_slice(unit.as_bytes());
+                out.extend_from_slice(&v.to_be_bytes());
+            }
+            V::Long(v) => {
+                out.extend_from_slice(b"long");
+                out.extend_from_slice(&v.to_be_bytes());
+            }
+            V::Text(s) => {
+                out.extend_from_slice(b"TEXT");
+                unicode(out, s);
+            }
+            V::Bool(on) => {
+                out.extend_from_slice(b"bool");
+                out.push(u8::from(*on));
+            }
+            V::Enum(kind, name) => {
+                out.extend_from_slice(b"enum");
+                key(out, kind);
+                key(out, name);
+            }
+        }
+    }
+
+    fn object(out: &mut Vec<u8>, class: &str, items: &[(&str, V)]) {
+        unicode(out, "");
+        key(out, class);
+        put32(out, items.len() as u32);
+        for (k, v) in items {
+            key(out, k);
+            put(out, v);
+        }
+    }
+
+    /// The "desc" section of these presets: its version, then the object listing them.
+    fn descriptor(presets: Vec<V>) -> Vec<u8> {
+        let mut out = Vec::new();
+        put32(&mut out, 16);
+        object(&mut out, "null", &[("Brsh", V::List(presets))]);
+        out
+    }
+
+    /// A preset named `name` of the brush `brush`, with more settings after it.
+    fn preset(name: &str, brush: V, more: Vec<(&'static str, V)>) -> V {
+        let mut items = vec![("Nm  ", text(name)), ("Brsh", brush)];
+        items.extend(more);
+        V::Obj("brushPreset", items)
+    }
+
+    /// A sampled tip of the sample `id`, spaced `spacing` percent.
+    fn sampled_brush(id: &str, spacing: f64, more: Vec<(&'static str, V)>) -> V {
+        let mut items = vec![("Dmtr", V::Unit("#Pxl", 30.0)), ("Spcn", percent(spacing))];
+        items.extend(more);
+        items.push(("sampledData", text(id)));
+        V::Obj("sampledBrush", items)
     }
 
     /// A version 6 file with one 3 x 2 tip (raw) named by its preset.
     fn version6() -> Vec<u8> {
-        let mut desc = b"brushPreset".to_vec();
-        desc.extend_from_slice(b"Nm  TEXT");
-        unicode(&mut desc, "Chalky");
-        desc.extend_from_slice(b"Nm  TEXT");
-        unicode(&mut desc, "Sampled Brush 1");
-        desc.extend_from_slice(b"SpcnUntF#Prc");
-        desc.extend_from_slice(&40.0f64.to_be_bytes());
-        desc.extend_from_slice(b"sampledDataTEXT");
-        unicode(&mut desc, "tip-one");
-        with_presets(&desc)
+        with_presets(&descriptor(vec![preset("Chalky", sampled_brush("tip-one", 40.0, vec![]), vec![])]))
     }
 
-    /// A version 6 file of the 3 x 2 tip "tip-one" and the descriptor `desc`.
+    /// A version 6 file of the 3 x 2 tip "tip-one" (and, if asked, the 2 x 2 tip "tip-two") and
+    /// the descriptor `desc`.
     fn with_presets(desc: &[u8]) -> Vec<u8> {
-        let id = "tip-one";
-        let mut channel = Vec::new();
-        put32(&mut channel, 8);
-        for v in [0u32, 0, 2, 3] {
-            put32(&mut channel, v);
-        }
-        put16(&mut channel, 8);
-        channel.push(0);
-        channel.extend_from_slice(&[0, 128, 255, 10, 20, 30]);
-        let mut sample = vec![id.len() as u8];
-        sample.extend_from_slice(id.as_bytes());
-        sample.extend_from_slice(&[0, 1, 0, 0]);
-        put32(&mut sample, 3);
-        put32(&mut sample, 0);
-        for v in [0u32, 0, 2, 3] {
-            put32(&mut sample, v);
-        }
-        put32(&mut sample, 2);
-        put32(&mut sample, 0);
-        put32(&mut sample, 1);
-        put32(&mut sample, channel.len() as u32);
-        sample.extend_from_slice(&channel);
+        with_tips(desc, &[("tip-one", 3, 2, &[0, 128, 255, 10, 20, 30])])
+    }
+
+    fn with_tips(desc: &[u8], tips: &[(&str, u32, u32, &[u8])]) -> Vec<u8> {
         let mut samp = Vec::new();
-        put32(&mut samp, sample.len() as u32);
-        samp.extend_from_slice(&sample);
-        while !samp.len().is_multiple_of(4) {
-            samp.push(0);
+        for (id, w, h, pixels) in tips {
+            let mut channel = Vec::new();
+            put32(&mut channel, 8);
+            for v in [0, 0, *h, *w] {
+                put32(&mut channel, v);
+            }
+            put16(&mut channel, 8);
+            channel.push(0);
+            channel.extend_from_slice(pixels);
+            let mut sample = vec![id.len() as u8];
+            sample.extend_from_slice(id.as_bytes());
+            sample.extend_from_slice(&[0, 1, 0, 0]);
+            put32(&mut sample, 3);
+            put32(&mut sample, 0);
+            for v in [0, 0, *h, *w] {
+                put32(&mut sample, v);
+            }
+            put32(&mut sample, 2);
+            put32(&mut sample, 0);
+            put32(&mut sample, 1);
+            put32(&mut sample, channel.len() as u32);
+            sample.extend_from_slice(&channel);
+            put32(&mut samp, sample.len() as u32);
+            samp.extend_from_slice(&sample);
+            while !samp.len().is_multiple_of(4) {
+                samp.push(0);
+            }
         }
         let desc = desc.to_vec();
         let mut out = Vec::new();
@@ -816,8 +1060,20 @@ mod tests {
             out.extend_from_slice(key);
             put32(&mut out, data.len() as u32);
             out.extend_from_slice(data);
+            while !out.len().is_multiple_of(4) {
+                out.push(0);
+            }
         }
         out
+    }
+
+    #[test]
+    fn a_damaged_file_is_refused_not_a_crash() {
+        let good = version6();
+        assert!(read(&good).is_some());
+        crate::damaged::survives("ABR", &good, |b| {
+            let _ = read(b);
+        });
     }
 
     #[test]
@@ -853,11 +1109,7 @@ mod tests {
         let mut samp = Vec::new();
         put32(&mut samp, sample.len() as u32);
         samp.extend_from_slice(&sample);
-        let mut desc = b"brushPreset".to_vec();
-        desc.extend_from_slice(b"Nm  TEXT");
-        unicode(&mut desc, "Old Stamp");
-        desc.extend_from_slice(b"BrshObjcsampledBrushsampledDataTEXT");
-        unicode(&mut desc, id);
+        let desc = descriptor(vec![preset("Old Stamp", sampled_brush(id, 25.0, vec![]), vec![])]);
         let mut out = Vec::new();
         put16(&mut out, 6);
         put16(&mut out, 1);
@@ -879,74 +1131,90 @@ mod tests {
     }
 
     #[test]
-    fn a_presets_dynamics_say_what_pressure_changes() {
-        let mut desc = b"brushPreset".to_vec();
-        desc.extend_from_slice(b"Nm  TEXT");
-        unicode(&mut desc, "Soft");
-        desc.extend_from_slice(b"BrshObjcsampledBrushsampledDataTEXT");
-        unicode(&mut desc, "tip-one");
-        // after the brush: shape dynamics with size by pressure (control 2) down to 40%
-        desc.extend_from_slice(b"useTipDynamicsbool\x01");
-        desc.extend_from_slice(b"minimumDiameterUntF#Prc");
-        desc.extend_from_slice(&40.0f64.to_be_bytes());
-        desc.extend_from_slice(b"szVrObjcbVTylong");
-        put32(&mut desc, 2);
-        // an angle's control between isn't the size's
-        desc.extend_from_slice(b"angleDynamicsObjcbVTylong");
-        put32(&mut desc, ANGLE_BY_DIRECTION as u32);
-        // paint dynamics: opacity by pressure, flow by nothing
-        desc.extend_from_slice(b"usePaintDynamicsbool\x01prVrObjcbVTylong");
-        put32(&mut desc, 0);
-        desc.extend_from_slice(b"opVrObjcbVTylong");
-        put32(&mut desc, 2);
-        let d = read_brushes(&with_presets(&desc)).unwrap()[0].dynamics;
+    fn a_presets_dynamics_say_what_pressure_changes_and_what_goes_at_random() {
+        let desc = descriptor(vec![preset(
+            "Soft",
+            sampled_brush("tip-one", 25.0, vec![("flipX", V::Bool(true))]),
+            vec![
+                // shape dynamics: size by pressure (control 2) down to 40%, jittering 9%; turned
+                // with the stroke and 30% at random; flattened at random down to a quarter;
+                // mirrored at random side to side
+                ("useTipDynamics", V::Bool(true)),
+                ("flipX", V::Bool(true)),
+                ("flipY", V::Bool(false)),
+                ("minimumDiameter", percent(40.0)),
+                ("minimumRoundness", percent(25.0)),
+                ("szVr", varied(2, 9.0, 0.0)),
+                ("angleDynamics", varied(ANGLE_BY_DIRECTION, 30.0, 0.0)),
+                ("roundnessDynamics", varied(0, 50.0, 0.0)),
+                // transfer: opacity by pressure jittering 5%, flow by nothing down to 20%
+                ("usePaintDynamics", V::Bool(true)),
+                ("prVr", varied(0, 10.0, 20.0)),
+                ("opVr", varied(2, 5.0, 0.0)),
+                // the tool's own: an opacity and a flow, multiplying (its own sizes after)
+                (
+                    "toolOptions",
+                    V::Obj(
+                        "PbTl",
+                        vec![
+                            ("flow", V::Long(76)),
+                            ("Opct", V::Long(90)),
+                            ("Md  ", V::Enum("BlnM", "Mltp")),
+                            ("szVr", varied(3, 0.0, 0.0)),
+                        ],
+                    ),
+                ),
+            ],
+        )]);
+        let b = &read_brushes(&with_presets(&desc)).unwrap()[0];
+        assert_eq!(b.flipped, (true, false));
         assert_eq!(
-            d,
+            b.dynamics,
             AbrDynamics {
                 tip: true,
                 size_control: 2,
                 min_diameter: 0.4,
+                size_jitter: 0.09,
                 angle_control: ANGLE_BY_DIRECTION,
+                angle_jitter: 0.3,
+                roundness_jitter: 0.5,
+                min_roundness: 0.25,
+                flip_x: true,
                 paint: true,
                 opacity_control: 2,
+                opacity_jitter: 0.05,
+                flow_min: 0.2,
+                flow_jitter: 0.1,
+                tool_flow: Some(0.76),
+                tool_opacity: Some(0.9),
                 ..AbrDynamics::default()
             }
         );
+        assert_eq!(b.blend.as_deref(), Some("Mltp"));
     }
 
     #[test]
     fn a_preset_paints_through_the_pattern_it_names() {
-        let number = |out: &mut Vec<u8>, key: &[u8], v: f64| {
-            out.extend_from_slice(key);
-            out.extend_from_slice(&v.to_be_bytes());
+        let textured = |name: &str, on: bool| {
+            preset(
+                name,
+                sampled_brush("tip-one", 25.0, vec![]),
+                vec![
+                    ("useTexture", V::Bool(on)),
+                    ("TxtC", V::Bool(true)),
+                    ("textureBlendMode", V::Enum("BlnM", "Hght")),
+                    ("textureDepth", percent(40.0)),
+                    ("minimumDepth", percent(17.0)),
+                    ("textureDepthDynamics", varied(BY_PRESSURE, 8.0, 0.0)),
+                    ("Txtr", V::Obj("Ptrn", vec![("Nm  ", text("Paper")), ("Idnt", text("pat-1"))])),
+                    ("textureScale", percent(50.0)),
+                    ("InvT", V::Bool(true)),
+                    ("textureBrightness", V::Long(30)),
+                    ("textureContrast", V::Long(-20)),
+                ],
+            )
         };
-        let preset = |desc: &mut Vec<u8>, name: &str, textured: bool| {
-            desc.extend_from_slice(b"brushPreset");
-            desc.extend_from_slice(b"Nm  TEXT");
-            unicode(desc, name);
-            desc.extend_from_slice(b"BrshObjcsampledBrushsampledDataTEXT");
-            unicode(desc, "tip-one");
-            // after the brush: the texture, on or off
-            desc.extend_from_slice(b"useTexturebool");
-            desc.push(u8::from(textured));
-            desc.extend_from_slice(b"TxtrObjcPtrnNm  TEXT");
-            unicode(desc, "Paper");
-            desc.extend_from_slice(b"IdntTEXT");
-            unicode(desc, "pat-1");
-            number(desc, b"textureScaleUntF#Prc", 50.0);
-            number(desc, b"textureDepthUntF#Prc", 40.0);
-            desc.extend_from_slice(b"InvTbool\x01");
-            number(desc, b"minimumDepthUntF#Prc", 17.0);
-            desc.extend_from_slice(b"textureBrightnesslong");
-            put32(desc, 30);
-            desc.extend_from_slice(b"textureContrastlong");
-            put32(desc, (-20i32) as u32);
-            // an enum: its type's key and its own, each 4 letters (a length of 0)
-            desc.extend_from_slice(b"textureBlendModeenum\0\0\0\0BlnM\0\0\0\0Hght");
-        };
-        let mut desc = Vec::new();
-        preset(&mut desc, "Grainy", true);
-        preset(&mut desc, "Smooth", false);
+        let desc = descriptor(vec![textured("Grainy", true), textured("Smooth", false)]);
         // a grey 2 x 2 pattern, its channels after its name and id
         let mut pattern = Vec::new();
         put32(&mut pattern, 1);
@@ -977,9 +1245,6 @@ mod tests {
         put32(&mut patt, pattern.len() as u32);
         patt.extend_from_slice(&pattern);
         let mut file = with_presets(&desc);
-        while !file.len().is_multiple_of(4) {
-            file.push(0);
-        }
         file.extend_from_slice(b"8BIMpatt");
         put32(&mut file, patt.len() as u32);
         file.extend_from_slice(&patt);
@@ -987,8 +1252,9 @@ mod tests {
         assert_eq!(brushes.len(), 2);
         let t = brushes[0].texture.as_ref().unwrap();
         assert_eq!((t.name.as_str(), t.width, t.height, t.pixels.as_slice()), ("Paper", 2, 2, &[10, 20, 30, 40][..]));
-        assert_eq!((t.scale, t.depth, t.invert), (Some(0.5), Some(0.4), true));
+        assert_eq!((t.scale, t.depth, t.invert, t.each_tip), (Some(0.5), Some(0.4), true, true));
         assert_eq!((t.min_depth, t.brightness, t.contrast, t.blend.as_deref()), (Some(0.17), 30, -20, Some("Hght")));
+        assert_eq!((t.depth_control, t.depth_jitter), (BY_PRESSURE, 0.08));
         // the other's texture is off
         assert_eq!(brushes[1].texture, None);
         crate::damaged::survives("ABR with a pattern", &file, |b| {
@@ -1008,49 +1274,126 @@ mod tests {
     }
 
     #[test]
-    fn computed_presets_come_round_and_a_dual_brush_is_not_one_of_them() {
-        let number = |out: &mut Vec<u8>, key: &[u8], v: f64| {
-            out.extend_from_slice(key);
-            out.extend_from_slice(&v.to_be_bytes());
+    fn a_dual_brush_comes_with_its_preset_and_its_tip_is_not_a_brush_of_its_own() {
+        let computed = |hardness: f64, more: Vec<(&'static str, V)>| {
+            let mut items = vec![
+                ("Dmtr", V::Unit("#Pxl", 12.0)),
+                ("Hrdn", percent(hardness)),
+                ("Angl", V::Unit("#Ang", 30.0)),
+                ("Rndn", percent(40.0)),
+                ("Spcn", percent(25.0)),
+            ];
+            items.extend(more);
+            V::Obj("computedBrush", items)
         };
-        let mut desc = Vec::new();
-        // a computed round preset, whose dual brush is the sample (not a brush of its own)
-        desc.extend_from_slice(b"brushPreset");
-        desc.extend_from_slice(b"Nm  TEXT");
-        unicode(&mut desc, "Hard Round");
-        desc.extend_from_slice(b"BrshObjccomputedBrush");
-        number(&mut desc, b"HrdnUntF#Prc", 50.0);
-        number(&mut desc, b"AnglUntF#Ang", 30.0);
-        number(&mut desc, b"RndnUntF#Prc", 40.0);
-        number(&mut desc, b"SpcnUntF#Prc", 25.0);
-        desc.extend_from_slice(b"dualBrushObjcdualBrushsampledBrush");
-        number(&mut desc, b"AnglUntF#Ang", 5.0);
-        desc.extend_from_slice(b"sampledDataTEXT");
-        unicode(&mut desc, "tip-one");
-        // the sample only its dual brush names isn't a brush of its own
-        let alone = read_brushes(&with_presets(&desc)).unwrap();
-        assert_eq!(alone.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["Hard Round"]);
-        // a sampled preset turned a quarter
-        desc.extend_from_slice(b"brushPreset");
-        desc.extend_from_slice(b"Nm  TEXT");
-        unicode(&mut desc, "Leaf");
-        desc.extend_from_slice(b"BrshObjcsampledBrush");
-        number(&mut desc, b"AnglUntF#Ang", 90.0);
-        number(&mut desc, b"RndnUntF#Prc", 100.0);
-        desc.extend_from_slice(b"sampledDataTEXT");
-        unicode(&mut desc, "tip-one");
-        let brushes = read_brushes(&with_presets(&desc)).unwrap();
+        let dual = V::Obj(
+            "dualBrush",
+            vec![
+                ("useDualBrush", V::Bool(true)),
+                ("Flip", V::Bool(true)),
+                ("Brsh", sampled_brush("tip-two", 5.0, vec![("Nm  ", text("Spatter"))])),
+                ("BlnM", V::Enum("BlnM", "CBrn")),
+                ("useScatter", V::Bool(true)),
+                ("Cnt ", V::Long(3)),
+                ("bothAxes", V::Bool(false)),
+                ("countDynamics", varied(0, 50.0, 0.0)),
+                ("scatterDynamics", varied(0, 135.0, 0.0)),
+            ],
+        );
+        let desc = descriptor(vec![
+            // a computed round preset, scattered on both axes two at a time, whose dual brush is
+            // the second sample
+            preset(
+                "Hard Round",
+                computed(50.0, vec![]),
+                vec![
+                    ("useScatter", V::Bool(true)),
+                    ("Cnt ", V::Long(2)),
+                    ("bothAxes", V::Bool(true)),
+                    ("countDynamics", varied(0, 0.0, 0.0)),
+                    ("scatterDynamics", varied(BY_PRESSURE, 250.0, 0.0)),
+                    ("dualBrush", dual),
+                ],
+            ),
+            // a sampled preset turned a quarter, its dual brush off
+            preset(
+                "Leaf",
+                sampled_brush("tip-one", 25.0, vec![("Angl", V::Unit("#Ang", 90.0)), ("Rndn", percent(100.0))]),
+                vec![("dualBrush", V::Obj("dualBrush", vec![("useDualBrush", V::Bool(false))]))],
+            ),
+        ]);
+        let tips: [(&str, u32, u32, &[u8]); 2] =
+            [("tip-one", 3, 2, &[0, 128, 255, 10, 20, 30]), ("tip-two", 2, 2, &[1, 2, 3, 4])];
+        let file = with_tips(&desc, &tips);
+        let brushes = read_brushes(&file).unwrap();
+        // the sample only the dual brush names isn't a brush of its own
         let names: Vec<&str> = brushes.iter().map(|b| b.name.as_str()).collect();
         assert_eq!(names, ["Hard Round", "Leaf"]);
         let round = &brushes[0];
         assert!(round.tip.is_none());
         assert_eq!((round.hardness, round.roundness, round.spacing), (Some(0.5), Some(0.4), Some(0.25)));
         assert!((round.angle - 30f32.to_radians()).abs() < 1e-6);
+        assert_eq!(
+            round.scatter,
+            Some(AbrScatter {
+                amount: 2.5,
+                both_axes: true,
+                control: BY_PRESSURE,
+                count: 2,
+                count_jitter: 0.0,
+                count_control: 0
+            })
+        );
+        let second = round.dual.as_deref().unwrap();
+        assert_eq!(round.dual_mode.as_deref(), Some("CBrn"));
+        let tip = second.tip.as_ref().unwrap();
+        assert_eq!((second.name.as_str(), tip.width, tip.pixels.as_slice()), ("Spatter", 2, &[1, 2, 3, 4][..]));
+        assert_eq!((second.diameter, second.spacing, second.dynamics.flip_x), (Some(30.0), Some(0.05), true));
+        let s = second.scatter.unwrap();
+        assert_eq!((s.amount, s.both_axes, s.count, s.count_jitter), (1.35, false, 3, 0.5));
         let leaf = &brushes[1];
         assert_eq!((leaf.tip.as_ref().map(|t| t.width), leaf.roundness, leaf.hardness), (Some(3), Some(1.0), None));
         assert!((leaf.angle - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+        assert!(leaf.dual.is_none() && leaf.scatter.is_none());
         // the tips alone: the sampled one
-        assert_eq!(read(&with_presets(&desc)).unwrap().len(), 1);
+        assert_eq!(read(&file).unwrap().len(), 1);
+        crate::damaged::survives("ABR with a dual brush", &file, |b| {
+            let _ = read_brushes(b);
+        });
+    }
+
+    #[test]
+    fn colour_dynamics_and_noise_come_with_the_preset() {
+        let desc = descriptor(vec![preset(
+            "Leaves",
+            sampled_brush("tip-one", 25.0, vec![]),
+            vec![
+                ("useColorDynamics", V::Bool(true)),
+                ("clVr", varied(0, 40.0, 0.0)),
+                ("H   ", percent(5.0)),
+                ("Strt", percent(10.0)),
+                ("Brgh", percent(20.0)),
+                ("colorDynamicsPerTip", V::Bool(false)),
+                ("Nose", V::Bool(true)),
+            ],
+        )]);
+        let b = &read_brushes(&with_presets(&desc)).unwrap()[0];
+        assert_eq!(
+            b.color,
+            Some(AbrColor { hue: 0.05, saturation: 0.1, brightness: 0.2, background: 0.4, per_tip: false })
+        );
+        assert!(b.noise);
+    }
+
+    #[test]
+    fn presets_read_before_a_damaged_one_are_kept() {
+        let one = |name: &str| preset(name, sampled_brush("tip-one", 25.0, vec![]), vec![]);
+        let mut desc = descriptor(vec![one("First"), one("Second")]);
+        // the second preset's brush given a type no descriptor has
+        let at = desc.windows(4).rposition(|w| w == b"Objc").unwrap();
+        desc[at..at + 4].copy_from_slice(b"XXXX");
+        let brushes = read_brushes(&with_presets(&desc)).unwrap();
+        assert_eq!(brushes.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["First"]);
     }
 
     #[test]

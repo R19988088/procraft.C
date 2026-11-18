@@ -6,7 +6,7 @@ import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
-import android.util.Log
+import io.github.artcraftandroid.procraft.AppLog
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -79,7 +79,7 @@ fun decodedSound(context: Context, uri: Uri): ByteArray? {
         if (count == 0 || channels <= 0) return null
         wavOf(samples, minOf(count, MOST_SECONDS * rate), rate)
     } catch (e: Exception) {
-        Log.w("ProCraft", "a sound couldn't be read", e)
+        AppLog.w("ProCraft", "a sound couldn't be read", e)
         null
     } finally {
         runCatching { codec?.stop() }

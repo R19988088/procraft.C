@@ -22,21 +22,29 @@ const LICENCES: &str = concat!(
     include_str!("../../android/app/src/main/assets/fonts/Inter-OFL.txt"),
     "\n\nThe app keeps Lucide icons (lucide.dev), by Lucide Icons and Contributors.\n\n",
     include_str!("../../android/app/src/main/assets/icons/LICENSE-lucide.txt"),
-    "
-
-",
-    include_str!("../licenses.txt"),
 );
+/// What the Windows packages hold besides the app: Microsoft's DirectX Shader Compiler, beside the
+/// .exe, which Direct3D 12 makes the shaders with (packaging/windows).
+#[cfg(windows)]
+const WINDOWS: &str = concat!(
+    "On Windows the app comes with Microsoft's DirectX Shader Compiler (dxcompiler.dll and dxil.dll, ",
+    "github.com/microsoft/DirectXShaderCompiler), by Microsoft Corporation. dxcompiler.dll is under the ",
+    "University of Illinois/NCSA Open Source License and the MIT License, below; dxil.dll under the ",
+    "Microsoft Software License Terms for the DirectX Shader Compiler, in DXC-LICENSE-MS.txt beside the app.\n\n",
+    include_str!("../../packaging/windows/dxc/LICENSE-LLVM.txt"),
+    "\n\n",
+    include_str!("../../packaging/windows/dxc/LICENCE-MIT.txt"),
+);
+#[cfg(not(windows))]
+const WINDOWS: &str = "";
+const CRATES: &str = include_str!("../licenses.txt");
 /// The licences a paragraph each.
 fn paragraphs() -> &'static [&'static str] {
     static PARAGRAPHS: OnceLock<Vec<&'static str>> = OnceLock::new();
     PARAGRAPHS.get_or_init(|| {
-        LICENCES
-            .split(
-                "
-
-",
-            )
+        [LICENCES, WINDOWS, CRATES]
+            .into_iter()
+            .flat_map(|text| text.split("\n\n"))
             .map(str::trim_end)
             .filter(|p| !p.trim().is_empty())
             .collect()

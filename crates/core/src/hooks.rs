@@ -12,9 +12,9 @@ use crate::plugins::Plugins;
 use crate::{CanvasSession, KeyCombo};
 
 /// A plugin at work: a lock of its own, so a long call holds up nothing but it.
-type Shared = Arc<Mutex<Running>>;
+pub(crate) type Shared = Arc<Mutex<Running>>;
 
-fn at_work(running: &Shared) -> MutexGuard<'_, Running> {
+pub(crate) fn at_work(running: &Shared) -> MutexGuard<'_, Running> {
     running.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -25,13 +25,26 @@ struct OnHook {
     hooks: u32,
     /// The keys of its rows in the brush studio, in their order.
     brush_keys: Vec<String>,
-    /// On the picker hook: its picture's code.
-    picture: Option<Arc<str>>,
+    /// On the picker hook: its picture.
+    picture: Option<Picture>,
     /// On an event's hook: a copy of its code of its own for them, so that what an event calls in
     /// the app never waits on this one (its other hooks' copy).
     events: Option<Shared>,
     /// The kinds of layer it adds (keys `<id>.<key>`), in its manifest's order.
     layer_kinds: Vec<crate::PluginKind>,
+    /// Its brush engines, in its manifest's order, and the looks of the brushes they drew lately,
+    /// by engine and data (the latest last).
+    brush_engines: Vec<crate::plugin_brushes::BrushEngine>,
+    looks: Vec<(String, u64, Arc<crate::plugin_brushes::BrushLook>)>,
+}
+
+/// A picker plugin's picture: its code, the keys it reads its plugin's controls by (written to
+/// interface 6 or later; none before), and their values now.
+#[derive(Clone)]
+pub(crate) struct Picture {
+    pub(crate) text: Arc<str>,
+    pub(crate) keys: Option<Arc<[String]>>,
+    pub(crate) values: Vec<f32>,
 }
 
 #[derive(Default)]
@@ -55,6 +68,8 @@ pub(crate) struct Hooks {
     store: Option<PathBuf>,
     /// The plugins' own artworks open, each by its plugin: told its controls as they change.
     canvases: Mutex<Vec<(String, std::sync::Weak<crate::PluginCanvas>)>>,
+    /// Counts the plugins coming on and off and their controls changing.
+    generation: std::sync::atomic::AtomicU64,
 }
 
 impl std::fmt::Debug for Hooks {
@@ -80,10 +95,21 @@ impl Hooks {
         }
         working.stopped.push((id, stop));
         working.untold = Some(format!("A plugin stopped. {}", stop.text()));
+        self.changed();
     }
 
     fn has(&self, hook: Hook) -> bool {
         self.hooked.load(Ordering::Relaxed) & hook.bit() != 0
+    }
+
+    /// A number that changes whenever a plugin comes on or off or its controls change: what a
+    /// plugin answered before it changed may not be what it answers now.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    fn changed(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
     }
 
     /// The bits go by what is on now.
@@ -290,6 +316,13 @@ impl Hooks {
             && self.through(Hook::PinPanels, false, |running, said| Ok(said | running.pin_panels()?))
     }
 
+    /// The clear hook: whether the interface keeps clear of the status bar and the screen's cutouts
+    /// (a camera's), rather than taking the whole window.
+    pub(crate) fn keep_clear(&self) -> bool {
+        self.has(Hook::KeepClear)
+            && self.through(Hook::KeepClear, false, |running, said| Ok(said | running.keep_clear()?))
+    }
+
     /// The undo notice hook: whether undo and redo go by without the notice naming what they took
     /// back or brought back.
     pub(crate) fn hide_undo_notice(&self) -> bool {
@@ -459,9 +492,20 @@ impl Hooks {
         let running = Arc::new(Mutex::new(running));
         working.on.insert(
             at,
-            OnHook { id, running, hooks, brush_keys: Vec::new(), picture: None, events: None, layer_kinds: Vec::new() },
+            OnHook {
+                id,
+                running,
+                hooks,
+                brush_keys: Vec::new(),
+                picture: None,
+                events: None,
+                layer_kinds: Vec::new(),
+                brush_engines: Vec::new(),
+                looks: Vec::new(),
+            },
         );
         self.rehook(&working);
+        self.changed();
     }
 
     /// `id`'s copy of its code for its events (see [`OnHook::events`]).
@@ -471,41 +515,77 @@ impl Hooks {
         }
     }
 
-    /// `id`'s picture's code, for the picker hook.
-    pub(crate) fn give_picture(&self, id: &str, text: String) {
+    /// `id`'s picture's code, for the picker hook, read by `keys` (if it reads its controls) at
+    /// its controls' `values`.
+    pub(crate) fn give_picture(&self, id: &str, text: String, keys: Option<Vec<String>>, values: Vec<f32>) {
         if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {
-            plugin.picture = Some(text.into());
+            plugin.picture = Some(Picture { text: text.into(), keys: keys.map(Into::into), values });
         }
     }
 
-    /// The picker hook's plugin (the first on it): its id and its picture's code.
-    pub(crate) fn picker(&self) -> Option<(String, Arc<str>)> {
+    /// The picker hook's plugin (the first on it that draws Classic now): its id and its picture.
+    pub(crate) fn picker(&self) -> Option<(String, Picture)> {
         if !self.has(Hook::Picker) {
             return None;
         }
         let working = self.working();
-        let on = working.on.iter().find(|p| p.hooks & Hook::Picker.bit() != 0)?;
-        Some((on.id.clone(), Arc::clone(on.picture.as_ref()?)))
+        let mut on = working.on.iter().filter(|p| p.hooks & Hook::Picker.bit() != 0);
+        // (one that stops saying is taken off the next time the hook goes through it)
+        let on = on.find(|p| at_work(&p.running).picker_on().unwrap_or(false))?;
+        Some((on.id.clone(), on.picture.clone()?))
+    }
+
+    /// What the picker hook's plugin (the first on it that draws Classic now) answers to `ask`.
+    fn picker_asks<T: Copy>(&self, mut ask: impl FnMut(&mut Running) -> Result<Option<T>, Stop>) -> Option<T> {
+        if !self.has(Hook::Picker) {
+            return None;
+        }
+        let said = self.through(Hook::Picker, None, |running, said: Option<Option<T>>| {
+            if said.is_some() || !running.picker_on()? {
+                return Ok(said);
+            }
+            ask(running).map(Some)
+        });
+        said.flatten()
     }
 
     /// The picker hook: the saturation and brightness a point of the picker picks (0..1, y down).
     pub(crate) fn picker_pick(&self, x: f32, y: f32) -> Option<(f32, f32)> {
-        if !self.has(Hook::Picker) {
-            return None;
-        }
-        self.through(Hook::Picker, None, |running, got| if got.is_some() { Ok(got) } else { running.picker_pick(x, y) })
+        self.picker_asks(|running| running.picker_pick(x, y))
     }
 
     /// The picker hook: where saturation `s` and brightness `v` sit on the picker (0..1, y down).
     pub(crate) fn picker_point(&self, s: f32, v: f32) -> Option<(f32, f32)> {
-        if !self.has(Hook::Picker) {
-            return None;
+        self.picker_asks(|running| running.picker_point(s, v))
+    }
+
+    /// The picker hook: the hue (0..1) a touch starting at a point of the picker picks; none where
+    /// it picks saturation and brightness, or if the picker leaves the hue to the app's slider.
+    pub(crate) fn picker_hue(&self, x: f32, y: f32) -> Option<f32> {
+        self.picker_asks(|running| running.picker_hue(x, y))
+    }
+
+    /// The picker hook: where hue `h`'s knob sits on the picker (0..1, y down); none while it leaves
+    /// the hue to the app's slider.
+    pub(crate) fn picker_hue_point(&self, h: f32) -> Option<(f32, f32)> {
+        self.picker_asks(|running| running.picker_hue_point(h))
+    }
+
+    /// The part scale hook: how big part `part` of the interface shows next to the rest of it,
+    /// each plugin on it scaling it in turn, .5 to 2 in all.
+    pub(crate) fn interface_part_scale(&self, part: i32) -> f32 {
+        if !self.has(Hook::InterfacePartScale) {
+            return 1.0;
         }
-        self.through(
-            Hook::Picker,
-            None,
-            |running, got| if got.is_some() { Ok(got) } else { running.picker_point(s, v) },
-        )
+        let said =
+            self.through(Hook::InterfacePartScale, 1.0, |running, at| Ok(at * running.interface_part_scale(part)?));
+        said.clamp(0.5, 2.0)
+    }
+
+    /// The floating picker hook: whether the floating colour window shows Classic's picker alone.
+    pub(crate) fn floating_picker_only(&self) -> bool {
+        self.has(Hook::FloatingPickerOnly)
+            && self.through(Hook::FloatingPickerOnly, false, |running, said| Ok(said | running.floating_picker_only()?))
     }
 
     /// The kinds of layer `id` adds, in its manifest's order.
@@ -567,6 +647,91 @@ impl Hooks {
         done.inspect_err(|stop| self.stopped(&id, *stop)).ok()
     }
 
+    /// The brush engines `id` has, in its manifest's order.
+    pub(crate) fn brush_engines(&self, id: &str, engines: Vec<crate::plugin_brushes::BrushEngine>) {
+        if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {
+            plugin.brush_engines = engines;
+        }
+    }
+
+    /// The brush engines on that read files whose names end `ending` (all of them for none): each
+    /// plugin's id, code, the engine's place among its engines and its key.
+    pub(crate) fn engines_reading(&self, ending: Option<&str>) -> Vec<(String, Shared, usize, String)> {
+        if !self.has(Hook::Brushes) {
+            return Vec::new();
+        }
+        let working = self.working();
+        let mut found = Vec::new();
+        for p in &working.on {
+            for (index, engine) in p.brush_engines.iter().enumerate() {
+                if ending.is_none_or(|e| engine.accepts.iter().any(|a| a == e)) {
+                    found.push((p.id.clone(), Arc::clone(&p.running), index, engine.key.clone()));
+                }
+            }
+        }
+        found
+    }
+
+    /// The brush engine `key` (`<id>.<key>`), if its plugin is on: its plugin's id, code and the
+    /// engine's place among its engines.
+    pub(crate) fn engine(&self, key: &str) -> Option<(String, Shared, usize)> {
+        if !self.has(Hook::Brushes) {
+            return None;
+        }
+        let working = self.working();
+        working.on.iter().find_map(|p| {
+            let index = p.brush_engines.iter().position(|e| e.key == key)?;
+            Some((p.id.clone(), Arc::clone(&p.running), index))
+        })
+    }
+
+    /// The action that is engine `key`'s brushes' studio, if its plugin is on and has one.
+    pub(crate) fn engine_studio(&self, key: &str) -> Option<String> {
+        if !self.has(Hook::Brushes) {
+            return None;
+        }
+        let working = self.working();
+        working.on.iter().find_map(|p| p.brush_engines.iter().find(|e| e.key == key)?.studio.clone())
+    }
+
+    /// The look engine `key` gave the brush whose data is `id`, if it is kept.
+    pub(crate) fn look_kept(&self, key: &str, id: u64) -> Option<Arc<crate::plugin_brushes::BrushLook>> {
+        let mut working = self.working();
+        let plugin = working.on.iter_mut().find(|p| p.brush_engines.iter().any(|e| e.key == key))?;
+        let at = plugin.looks.iter().position(|(k, i, _)| k == key && *i == id)?;
+        // the latest last
+        let kept = plugin.looks.remove(at);
+        let look = Arc::clone(&kept.2);
+        plugin.looks.push(kept);
+        Some(look)
+    }
+
+    /// The look engine `key` gave the brush whose data is `id`, kept while its plugin stays on (the
+    /// last few).
+    pub(crate) fn keep_look(&self, key: &str, id: u64, look: Arc<crate::plugin_brushes::BrushLook>) {
+        let mut working = self.working();
+        if let Some(plugin) = working.on.iter_mut().find(|p| p.brush_engines.iter().any(|e| e.key == key)) {
+            plugin.looks.retain(|(k, i, _)| !(k == key && *i == id));
+            plugin.looks.push((key.to_owned(), id, look));
+            let over = plugin.looks.len().saturating_sub(crate::plugin_brushes::LOOKS_KEPT);
+            plugin.looks.drain(..over);
+        }
+    }
+
+    /// The look engine `key` of plugin `id` gave the brush whose data is `data`, as it was kept on
+    /// the disk.
+    pub(crate) fn look_on_disk(&self, id: &str, key: &str, data: u64) -> Option<Vec<u8>> {
+        plugin_file::read_look(self.store.as_deref()?, id, key, data)
+    }
+
+    /// Keeps `look` on the disk with plugin `id`, as engine `key`'s for the brush whose data is
+    /// `data`.
+    pub(crate) fn keep_look_on_disk(&self, id: &str, key: &str, data: u64, look: &[u8]) {
+        if let Some(store) = &self.store {
+            plugin_file::write_look(store, id, key, data, look);
+        }
+    }
+
     /// The keys of `id`'s rows in the brush studio, in their order.
     pub(crate) fn brush_keys(&self, id: &str, keys: Vec<String>) {
         if let Some(plugin) = self.working().on.iter_mut().find(|p| p.id == id) {
@@ -590,13 +755,19 @@ impl Hooks {
         let mut working = self.working();
         working.on.retain(|p| p.id != id);
         self.rehook(&working);
+        self.changed();
     }
 
     /// Tells `id`, if it is on, control `index` has `value`.
     pub(crate) fn control(&self, id: &str, index: usize, value: f32) {
+        self.changed();
         {
             let mut working = self.working();
             if let Some(at) = working.on.iter().position(|p| p.id == id) {
+                // what its picture is drawn with
+                if let Some(kept) = working.on.get_mut(at).and_then(|p| p.picture.as_mut()?.values.get_mut(index)) {
+                    *kept = value;
+                }
                 // its events' copy too
                 if let Some(events) = working.on.get(at).and_then(|p| p.events.as_ref()) {
                     let _ = at_work(events).control(index, value);
@@ -654,21 +825,26 @@ impl CanvasSession {
             let st = self.shared.lock();
             (st.hooks.clone()?, st.gpu.clone()?, st.picker_program.clone())
         };
-        let (id, text) = hooks.picker()?;
-        let program = match cached.filter(|(was, code, _)| *was == id && *code == text) {
-            Some((_, _, program)) => program,
+        let (id, picture) = hooks.picker()?;
+        let crate::hooks::Picture { text, keys, values } = picture;
+        let program = match cached.filter(|(was, code, read_by, _)| *was == id && *code == text && *read_by == keys) {
+            Some((_, _, _, program)) => program,
             None => {
-                let code = procraft_gpu::read_picture(&text).map_err(|why| log::warn!("a picture was refused: {why}"));
+                let code = match &keys {
+                    Some(keys) => procraft_gpu::read_picture_given(&text, keys),
+                    None => procraft_gpu::read_picture(&text),
+                };
+                let code = code.map_err(|why| log::warn!("a picture was refused: {why}"));
                 let made = code.ok().and_then(|code| gpu.make_picture(code).ok());
                 let Some(program) = made else {
                     hooks.stopped(&id, Stop::Damaged);
                     return None;
                 };
-                self.shared.lock().picker_program = Some((id.clone(), Arc::clone(&text), Arc::clone(&program)));
+                self.shared.lock().picker_program = Some((id.clone(), Arc::clone(&text), keys, Arc::clone(&program)));
                 program
             }
         };
-        match gpu.draw_picture(&program, hue, side) {
+        match gpu.draw_picture(&program, hue, side, &values) {
             Ok(rgba) => Some(rgba),
             // asked bigger than it can be drawn, or the device gone: not the plugin's doing
             Err(procraft_gpu::PictureStop::TooBig | procraft_gpu::PictureStop::Lost) => None,
@@ -734,6 +910,12 @@ pub(crate) mod tests {
         (global $size (mut f32) (f32.const 1))
         (func (export "procraft_control") (param i32 f32) (global.set $size (local.get 1)))
         (func (export "procraft_interface_scale") (param f32 f32) (result f32) (global.get $size)))"#;
+    /// Answers the clear hook by its one switch.
+    const CLEARS: &str = r#"(module
+        (global $clear (mut i32) (i32.const 0))
+        (func (export "procraft_control") (param i32 f32)
+            (global.set $clear (f32.ne (local.get 1) (f32.const 0))))
+        (func (export "procraft_keep_clear") (result i32) (global.get $clear)))"#;
     /// Answers the pick hook by its one switch.
     const PICKS: &str = r#"(module
         (global $layer (mut i32) (i32.const 0))
@@ -796,14 +978,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_plugins_that_come_with_the_app_and_only_answer_answer_from_their_own_code() {
-        const ANSWERING: [&str; 6] = [
-            "eyedropper-layer",
-            "fill-all-layers",
-            "hide-undo-notice",
-            "opacity-together",
-            "pin-panels",
-            "radial-segments",
-        ];
+        const ANSWERING: [&str; 4] = ["colordrop-tools", "interface", "layer-tools", "radial-segments"];
         let dir = store("answering");
         let plugins = Plugins::with_store(dir.clone());
         let hooks = plugins.hooks();
@@ -828,10 +1003,19 @@ pub(crate) mod tests {
         for name in ANSWERING {
             assert!(plugins.set_on(id(name), true), "{name}");
         }
-        // the eyedropper's waits for its switch, and radial symmetry makes eight until its slider moves
-        assert_eq!(said(&hooks), ([false, true, true, true, true], Some(8)));
-        // (its switch kept under the setting the app had before it was a plugin)
+        // each waits for its switch, and radial symmetry makes eight until its slider moves
+        assert_eq!(said(&hooks), ([false; 5], Some(8)));
+        // (the eyedropper's kept under the setting the app had before it was a plugin)
         assert!(plugins.set_switch("eyedropper_layer".to_owned(), true));
+        assert_eq!(said(&hooks), ([true, false, false, false, false], Some(8)));
+        for (name, switch) in [
+            ("colordrop-tools", "all_layers"),
+            ("interface", "hide_undo"),
+            ("layer-tools", "opacity"),
+            ("interface", "pin_panels"),
+        ] {
+            assert!(plugins.set_switch(format!("{}.{switch}", id(name)), true), "{switch}");
+        }
         assert!(plugins.set_slider(format!("{}.parts", id("radial-segments")), 12.0).is_some());
         assert_eq!(said(&hooks), ([true; 5], Some(12)));
         for name in ANSWERING {
@@ -1032,12 +1216,17 @@ pub(crate) mod tests {
         let Some(s) = session() else { return };
         let dir = store("grid-layer");
         let plugins = Plugins::with_store(dir.clone());
-        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "grid-layer").unwrap();
+        let (_, file) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "layer-fills").unwrap();
         assert_eq!(plugins.install(file.to_vec()), None);
-        let id = "io.github.artcraftandroid.grid-layer";
+        let id = "io.github.artcraftandroid.layer-fills";
         assert!(plugins.set_on(id.to_owned(), true));
+        // there while its switch is on
+        let card = || plugins.plugins().into_iter().find(|p| p.id == id).unwrap();
+        assert!(card().actions.is_empty());
+        assert!(!plugins.run_action(format!("{id}.add"), Arc::clone(&s)));
+        assert!(plugins.set_switch(format!("{id}.grid"), true));
         // lines 50 apart, 3 wide, in blue
-        let card = plugins.plugins().into_iter().find(|p| p.id == id).unwrap();
+        let card = card();
         assert_eq!(card.actions.len(), 1);
         // on its card only
         assert!(plugins.actions_in(crate::plugins::PluginPlace::Adjustments).is_empty());
@@ -1275,6 +1464,44 @@ pub(crate) mod tests {
         assert_eq!(s.picker_picture(0.5, 8), None);
         assert_eq!(plugins.picker_pick(0.25, 0.75), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_picture_written_to_interface_6_is_drawn_again_as_its_controls_say() {
+        let Some(s) = session() else { return };
+        let dir = store("picker-given");
+        let plugins = Plugins::with_store(dir.clone());
+        // a picker with a switch, its picture red while the switch is on
+        let picks = crate::plugin_run::tests::PICKS;
+        let text = format!(
+            r#"(module (func (export "procraft_control") (param i32 f32)) {})"#,
+            &picks["(module".len()..picks.len() - 1]
+        );
+        let module = wat::parse_str(text).unwrap();
+        let picture = "fn picture(at: vec2<f32>) -> vec4<f32> { return vec4<f32>(v.red, 0.0, 0.0, 1.0); }";
+        let mut manifest = coded(ID, &module);
+        manifest["hooks"] = json!(["picker"]);
+        manifest["compat"]["procraft"]["interface"] = json!(6);
+        manifest["controls"] = json!([{ "key": "red", "type": "switch", "label": "Red" }]);
+        let listed = json!({ "path": "picture.wgsl", "sha256": crate::plugin_file::sha256(picture.as_bytes()), "size": picture.len() });
+        manifest["files"].as_array_mut().unwrap().push(listed);
+        let file = pack(&manifest, &[(MODULE, &module), ("picture.wgsl", picture.as_bytes())]);
+        assert_eq!(plugins.install(file), None);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        s.use_plugins(Arc::clone(&plugins));
+        let red = |s: &CanvasSession| s.picker_picture(0.0, 4).expect("drawn")[0];
+        assert_eq!(red(&s), 0);
+        let before = plugins.generation();
+        assert!(plugins.set_switch(format!("{ID}.red"), true));
+        assert_ne!(plugins.generation(), before, "what drew it changed");
+        assert_eq!(red(&s), 255);
+        // the same text written to interface 2 reads no controls: it can't be imported
+        manifest["compat"]["procraft"]["interface"] = json!(2);
+        let older = pack(&manifest, &[(MODULE, &module), ("picture.wgsl", picture.as_bytes())]);
+        let older_dir = store("picker-given-2");
+        assert!(Plugins::with_store(older_dir.clone()).install(older).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&older_dir);
     }
 
     #[test]
@@ -1554,6 +1781,46 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn colordrop_by_all_layers_stops_at_a_light_line_as_at_a_dark_one() {
+        let Some(s) = session() else { return };
+        let dir = store("fill-all-light");
+        // a light blue ring on the first layer, over the white background
+        s.set_color(0.55, 0.8, 0.95);
+        s.set_brush_size(0.2);
+        let ring: Vec<PenSample> = (0..=120)
+            .map(|i| {
+                let a = i as f32 / 120.0 * std::f32::consts::TAU;
+                sample(100.0 + 50.0 * a.cos(), 100.0 + 50.0 * a.sin(), f64::from(i) * 8.0)
+            })
+            .collect();
+        s.stroke_begin(PointerKind::Finger, ring[..1].to_vec());
+        s.stroke_add(ring[1..].to_vec());
+        s.stroke_end(vec![]);
+        // seen over white, every pixel of it is nearer to white than a drop's first threshold
+        // reaches: a fill going by the canvas as it shows would pass it
+        let line = picture(&s);
+        let from_white =
+            line.as_chunks::<4>().0.iter().map(|p| (0..3).map(|c| p[3].saturating_sub(p[c])).max().unwrap_or(0));
+        assert!(from_white.max().unwrap() < 128);
+        s.add_layer();
+        let plugins = filling_by_all(&dir);
+        assert!(plugins.set_on(ID.to_owned(), true));
+        s.use_plugins(Arc::clone(&plugins));
+        // dropped inside it on the empty layer at the threshold a drop starts with: it fills up to
+        // the ring and no further, as it does at a black ring
+        assert!(s.pour_begin(100.0, 100.0, 0.0, 0.0, 1.0, 0.5));
+        s.pour_end(true, None);
+        s.await_pour();
+        let rgba = picture(&s);
+        let blue_at = |x: usize, y: usize| rgba[(y * 200 + x) * 4 + 2] > 200 && rgba[(y * 200 + x) * 4 + 3] > 200;
+        assert!(blue_at(100, 100) && blue_at(80, 120), "filled where it was dropped");
+        for (x, y) in [(100, 20), (20, 100), (180, 100), (100, 180), (5, 5), (195, 195)] {
+            assert!(!blue_at(x, y), "not past the ring at ({x}, {y})");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_interface_takes_a_plugin_s_colour_while_it_is_on() {
         let dir = store("interface-colour");
         // red for the accent, nothing said for any other role
@@ -1698,6 +1965,47 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn quickshape_curves_stay_on_for_dense_and_wavy_strokes() {
+        let dir = store("curves-dense-samples");
+        let plugins = Plugins::with_store(dir.clone());
+        let (_, bundled) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "quickshape-curves").unwrap();
+        assert_eq!(plugins.install(bundled.to_vec()), None);
+        const ID: &str = "io.github.artcraftandroid.quickshape-curves";
+        assert!(plugins.set_on(ID.to_owned(), true));
+        let hooks = plugins.hooks();
+        // a curve that ran out of its budget would switch the plugin off, and every held stroke
+        // after it would be a polyline: thousands of pen samples, and many bends over a few hundred
+        // (the fit's most work), stay within it
+        let dense = |count: usize| -> Vec<(f32, f32)> {
+            (0..count)
+                .map(|i| {
+                    let x = i as f32 * 600.0 / (count - 1) as f32;
+                    let tau = std::f32::consts::TAU;
+                    (x, 120.0 + 55.0 * (x * tau / 300.0).sin() + 3.0 * (x * tau / 23.0).sin())
+                })
+                .collect()
+        };
+        let wavy = |count: usize, waves: f32| -> Vec<(f32, f32)> {
+            (0..count)
+                .map(|i| {
+                    let t = i as f32 / (count - 1) as f32;
+                    let tau = std::f32::consts::TAU;
+                    (t * 1600.0, 400.0 + 300.0 * (t * waves * tau).sin() + 6.0 * (i as f32 * 1.7).sin())
+                })
+                .collect()
+        };
+        let strokes =
+            [dense(4_001), dense(12_001), wavy(400, 4.0), wavy(257, 12.0), wavy(1000, 12.0), wavy(5000, 25.0)];
+        for points in &strokes {
+            let nodes = hooks.quickshape_curve(points, 1).expect("a curve");
+            assert!(nodes.len() >= 10 && nodes.len() % 3 == 1, "{} samples: {} nodes", points.len(), nodes.len());
+            assert!(hooks.is_on(ID), "off after {} samples", points.len());
+        }
+        assert!(plugins.plugins().iter().find(|p| p.id == ID).is_some_and(|p| p.on && p.problem.is_none()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_stroke_bending_twice_snaps_to_a_curve_while_a_plugin_says_so() {
         use crate::{QuickShapeAnchor, QuickShapeKind};
         let Some(s) = session() else { return };
@@ -1733,17 +2041,63 @@ pub(crate) mod tests {
         let shape = zigzag(&s, 1000.0).expect("it snaps");
         assert_eq!(shape.kind, QuickShapeKind::Curve, "{shape:?}");
         assert!(shape.choices.contains(&QuickShapeKind::Polyline));
-        assert!(shape.anchors.len() >= 3 && shape.anchors.iter().all(|a| *a == QuickShapeAnchor::Smooth));
-        // a tap on an anchor in the middle steps it on: broken, then a corner
-        let shape = s.quickshape_cycle_anchor(3).expect("an anchor");
-        assert_eq!(shape.anchors[1], QuickShapeAnchor::Broken);
+        assert!(shape.anchors.len() >= 3);
+        assert_eq!(shape.anchors[1], QuickShapeAnchor::Broken, "a deliberate sharp turn needs independent handles");
+        // a tap cycles a detected broken anchor through corner and smooth
         let shape = s.quickshape_cycle_anchor(3).expect("an anchor");
         assert_eq!(shape.anchors[1], QuickShapeAnchor::Corner);
+        let shape = s.quickshape_cycle_anchor(3).expect("an anchor");
+        assert_eq!(shape.anchors[1], QuickShapeAnchor::Smooth);
         // a control is no anchor
         assert!(s.quickshape_cycle_anchor(1).is_none());
         // shown as the polyline, then as a curve again: the plugin fits it afresh
         assert_eq!(s.quickshape_choose(QuickShapeKind::Polyline).map(|i| i.kind), Some(QuickShapeKind::Polyline));
         assert_eq!(s.quickshape_choose(QuickShapeKind::Curve).map(|i| i.kind), Some(QuickShapeKind::Curve));
+        s.quickshape_done();
+        s.stroke_end(vec![]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_loop_bending_in_and_out_snaps_to_a_closed_curve_while_a_plugin_says_so() {
+        use crate::QuickShapeKind;
+        let Some(s) = session() else { return };
+        let dir = store("closed-curves");
+        let plugins = Plugins::with_store(dir.clone());
+        let (_, bytes) = crate::bundled::BUNDLED.iter().find(|(name, _)| *name == "quickshape-curves").unwrap();
+        assert_eq!(plugins.install(bytes.to_vec()), None);
+        s.use_plugins(Arc::clone(&plugins));
+        // a cloud: once round, bulging out and dipping in five times, ending where it began
+        let cloud = |s: &CanvasSession, t0: f64| {
+            let samples: Vec<PenSample> = (0..=100)
+                .map(|i| {
+                    let t = i as f32 / 100.0 * std::f32::consts::TAU;
+                    let r = 60.0 * (1.0 + 0.3 * (5.0 * t).cos());
+                    sample(100.0 + r * t.cos(), 100.0 + r * t.sin(), t0 + f64::from(i) * 8.0)
+                })
+                .collect();
+            s.stroke_begin(PointerKind::Finger, samples[..1].to_vec());
+            s.stroke_add(samples[1..].to_vec());
+            s.quickshape_hold()
+        };
+        // off: QuickShape's ellipse
+        assert_eq!(cloud(&s, 0.0).expect("it snaps").kind, QuickShapeKind::Ellipse);
+        s.quickshape_done();
+        s.stroke_end(vec![]);
+        assert!(plugins.set_on("io.github.artcraftandroid.quickshape-curves".to_owned(), true));
+        let shape = cloud(&s, 2000.0).expect("it snaps");
+        assert_eq!(shape.kind, QuickShapeKind::Curve, "{shape:?}");
+        assert!(shape.choices.contains(&QuickShapeKind::Ellipse));
+        // its last anchor is its first: dragged, both go
+        let at = |h: &[f32], i: usize| (h[2 * i], h[2 * i + 1]);
+        let last = shape.handles.len() / 2 - 1;
+        assert_eq!(at(&shape.handles, 0), at(&shape.handles, last));
+        let moved = s.quickshape_move_handle(0, 20.0, 30.0).unwrap();
+        assert_eq!(at(&moved.handles, last), at(&moved.handles, 0));
+        // tapped there it steps on as one anchor, at either end
+        let tapped = s.quickshape_cycle_anchor(last as u32).unwrap();
+        assert_eq!(tapped.anchors.first(), tapped.anchors.last());
+        assert_eq!(tapped.anchors[0], crate::QuickShapeAnchor::Broken);
         s.quickshape_done();
         s.stroke_end(vec![]);
         let _ = std::fs::remove_dir_all(&dir);
@@ -2014,6 +2368,31 @@ pub(crate) mod tests {
         assert!(plugins.set_on(ID.to_owned(), true));
         assert_eq!(plugins.interface_scale(1600.0, 1000.0), 1.0);
         assert_eq!(card(&plugins).problem.as_deref(), Some("Switched off: it gave an answer that makes no sense."));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_interface_keeps_clear_of_the_system_while_a_plugin_s_switch_says() {
+        let dir = store("clear");
+        let module = wat::parse_str(CLEARS).unwrap();
+        let plugins = Plugins::with_store(dir.clone());
+        let mut manifest = coded(ID, &module);
+        manifest["hooks"] = json!(["keep_clear"]);
+        manifest["controls"] = json!([{ "key": "clear", "type": "switch", "label": "Keep clear" }]);
+        assert_eq!(plugins.install(file(&manifest, &module)), None);
+        assert!(!plugins.keep_clear(), "imported, it says nothing");
+        assert!(plugins.set_on(ID.to_owned(), true));
+        assert!(!plugins.keep_clear(), "its switch starts off");
+        let key = format!("{ID}.clear");
+        assert!(plugins.set_switch(key.clone(), true));
+        assert!(plugins.keep_clear());
+        // kept through a restart
+        let next = restarted(&dir, &plugins);
+        assert!(next.keep_clear());
+        assert!(plugins.set_switch(key, false));
+        assert!(!plugins.keep_clear());
+        assert!(plugins.set_on(ID.to_owned(), false));
+        assert!(!plugins.keep_clear());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2290,7 +2669,7 @@ pub(crate) mod tests {
     }
 
     /// What whole-canvas fills cost going through a real plugin file, up to the most that can: with
-    /// `PROCRAFT_PLUGIN_FILE` naming the gap-closing plugin, `--ignored --nocapture`, on a device.
+    /// `PROCRAFT_PLUGIN_FILE` naming the ColorDrop tools plugin, `--ignored --nocapture`, on a device.
     #[test]
     #[ignore]
     fn a_built_gap_plugin_costs() {
@@ -2300,6 +2679,8 @@ pub(crate) mod tests {
         assert_eq!(plugins.install(bytes), None);
         let found = card(&plugins);
         assert!(plugins.set_on(found.id.clone(), true));
+        // (the switch it comes under, if it has one)
+        plugins.set_switch(format!("{}.gap_closing", found.id), true);
         plugins.set_slider("fill_gap".to_owned(), 8.0);
         let hooks = plugins.hooks();
         assert!(hooks.fill_mask());
@@ -2325,8 +2706,8 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A gap closed by a real plugin file: with `PROCRAFT_PLUGIN_FILE` naming the gap-closing plugin and
-    /// `--ignored`. Two rooms, the same fill through a gap, with the plugin on and off.
+    /// A gap closed by a real plugin file: with `PROCRAFT_PLUGIN_FILE` naming the ColorDrop tools
+    /// plugin and `--ignored`. Two rooms, the same fill through a gap, with the plugin on and off.
     #[test]
     #[ignore]
     fn a_built_gap_plugin_closes_a_real_fill() {
@@ -2346,6 +2727,7 @@ pub(crate) mod tests {
         assert_eq!(plugins.install(bytes), None);
         let found = card(&plugins);
         assert!(plugins.set_on(found.id.clone(), true));
+        plugins.set_switch(format!("{}.gap_closing", found.id), true);
         assert_eq!(plugins.set_slider("fill_gap".to_owned(), 32.0), Some(32.0));
         s.use_plugins(Arc::clone(&plugins));
         assert!(s.pour_begin(40.0, 100.0, 1.0, 0.0, 0.0, 0.3));

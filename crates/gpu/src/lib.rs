@@ -5,6 +5,8 @@
 //! nothing relies on reading the render target in the shader (Android GPUs have no portable way).
 
 mod canvas;
+#[cfg(windows)]
+mod compiler;
 mod kept;
 mod lighting;
 mod scene;
@@ -14,12 +16,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 pub use canvas::plugin_filter::{FilterCode, FilterProgram, FilterRun, read_filter};
-pub use canvas::plugin_picture::{PictureCode, PictureProgram, PictureStop, read_picture};
+pub use canvas::plugin_picture::{PictureCode, PictureProgram, PictureStop, read_picture, read_picture_given};
 pub use canvas::{
-    Backdrop, Canvas, DisplayLut, Filter, FineThumbnail, LayerThumbnailStep, LiquifyMode, LiquifyStamp,
-    PendingThumbnail, Readback, ReadyToPark, RemakeStats, Resample, SecondStroke, SelectionLook, SharedStroke,
-    SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail, most_resident, read_texture,
-    start_reading, textures_bytes,
+    Backdrop, Canvas, DisplayLut, Filter, FineThumbnail, LayerStore, LayerThumbnailStep, LiquifyMode, LiquifyStamp,
+    MOST_TIPS, PendingAlphas, PendingThumbnail, Readback, ReadyToPark, RemakeStats, Resample, STORE_LIT, SecondStroke,
+    SelectionLook, SharedStroke, SmallScene, Stripes, StrokeStyle, StrokeTool, SurroundGrid, Target, Thumbnail,
+    TipKind, most_resident, read_texture, start_reading, textures_bytes,
 };
 pub use kept::keep_pipelines_in;
 pub use lighting::Lighting;
@@ -28,6 +30,9 @@ pub use scene::{
 };
 pub use sphere::{SphereLook, SpherePreview, preview_environment};
 pub use wgpu;
+
+#[cfg(windows)]
+use compiler::with_compiler;
 
 /// The canvas's textures are made so the GPU keeps them uncompressed: on Mali GPUs (Vulkan), whose
 /// block compression (AFBC) can lose blocks of a picture redrawn a part at a time (a stroke's
@@ -70,6 +75,65 @@ fn backends_name(backends: wgpu::Backends) -> String {
 fn gl_array_layers(n: u32) -> u32 {
     let n = n.max(2);
     if n.is_multiple_of(6) { n + 1 } else { n }
+}
+
+/// Whether a GPU named `name` is a weak one, as budget tablets and phones have (PowerVR's, the
+/// smaller Malis, Adrenos below the 630s and 710), or draws on the CPU: what costs it most and
+/// shows least is made cheaper (the glass's blur is worked out on a smaller picture).
+fn weak_gpu(name: &str, device_type: wgpu::DeviceType) -> bool {
+    if device_type == wgpu::DeviceType::Cpu {
+        return true;
+    }
+    let name = name.to_ascii_lowercase();
+    // the number after `prefix`, if the name has one there ("adreno (tm) 610" → 610)
+    let number_after = |prefix: &str| -> Option<u32> {
+        let rest = name.get(name.find(prefix)? + prefix.len()..)?;
+        let digits: String = rest.trim_start().chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok()
+    };
+    if name.contains("powervr") || name.contains("llvmpipe") || name.contains("swiftshader") {
+        return true;
+    }
+    if name.contains("mali-t") {
+        return true;
+    }
+    if let Some(n) = number_after("mali-g") {
+        return matches!(n, 31 | 51 | 52 | 53 | 57 | 71 | 72 | 310);
+    }
+    if let Some(n) = number_after("adreno (tm)").or_else(|| number_after("adreno")) {
+        return n < 630 || (700..710).contains(&n);
+    }
+    false
+}
+
+/// Every GPU taken for a weak one (see [`weak_gpu`]): for measuring what that saves on others.
+static WEAK: AtomicBool = AtomicBool::new(false);
+
+/// Takes every GPU for a weak one from now on (`on`), as [`Gpu::is_weak`] tells: for measuring.
+#[doc(hidden)]
+pub fn treat_as_weak(on: bool) {
+    WEAK.store(on, Ordering::Relaxed);
+}
+
+/// What a device made as an old GPU's is held to (see [`Gpu::headless_old`]): what a 2014 Mali
+/// offers on OpenGL ES 3.1 at the least. The downlevel limits, with no storage buffers or images
+/// in any stage (wgpu takes the vertex and fragment stages' counts, often none there, for every
+/// stage), the GLES 3.1 compute minimums and 4096-pixel textures.
+fn old_gpu_limits() -> wgpu::Limits {
+    wgpu::Limits {
+        max_texture_dimension_1d: 4096,
+        max_texture_dimension_2d: 4096,
+        max_storage_buffers_per_shader_stage: 0,
+        max_storage_textures_per_shader_stage: 0,
+        max_dynamic_storage_buffers_per_pipeline_layout: 0,
+        max_storage_buffer_binding_size: 0,
+        max_compute_invocations_per_workgroup: 128,
+        max_compute_workgroup_size_x: 128,
+        max_compute_workgroup_size_y: 128,
+        max_compute_workgroup_size_z: 64,
+        max_compute_workgroup_storage_size: 16 << 10,
+        ..wgpu::Limits::downlevel_defaults()
+    }
 }
 
 /// Whether a GPU named `name` on `backend` needs its canvas textures uncompressed.
@@ -115,28 +179,14 @@ pub struct Gpu {
     /// Buffers pixels came back from the GPU through, kept for the next readback (see
     /// [`Gpu::readback_buffer`]).
     readbacks: Arc<std::sync::Mutex<Vec<wgpu::Buffer>>>,
+    /// Made as an old GPU's (see [`Gpu::headless_old`]).
+    old: bool,
 }
 
-/// `desc` with Direct3D 12's shader compiler chosen: the newer one if the app came with its
-/// `dxcompiler.dll` (beside it), else the one Windows has. Never one found elsewhere on the PATH, as
-/// wgpu would take: an older one there (an SDK's) can't make our shaders, and nothing draws.
-fn with_compiler(mut desc: wgpu::InstanceDescriptor) -> wgpu::InstanceDescriptor {
-    desc.backend_options.dx12.shader_compiler = dx12_compiler();
-    desc
-}
-
-#[cfg(windows)]
-fn dx12_compiler() -> wgpu::Dx12Compiler {
-    let beside = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join("dxcompiler.dll")));
-    match beside.filter(|path| path.is_file()) {
-        Some(path) => wgpu::Dx12Compiler::DynamicDxc { dxc_path: path.to_string_lossy().into_owned() },
-        None => wgpu::Dx12Compiler::Fxc,
-    }
-}
-
+/// Elsewhere there's no Direct3D 12 to choose a shader compiler for.
 #[cfg(not(windows))]
-fn dx12_compiler() -> wgpu::Dx12Compiler {
-    wgpu::Dx12Compiler::Fxc
+fn with_compiler(desc: wgpu::InstanceDescriptor) -> wgpu::InstanceDescriptor {
+    desc
 }
 
 impl Gpu {
@@ -223,9 +273,22 @@ impl Gpu {
         }
     }
 
-    /// A device for offscreen work (tests, exports), from the first instance that makes one.
+    /// A device for offscreen work (tests, exports), from the first instance that makes one. With
+    /// `PROCRAFT_HEADLESS_OLD` set, an old GPU's (see [`Gpu::headless_old`]): to run every test there.
     pub fn headless() -> Result<Gpu, GpuError> {
+        if std::env::var_os("PROCRAFT_HEADLESS_OLD").is_some() {
+            return Gpu::headless_old();
+        }
         Gpu::first_that(0, |_| {}, |_| true).map(|(gpu, _)| gpu)
+    }
+
+    /// [`Gpu::headless`] as an old GPU's: held to what a 2014 Mali offers on OpenGL ES 3.1
+    /// ([`old_gpu_limits`]), and taken to draw into no half floats, as on one whose OpenGL ES
+    /// can't. For testing what the canvas does without.
+    #[doc(hidden)]
+    pub fn headless_old() -> Result<Gpu, GpuError> {
+        let instance = Gpu::instance_after(0).ok_or_else(|| GpuError::NoAdapter("no backend".to_owned()))?;
+        Gpu::create(instance, None, true)
     }
 
     /// The app's device, the canvases' pipelines made: from the first instance that makes one
@@ -267,7 +330,7 @@ impl Gpu {
             let last = tries + 1 >= count;
             trying(backend);
             let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Gpu::create(instance, None).map(|gpu| {
+                Gpu::create(instance, None, false).map(|gpu| {
                     let taken = last || fine(&gpu);
                     (gpu, taken)
                 })
@@ -285,10 +348,14 @@ impl Gpu {
 
     /// A device that can present to `surface` (made from `instance`).
     pub fn for_surface(instance: wgpu::Instance, surface: &wgpu::Surface<'_>) -> Result<Gpu, GpuError> {
-        Gpu::create(instance, Some(surface))
+        Gpu::create(instance, Some(surface), false)
     }
 
-    fn create(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>) -> Result<Gpu, GpuError> {
+    fn create(instance: wgpu::Instance, surface: Option<&wgpu::Surface<'_>>, old: bool) -> Result<Gpu, GpuError> {
+        // a driver's own description can run over several lines: one line in the log
+        fn one_line(text: &str) -> String {
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
         // each stage timed in the log: on a slow driver, where a start stopped shows
         let started = std::time::Instant::now();
         // every GPU the backend sees, for the log (a laptop's two, a driver's own name and version)
@@ -300,13 +367,15 @@ impl Gpu {
                 info.backend,
                 info.device_type,
                 info.driver,
-                info.driver_info
+                one_line(&info.driver_info)
             );
         }
         log::info!("the GPUs listed in {} ms", started.elapsed().as_millis());
         let chosen = std::time::Instant::now();
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            // the faster GPU of a laptop's two, unless `WGPU_POWER_PREF` says (`low`: to try the
+            // other when one fails or lags)
+            power_preference: wgpu::PowerPreference::from_env().unwrap_or(wgpu::PowerPreference::HighPerformance),
             force_fallback_adapter: false,
             compatible_surface: surface,
             apply_limit_buckets: false,
@@ -317,7 +386,7 @@ impl Gpu {
             "GPU: {} ({:?}, driver {}), chosen in {} ms",
             info.name,
             info.backend,
-            info.driver_info,
+            one_line(&info.driver_info),
             chosen.elapsed().as_millis()
         );
         let made = std::time::Instant::now();
@@ -325,14 +394,15 @@ impl Gpu {
             UNCOMPRESSED.store(true, Ordering::Relaxed);
             log::info!("the canvas's textures kept uncompressed on this GPU");
         }
+        if weak_gpu(&info.name, info.device_type) {
+            log::info!("a weak GPU: the frosted glass is blurred from a smaller picture");
+        }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("procraft"),
-            // where the GPU has them: dual-source blending for strokes that build up only to their
-            // transfer, and the pipelines' compiled form to keep between runs
-            required_features: adapter.features()
-                & (wgpu::Features::DUAL_SOURCE_BLENDING | wgpu::Features::PIPELINE_CACHE),
+            // where the GPU has it: the pipelines' compiled form to keep between runs
+            required_features: adapter.features() & wgpu::Features::PIPELINE_CACHE,
             // the adapter's own limits, so large canvases fit where the GPU allows them
-            required_limits: adapter.limits(),
+            required_limits: if old { old_gpu_limits() } else { adapter.limits() },
             // memory taken in small blocks (a few MB up to 64): a block of each kind, once made,
             // is kept for good, and the larger ones held what was never used (a first read back
             // of a few bytes kept 64 MB the CPU can see)
@@ -341,12 +411,11 @@ impl Gpu {
         }))
         .map_err(|e| GpuError::Device(e.to_string()))?;
         log::info!("the GPU's device made in {} ms", made.elapsed().as_millis());
-        // new canvases and crops kept to what its textures can be
-        procraft_engine::document::set_gpu_texture_most(device.limits().max_texture_dimension_2d);
-        log::info!(
-            "GPU capped strokes (dual-source blending): {}",
-            device.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING)
-        );
+        // new canvases and crops kept to what its textures can be (not by one made as an old GPU's
+        // to test with: that would hold every other test's canvases to its size)
+        if !old {
+            procraft_engine::document::set_gpu_texture_most(device.limits().max_texture_dimension_2d);
+        }
         // a validation error must never take the app down: log it instead
         let errors = Arc::new(AtomicU64::new(0));
         let counter = Arc::clone(&errors);
@@ -361,7 +430,7 @@ impl Gpu {
             flag.store(true, Ordering::Relaxed);
             log::error!("GPU lost ({reason:?}): {message}");
         });
-        Ok(Gpu {
+        let gpu = Gpu {
             instance,
             adapter,
             device,
@@ -371,7 +440,13 @@ impl Gpu {
             canvas_pipelines: Arc::default(),
             kept: Arc::default(),
             readbacks: Arc::default(),
-        })
+            old,
+        };
+        // what an old GPU can't do, and what the canvas does without it (in the shared log)
+        for lack in gpu.lacks() {
+            log::warn!("this GPU {lack}");
+        }
+        Ok(gpu)
     }
 
     /// A buffer of `size` bytes or more to read pixels back through: one kept from an earlier
@@ -451,8 +526,8 @@ impl Gpu {
             let kept = self
                 .kept
                 .get_or_init(|| kept::folder().and_then(|dir| kept::Kept::open(&self.device, &self.adapter, &dir)));
-            let format = canvas::liquify_format(&self.adapter);
-            let pipelines = canvas::Pipelines::new(&self.device, format, kept.as_ref().map(|k| k.cache.clone()));
+            let abilities = canvas::Abilities::of(self);
+            let pipelines = canvas::Pipelines::new(&self.device, abilities, kept.as_ref().map(|k| k.cache.clone()));
             if let Some(kept) = kept {
                 kept.made();
             }
@@ -474,12 +549,6 @@ impl Gpu {
         self.errors.load(Ordering::Relaxed)
     }
 
-    /// Whether strokes that build up only to their transfer (the uniformed glaze) can be drawn
-    /// exactly (with dual-source blending); else their transfer is taken into each stamp.
-    pub fn caps_transfer(&self) -> bool {
-        self.device.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING)
-    }
-
     pub fn max_texture_size(&self) -> u32 {
         self.device.limits().max_texture_dimension_2d
     }
@@ -496,9 +565,66 @@ impl Gpu {
         if self.is_gl() { gl_array_layers(n) } else { n.max(1) }
     }
 
+    /// Whether the GPU is a weak one (see [`weak_gpu`]).
+    pub fn is_weak(&self) -> bool {
+        let info = self.adapter.get_info();
+        WEAK.load(Ordering::Relaxed) || weak_gpu(&info.name, info.device_type)
+    }
+
     /// Whether the device is OpenGL (ES)'s.
     pub fn is_gl(&self) -> bool {
         self.adapter.get_info().backend == wgpu::Backend::Gl
+    }
+
+    /// Whether the GPU draws into half floats, blended and filtered: strokes build up in them, and
+    /// liquify's field and 3D painting's lighting are drawn in them. An old GPU's OpenGL ES
+    /// without `EXT_color_buffer_half_float` (or `_float`) can only read them.
+    pub fn draws_half_floats(&self) -> bool {
+        if self.old {
+            return false;
+        }
+        let features = self.adapter.get_texture_format_features(wgpu::TextureFormat::Rgba16Float);
+        let usages = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT;
+        let flags = wgpu::TextureFormatFeatureFlags::FILTERABLE | wgpu::TextureFormatFeatureFlags::BLENDABLE;
+        features.allowed_usages.contains(usages) && features.flags.contains(flags)
+    }
+
+    /// Whether the GPU runs the compute passes that work in storage buffers (smudging, wet paint,
+    /// paint laid in place, stamps laid by their stroke's rule, 3D painting's footprint): four
+    /// storage buffers a stage and groups of 256. An old GPU's OpenGL ES 3.1 often has none
+    /// outside its compute shaders, which wgpu takes for every stage.
+    pub fn computes(&self) -> bool {
+        let limits = self.device.limits();
+        self.adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::COMPUTE_SHADERS)
+            && limits.max_storage_buffers_per_shader_stage >= 4
+            && limits.max_compute_invocations_per_workgroup >= 256
+            && limits.max_compute_workgroup_size_x >= 64
+            && limits.max_compute_workgroup_size_y >= 16
+    }
+
+    /// Whether the GPU draws into `format` (without blending).
+    pub(crate) fn draws(&self, format: wgpu::TextureFormat) -> bool {
+        let usages = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT;
+        !self.old && self.adapter.get_texture_format_features(format).allowed_usages.contains(usages)
+    }
+
+    /// What the GPU lacks that others have, each with what the canvas does without it, worded
+    /// for the log (after "this GPU"); none on most.
+    pub fn lacks(&self) -> Vec<&'static str> {
+        let mut lacks = Vec::new();
+        if !self.draws_half_floats() {
+            lacks.push(
+                "can't draw into half floats: strokes build up in half floats kept as integers beside them, and \
+                 Liquify's field is kept in integers, 3D painting's distances and light in 8 bits a channel",
+            );
+        }
+        if !self.computes() {
+            lacks.push(
+                "has no compute passes with storage buffers: strokes, smudges and wet paint are laid in fragment \
+                 passes instead",
+            );
+        }
+        lacks
     }
 }
 
@@ -526,6 +652,44 @@ mod tests {
         assert_eq!(super::backends_name(Backends::DX12), "Direct3D 12");
         assert_eq!(super::backends_name(Backends::VULKAN | Backends::GL), "Vulkan or OpenGL");
         assert_eq!(super::Gpu::backend_name(99), "backend 99");
+    }
+
+    #[test]
+    fn budget_gpus_are_told_from_their_names() {
+        use super::weak_gpu;
+        use wgpu::DeviceType::{Cpu, DiscreteGpu, IntegratedGpu};
+        for weak in [
+            "PowerVR Rogue GE8320",
+            "PowerVR B-Series BXM-8-256",
+            "Mali-G52 MC2",
+            "Mali-G57 MC2",
+            "Mali-G53 MC2",
+            "Mali-G310 MC1",
+            "Mali-T830 MP2",
+            "Adreno (TM) 610",
+            "Adreno (TM) 619",
+            "Adreno (TM) 506",
+            "Adreno (TM) 702",
+        ] {
+            assert!(weak_gpu(weak, IntegratedGpu), "{weak}");
+        }
+        for strong in [
+            "Mali-G68 MC4",
+            "Mali-G610 MC6",
+            "Mali-G78 MP14",
+            "Adreno (TM) 642L",
+            "Adreno (TM) 710",
+            "Adreno (TM) 750",
+            "Adreno (TM) 830",
+            "Samsung Xclipse 940",
+            "Intel(R) Graphics",
+            "NVIDIA GeForce RTX 5060 Laptop GPU",
+            "Apple M2",
+        ] {
+            assert!(!weak_gpu(strong, IntegratedGpu), "{strong}");
+        }
+        assert!(!weak_gpu("NVIDIA GeForce RTX 5060 Laptop GPU", DiscreteGpu));
+        assert!(weak_gpu("Microsoft Basic Render Driver", Cpu));
     }
 
     #[test]
@@ -567,6 +731,22 @@ mod tests {
         gpu.device.destroy();
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
         assert!(matches!(gpu.checked(|| 7), Err(GpuError::Lost)));
+    }
+
+    /// A device made as an old GPU's is held to what one offers, says what it lacks, and its
+    /// canvases' pipelines are made without asking for any of it.
+    #[test]
+    fn an_old_gpu_is_held_to_its_limits_and_says_what_it_lacks() {
+        let gpu = match Gpu::headless_old() {
+            Ok(g) => g,
+            Err(e) => return eprintln!("skipped: {e}"),
+        };
+        assert_eq!(gpu.max_texture_size(), 4096);
+        assert_eq!(gpu.device.limits().max_storage_buffers_per_shader_stage, 0);
+        assert!(!gpu.draws_half_floats() && !gpu.computes());
+        assert_eq!(gpu.lacks().len(), 2);
+        gpu.prepare_canvases();
+        assert_eq!(gpu.errors(), 0);
     }
 
     #[test]

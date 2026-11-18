@@ -70,7 +70,9 @@ fun TimeLapseReplay(vm: CanvasViewModel) {
     var index by remember { mutableIntStateOf(0) }
     var scrubbing by remember { mutableStateOf(false) }
     var shown by remember { mutableStateOf<ImageBitmap?>(null) }
+    // a frame that couldn't be read, and whether it is kept (then this device can't decode it)
     var unreadable by remember { mutableStateOf(false) }
+    var missing by remember { mutableStateOf(false) }
     BackHandler { vm.timeLapseReplaying = false }
     // play, frame by frame, until the end or a scrub
     LaunchedEffect(scrubbing) {
@@ -84,7 +86,12 @@ fun TimeLapseReplay(vm: CanvasViewModel) {
     LaunchedEffect(Unit) {
         snapshotFlow { index }.conflate().collect { i ->
             val image = withContext(Dispatchers.IO) { vm.timeLapseFrame(i)?.asImageBitmap() }
-            if (image != null) shown = image else unreadable = true
+            if (image != null) {
+                shown = image
+            } else if (!unreadable) {
+                unreadable = true
+                missing = withContext(Dispatchers.IO) { !vm.timeLapseFrameKept(i) }
+            }
         }
     }
     Box(
@@ -107,7 +114,8 @@ fun TimeLapseReplay(vm: CanvasViewModel) {
             // edge to edge, under the header
             Image(it, contentDescription = "Time-lapse", contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
         }
-        val empty = if (count == 0) "Nothing recorded yet" else "The time-lapse can't be read on this device".takeIf { unreadable && shown == null }
+        val why = if (missing) CanvasViewModel.TIME_LAPSE_MISSING.removeSuffix(".") else "The time-lapse can't be read on this device"
+        val empty = if (count == 0) "Nothing recorded yet" else why.takeIf { unreadable && shown == null }
         if (empty != null) Text(empty, color = Color(0xFF8E8E93), fontSize = 17.sp, modifier = Modifier.align(Alignment.Center))
         // the time into the replay, in frames past the second
         val frames = index

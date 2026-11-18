@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use egui::{Align2, Color32, Id, Order, Painter, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use procraft_core::{
-    PanelRow, PluginControl, PluginInfo, PluginPanel, PluginSource, Plugins, plugin_slider_along, plugin_slider_at,
-    plugin_slider_shown,
+    PanelRow, PluginControl, PluginInfo, PluginPanel, PluginSlider, PluginSource, Plugins, plugin_slider_along,
+    plugin_slider_at, plugin_slider_choice, plugin_slider_choices, plugin_slider_chosen, plugin_slider_shown,
 };
 
 use crate::animated_export::Animated;
@@ -496,6 +496,18 @@ pub struct Actions {
     plugin_moved: Option<(String, f32)>,
     /// The key of a plugin's action tapped, for the app to run.
     plugin_action: Option<String>,
+    /// A plugin's choice menu, and the setting it picks for.
+    plugin_menu: Menu,
+    plugin_choice: Option<PluginChoice>,
+}
+
+/// A plugin's setting whose every step has a name, as a row that opens a menu of them: the
+/// setting, the row it hangs from, and whether the row was just clicked.
+#[derive(Clone)]
+struct PluginChoice {
+    slider: PluginSlider,
+    row: Rect,
+    clicked: bool,
 }
 
 type Swipes = HashMap<(usize, usize), Swipe>;
@@ -547,7 +559,7 @@ impl Actions {
         prefs: &mut Prefs,
         backdrops: &mut Vec<f32>,
     ) -> (Rect, Option<Act>) {
-        let screen = ctx.content_rect();
+        let screen = panel::screen(ctx);
         let (left, arrow_x) = panel::place(ctx, ACTIONS_WIDTH, button.center().x);
         let top = screen.top() + pc::BAR_HEIGHT;
         let tab = *self.tab.get_or_insert(prefs.actions_tab);
@@ -619,7 +631,7 @@ impl Actions {
         let rect = Rect::from_min_size(pos2(left, top), vec2(ACTIONS_WIDTH, height));
         let mut tapped = None;
         let page = self.page;
-        egui::Area::new(Id::unique("actions panel")).fixed_pos(rect.min).order(Order::Foreground).show(ctx, |ui| {
+        panel::area(ctx, Id::unique("actions panel"), rect).show(ctx, |ui| {
             ui.allocate_rect(rect, Sense::click());
             panel::frame(ui, look, "actions frame", rect, arrow_x, backdrops);
             let body = panel::body(rect);
@@ -699,6 +711,12 @@ impl Actions {
         if self.scaling_menu(ctx, look, prefs, backdrops) {
             act = Some(Act::Prefs);
         }
+        if self.page != Page::Plugins {
+            self.plugin_menu.close();
+        }
+        if self.plugin_menu(ctx, look, prefs, backdrops) {
+            act = Some(Act::Prefs);
+        }
         if self.page != Page::Pressure {
             self.curve.close();
         }
@@ -763,7 +781,7 @@ impl Actions {
 
     /// One of its menus is open: a press elsewhere only closes it.
     pub fn modal(&self) -> bool {
-        self.scaling.is_open() || self.curve.menu_open()
+        self.scaling.is_open() || self.plugin_menu.is_open() || self.curve.menu_open()
     }
 
     /// The panel's pages go back to the tabs (as it closes).
@@ -774,6 +792,7 @@ impl Actions {
         self.tab_fade = None;
         self.shown_tab = self.tab;
         self.scaling.close();
+        self.plugin_menu.close();
         self.curve.close();
         self.swipes.clear();
     }
@@ -853,27 +872,44 @@ impl Actions {
             self.scaling.close();
             return false;
         };
-        let rect = Rect::from_min_size(pos2(row.right() - 54.0, row.top() - 8.0), vec2(254.0, 8.0 + 40.0 * 2.0 + 8.0));
-        let mut picked = None;
+        let labels = ["Relative to canvas", "Relative to screen"];
         let chosen = usize::from(prefs.brush_on_screen);
-        self.scaling.show(ctx, "brush scaling", rect, rect.min, CHOICE_MENU, backdrops, |ui| {
-            for (i, label) in ["Relative to canvas", "Relative to screen"].into_iter().enumerate() {
-                let line = Rect::from_min_size(
-                    pos2(rect.left(), rect.top() + 8.0 + 40.0 * i as f32),
-                    vec2(rect.width(), 40.0),
-                );
-                let at = pos2(line.left() + 20.0, line.center().y);
-                text(ui.painter(), at, Align2::LEFT_CENTER, label, 14.5, Weight::Regular, argb(pc::TEXT));
-                radio(ui, look, pos2(line.right() - 19.0 - 9.0, line.center().y), i == chosen);
-                if ui.interact(line, ui.scope_id().with(("scaling", i)), Sense::click()).clicked() {
-                    picked = Some(i == 1);
-                }
-            }
-        });
-        let Some(on_screen) = picked else { return false };
-        prefs.brush_on_screen = on_screen;
+        let Some(picked) = choice_menu(&mut self.scaling, ctx, look, backdrops, "brush scaling", row, &labels, chosen)
+        else {
+            return false;
+        };
+        prefs.brush_on_screen = picked == 1;
         self.scaling.close();
         true
+    }
+
+    /// A plugin's choice menu, while open: its setting's names, the chosen one marked. True when
+    /// one was picked.
+    fn plugin_menu(
+        &mut self,
+        ctx: &egui::Context,
+        look: &mut Look,
+        prefs: &mut Prefs,
+        backdrops: &mut Vec<f32>,
+    ) -> bool {
+        let Some(choice) = self.plugin_choice.as_mut() else {
+            self.plugin_menu.close();
+            return false;
+        };
+        if std::mem::take(&mut choice.clicked) {
+            self.plugin_menu.open();
+        }
+        let PluginChoice { slider, row, .. } = choice.clone();
+        let names = plugin_slider_choices(slider.clone());
+        let labels: Vec<&str> = names.iter().map(String::as_str).collect();
+        let chosen = plugin_slider_chosen(slider.clone(), slider.value) as usize;
+        let Some(picked) =
+            choice_menu(&mut self.plugin_menu, ctx, look, backdrops, "plugin choice", row, &labels, chosen)
+        else {
+            return false;
+        };
+        self.plugin_menu.close();
+        prefs.plugins.set_slider(slider.key.clone(), plugin_slider_choice(slider, picked as u32)).is_some()
     }
 
     /// A page's header: the back chevron and its title. True when Back was tapped.
@@ -924,8 +960,15 @@ impl Actions {
                         if g > 0 {
                             ui.add_space(GROUP_GAP);
                         }
-                        changed |=
-                            plugin_card(ui, plugin, g, &prefs.plugins, &mut self.plugin_moved, &mut self.plugin_action);
+                        changed |= plugin_card(
+                            ui,
+                            plugin,
+                            g,
+                            &prefs.plugins,
+                            &mut self.plugin_moved,
+                            &mut self.plugin_action,
+                            &mut self.plugin_choice,
+                        );
                     }
                     ui.add_space(13.0);
                 });
@@ -1074,6 +1117,7 @@ fn plugin_height(painter: &Painter, plugin: &PluginInfo, width: f32) -> f32 {
         .filter(|_| controls_show(plugin))
         .map(|c| match c {
             PluginControl::Switch { .. } | PluginControl::File { .. } => 1.0 + ROW_HEIGHT,
+            PluginControl::Slider { control } if !plugin_slider_choices(control.clone()).is_empty() => 1.0 + ROW_HEIGHT,
             PluginControl::Slider { .. } => 1.0 + SLIDE_HEIGHT,
         })
         .sum();
@@ -1083,8 +1127,9 @@ fn plugin_height(painter: &Painter, plugin: &PluginInfo, width: f32) -> f32 {
 
 /// `plugin` as a card: its name and tag, what it does, what is the matter with it, its controls
 /// whatever they are, its actions, and the rows that apply or remove it. A switch flips at once, a
-/// live slider goes in as it moves, another leaves where it has gone in `moved`; an action tapped
-/// leaves its key in `action`. Returns whether a value changed.
+/// live slider goes in as it moves, another leaves where it has gone in `moved`; a slider named at
+/// every step is a row whose click leaves it in `choice` for its menu (as does its row while that
+/// is open); an action tapped leaves its key in `action`. Returns whether a value changed.
 fn plugin_card(
     ui: &mut Ui,
     plugin: &PluginInfo,
@@ -1092,6 +1137,7 @@ fn plugin_card(
     plugins: &Plugins,
     moved: &mut Option<(String, f32)>,
     action: &mut Option<String>,
+    choice: &mut Option<PluginChoice>,
 ) -> bool {
     let width = ui.available_width();
     let (area, _) = ui.allocate_exact_size(vec2(width, plugin_height(ui.painter(), plugin, width)), Sense::hover());
@@ -1124,6 +1170,21 @@ fn plugin_card(
                 crate::transform::switch(ui, switch_at, control.on, &control.key);
                 if ui.interact(cell, ui.scope_id().with(("plugin switch", g, i)), Sense::click()).clicked() {
                     changed |= plugins.set_switch(control.key.clone(), !control.on);
+                }
+                y += ROW_HEIGHT;
+            }
+            PluginControl::Slider { control } if !plugin_slider_choices(control.clone()).is_empty() => {
+                // its label, the one chosen in blue; a click opens a menu of them
+                let cell = Rect::from_min_size(pos2(area.left(), y), vec2(width, ROW_HEIGHT));
+                let at = pos2(cell.left() + 16.0, cell.center().y);
+                text(&painter, at, Align2::LEFT_CENTER, &control.label, 17.0, Weight::Regular, argb(ACTIONS_ROW));
+                let right = pos2(cell.right() - 16.0, cell.center().y);
+                let shown = plugin_slider_shown(control.clone(), control.value);
+                text(&painter, right, Align2::RIGHT_CENTER, &shown, 17.0, Weight::Regular, argb(pc::ACCENT));
+                let clicked = ui.interact(cell, ui.scope_id().with(("plugin choice", g, i)), Sense::click()).clicked();
+                if clicked || choice.as_ref().is_some_and(|c| c.slider.key == control.key) {
+                    let clicked = clicked || choice.as_ref().is_some_and(|c| c.clicked);
+                    *choice = Some(PluginChoice { slider: control.clone(), row: cell, clicked });
                 }
                 y += ROW_HEIGHT;
             }
@@ -1239,7 +1300,8 @@ fn panel_row_height(painter: &Painter, row: &PanelRow, inside: f32) -> f32 {
 
 /// A plugin's panel, floating under the bar at the window's right: its title and Done, then its rows
 /// on a card as the Actions panel's are. A slider moved is told as it lets go (`held` keeps where it
-/// is meanwhile); anything else at once. Returns what was asked.
+/// is meanwhile); anything else at once. Returns what was asked. It shows at the size a plugin
+/// gives floating panels, its top right corner where it stays.
 pub fn plugin_panel(
     ctx: &egui::Context,
     look: &mut Look,
@@ -1248,18 +1310,25 @@ pub fn plugin_panel(
     backdrops: &mut Vec<f32>,
 ) -> Option<PanelTouch> {
     let screen = ctx.content_rect();
-    let top = screen.top() + pc::BAR_HEIGHT + PANEL_MARGIN;
-    let left = screen.right() - PANEL_MARGIN - PANEL_WIDTH;
+    let k = panel::part_scale(ctx, procraft_core::InterfacePart::Floating);
+    let top = screen.top() + panel::bar_shown(ctx) + PANEL_MARGIN;
+    let left = screen.right() - PANEL_MARGIN - PANEL_WIDTH * k;
     let inside = PANEL_WIDTH - 20.0;
     let painter = ctx.layer_painter(egui::LayerId::new(Order::Foreground, Id::unique("plugin panel measure")));
     let rows_height: f32 = panel.rows.iter().map(|r| panel_row_height(&painter, r, inside)).sum::<f32>()
         + panel.rows.len().saturating_sub(1) as f32;
-    let height = (52.0 + 8.0 + rows_height + 10.0).min(screen.bottom() - PANEL_MARGIN - top);
+    let height = (52.0 + 8.0 + rows_height + 10.0).min((screen.bottom() - PANEL_MARGIN - top) / k);
     let rect = Rect::from_min_size(pos2(left, top), vec2(PANEL_WIDTH, height));
     let mut asked = None;
-    egui::Area::new(Id::unique("plugin panel")).fixed_pos(rect.min).order(Order::Foreground).show(ctx, |ui| {
+    // laid out at its own size, and drawn (and touched) at its scale from its top left, kept to the
+    // window and clipped to it as the window measures it at that scale
+    let area = Id::unique("plugin panel");
+    let to_window = crate::chrome::scaled_from(rect.min, k);
+    ctx.set_transform_layer(egui::LayerId::new(Order::Foreground, area), to_window);
+    let measured = to_window.inverse().mul_rect(screen);
+    egui::Area::new(area).fixed_pos(rect.min).order(Order::Foreground).constrain_to(measured).show(ctx, |ui| {
         ui.allocate_rect(rect, Sense::click());
-        crate::panel::floating_frame(ui, look, "plugin panel frame", rect, backdrops);
+        panel::floating_frame(ui, look, "plugin panel frame", rect, k, backdrops);
         let painter = ui.painter().clone();
         let title_at = pos2(rect.left() + 24.0, rect.top() + 22.5);
         text(&painter, title_at, Align2::LEFT_TOP, &panel.title, 22.0, Weight::Bold, argb(crate::panel::PANEL_TITLE));
@@ -1410,6 +1479,39 @@ pub fn plugin_panel(
         asked = asked.or(Some(PanelTouch::Touch(row as u32, value)));
     }
     asked
+}
+
+/// A small menu hanging beside `row`: `labels`, each with a round mark, `chosen`'s ticked; 254
+/// wide, its left edge 54 in from the row's right end, kept on the screen. Returns the one picked.
+#[allow(clippy::too_many_arguments)]
+fn choice_menu(
+    menu: &mut Menu,
+    ctx: &egui::Context,
+    look: &mut Look,
+    backdrops: &mut Vec<f32>,
+    id: &str,
+    row: Rect,
+    labels: &[&str],
+    chosen: usize,
+) -> Option<usize> {
+    let height = 8.0 + 40.0 * labels.len() as f32 + 8.0;
+    let screen = panel::screen(ctx);
+    let top = (row.top() - 8.0).min(screen.bottom() - 8.0 - height).max(screen.top() + 8.0);
+    let rect = Rect::from_min_size(pos2(row.right() - 54.0, top), vec2(254.0, height));
+    let mut picked = None;
+    menu.show(ctx, id, rect, rect.min, CHOICE_MENU, backdrops, |ui| {
+        for (i, label) in labels.iter().enumerate() {
+            let line =
+                Rect::from_min_size(pos2(rect.left(), rect.top() + 8.0 + 40.0 * i as f32), vec2(rect.width(), 40.0));
+            let at = pos2(line.left() + 20.0, line.center().y);
+            text(ui.painter(), at, Align2::LEFT_CENTER, label, 14.5, Weight::Regular, argb(pc::TEXT));
+            radio(ui, look, pos2(line.right() - 19.0 - 9.0, line.center().y), i == chosen);
+            if ui.interact(line, ui.scope_id().with((id, i)), Sense::click()).clicked() {
+                picked = Some(i);
+            }
+        }
+    });
+    picked
 }
 
 /// A radio mark centred at `at`: blue with a tick when chosen, else a grey ring.
@@ -1663,6 +1765,12 @@ mod tests {
     /// What a tap at `at` on a plugin's panel of a button, a switch, a choice and a row of keys asks
     /// (the window 1200 wide).
     fn panel_tapped(at: impl Fn(Rect) -> Pos2) -> Option<PanelTouch> {
+        panel_tapped_at(1.0, at)
+    }
+
+    /// As [`panel_tapped`], floating panels shown `scale` times as big: `at` where it is laid out,
+    /// the tap where that shows.
+    fn panel_tapped_at(scale: f32, at: impl Fn(Rect) -> Pos2) -> Option<PanelTouch> {
         let (ctx, mut look) = (egui::Context::default(), Look::default());
         crate::look::install_fonts(&ctx);
         let panel = PluginPanel {
@@ -1680,8 +1788,9 @@ mod tests {
             key_press: false,
         };
         let top = pc::BAR_HEIGHT + PANEL_MARGIN;
-        let rect = Rect::from_min_size(pos2(1200.0 - PANEL_MARGIN - PANEL_WIDTH, top), vec2(PANEL_WIDTH, 300.0));
-        let point = at(rect);
+        let left = 1200.0 - PANEL_MARGIN - PANEL_WIDTH * scale;
+        let rect = Rect::from_min_size(pos2(left, top), vec2(PANEL_WIDTH, 300.0));
+        let point = crate::chrome::scaled_from(rect.min, scale) * at(rect);
         let (mut time, mut asked, mut held) = (0.0, None, None);
         let press = |pos, pressed| Event::PointerButton {
             pos,
@@ -1704,6 +1813,7 @@ mod tests {
                 ..RawInput::default()
             };
             let mut output = ctx.clone().run_ui(raw, |ui| {
+                panel::put_part_scales(ui.ctx(), [scale, 1.0, 1.0, 1.0, 1.0]);
                 asked = asked.or(plugin_panel(ui.ctx(), &mut look, &panel, &mut held, &mut Vec::new()));
             });
             output.textures_delta.clear();
@@ -1723,6 +1833,17 @@ mod tests {
         assert_eq!(panel_tapped(|r| pos2(r.left() + 60.0, r.top() + 20.0)), None, "the title does nothing");
     }
 
+    #[test]
+    fn a_plugin_panel_bigger_or_smaller_takes_its_touches_where_they_show() {
+        let row = |i: f32| move |r: Rect| pos2(r.left() + 60.0, r.top() + 60.0 + 22.0 + i * 45.0);
+        for scale in [0.5, 1.5] {
+            assert_eq!(panel_tapped_at(scale, row(1.0)), Some(PanelTouch::Touch(1, 0.0)), "{scale}");
+            assert_eq!(panel_tapped_at(scale, row(3.0)), Some(PanelTouch::Touch(3, 1.0)), "{scale}");
+            let done = |r: Rect| pos2(r.right() - 40.0, r.top() + 33.0);
+            assert_eq!(panel_tapped_at(scale, done), Some(PanelTouch::Close), "{scale}");
+        }
+    }
+
     const SHADER: &str = "fn pixel(colour: vec4<f32>, at: vec2<f32>) -> vec4<f32> { return colour; }";
     const SHADER_SHA: &str = "55f0107972b862c96fe458e60620daf4d655f0d1dfb7704a6358a20e6a4c5891";
 
@@ -1732,13 +1853,18 @@ mod tests {
 
     /// A plugin file with code in it, as small as one can be.
     fn code_file() -> Vec<u8> {
+        code_file_with(r#"[{"key":"cut","type":"slider","label":"Cut","least":0,"most":32,"step":1,"starts":0}]"#)
+    }
+
+    /// A plugin file of code with `controls`.
+    fn code_file_with(controls: &str) -> Vec<u8> {
         let module: Vec<u8> =
             (0..MODULE.len() / 2).map(|i| u8::from_str_radix(&MODULE[2 * i..2 * i + 2], 16).unwrap()).collect();
         let manifest = format!(
             r#"{{"schema":1,"id":"org.example.plugin","name":"A plugin","version":"1.0.0","holds":["hooks"],
             "publisher":{{"name":"Someone"}},"description":"Changes the app.","compat":{{"procraft":{{"interface":1}}}},
             "files":[{{"path":"plugin.wasm","sha256":"{MODULE_SHA}","size":{}}}],"permissions":[],"hooks":["position"],
-            "controls":[{{"key":"cut","type":"slider","label":"Cut","least":0,"most":32,"step":1,"starts":0}}]}}"#,
+            "controls":{controls}}}"#,
             module.len()
         );
         let mut zip = procraft_engine::zip::ZipWriter::new();
@@ -1791,6 +1917,11 @@ mod tests {
 
         /// A frame, and what it asked of the app.
         fn asked(&mut self, events: Vec<Event>) -> Option<Act> {
+            self.run(events).0
+        }
+
+        /// A frame: what it asked of the app, and what it drew.
+        fn run(&mut self, events: Vec<Event>) -> (Option<Act>, Vec<egui::epaint::ClippedShape>) {
             self.time += 1.0 / 60.0;
             let raw = RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 1600.0))),
@@ -1804,9 +1935,12 @@ mod tests {
                 if let Some(Tapped::Act(act)) = actions.plugins_page(ui, look, body(), prefs) {
                     asked = Some(act);
                 }
+                if actions.plugin_menu(&ui.ctx().clone(), look, prefs, &mut Vec::new()) {
+                    asked = Some(Act::Prefs);
+                }
             });
             output.textures_delta.clear();
-            asked
+            (asked, output.shapes)
         }
 
         /// A frame: whether it said a value changed.
@@ -1916,6 +2050,32 @@ mod tests {
         assert_eq!(page.tap_asks(at), Some(Act::ImportPlugin));
     }
 
+    #[test]
+    fn a_plugin_s_setting_named_at_every_step_is_picked_from_a_menu() {
+        let (mut page, dir) = with_store("choice");
+        let controls = r#"[{"key":"cut","type":"slider","label":"Cut","least":0,"most":2,"step":1,"starts":0,
+            "names":["Mask","Whole","Cut"]}]"#;
+        assert_eq!(page.prefs.plugins.install(code_file_with(controls)), None);
+        assert!(page.prefs.plugins.set_on("org.example.plugin".to_owned(), true));
+        page.frame(Vec::new());
+        page.frame(Vec::new());
+        // a row above Turn off and Remove, not a slider: a click opens the menu and sets nothing
+        let row = page.on_row(0, 2.0);
+        assert!(!page.tap(row));
+        assert!(page.actions.plugin_menu.is_open());
+        assert_eq!(page.slider_value(), 0.0);
+        // grown in full (it opens over a third of a second)
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        page.frame(Vec::new());
+        // the menu's third row: it hangs 8 above the row, 54 in from its right end
+        let top = row.y - ROW_HEIGHT / 2.0 - 8.0;
+        let third = pos2(body().right() - 12.0 - 54.0 + 127.0, top + 8.0 + 40.0 * 2.5);
+        assert!(page.tap(third));
+        assert_eq!(page.slider_value(), 2.0);
+        assert!(!page.actions.plugin_menu.is_open());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A page on a folder of its own, for a test's files.
     fn with_store(name: &str) -> (Page, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("procraft-actions-{name}-{}", std::process::id()));
@@ -1998,6 +2158,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Where `words` were drawn among a frame's `shapes` (their top left), if they were.
+    fn drawn(shapes: &[egui::epaint::ClippedShape], words: &str) -> Option<Pos2> {
+        fn find(shape: &egui::Shape, words: &str) -> Option<Pos2> {
+            match shape {
+                egui::Shape::Text(t) if t.galley.text() == words => Some(t.pos),
+                egui::Shape::Vec(all) => all.iter().find_map(|s| find(s, words)),
+                _ => None,
+            }
+        }
+        shapes.iter().find_map(|c| find(&c.shape, words))
+    }
+
+    #[test]
+    fn the_plugins_page_scrolls_with_a_pen_dragged_up_it_as_a_touch_or_as_the_mouse_pointer() {
+        // how far up a pen dragged 200 points up the first card takes the second card's name, the
+        // interface told it is on a touch screen first if `told` (egui drags a list only once it
+        // has had a touch, from the frame after)
+        let scrolled = |touches: bool, told: bool| {
+            let (mut page, dir) = with_store(&format!("scroll-{touches}-{told}"));
+            page.prefs.plugins = Plugins::with_bundled(dir.to_string_lossy().into_owned());
+            page.frame(Vec::new());
+            page.frame(Vec::new());
+            assert!(page.cards().last().is_some_and(|c| c.1 > body().bottom()), "the cards fit the page");
+            if told {
+                let mut raw = RawInput::default();
+                crate::input::PenTouchScreen::default().tell(&mut raw, true);
+                page.frame(raw.events);
+            }
+            let name = page.list()[1].name.clone();
+            let before = drawn(&page.run(Vec::new()).1, &name).unwrap();
+            // on the first card's words, under its name
+            let from = pos2(body().center().x, page.cards()[0].0 + 40.0);
+            let mut last = Vec::new();
+            for events in crate::input::pen_drag(from, vec2(0.0, -200.0), touches) {
+                last = page.run(events).1;
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+            before.y - drawn(&last, &name).unwrap().y
+        };
+        // the system's pen, which has touched before: its touches drag the list
+        let by_touch = scrolled(true, true);
+        assert!(by_touch > 150.0, "{by_touch}");
+        // a tablet's pen moving the mouse pointer: egui drags a list only on a touch screen
+        assert_eq!(scrolled(false, false), 0.0, "the mouse pointer alone");
+        let by_pointer = scrolled(false, true);
+        assert!(by_pointer > 150.0, "{by_pointer}");
+    }
+
     /// A card for a plugin the app has no code for: it shows, and a tap on it changes nothing.
     #[test]
     fn a_plugin_nothing_answers_to_draws_and_does_nothing() {
@@ -2059,7 +2267,7 @@ mod tests {
                 ..RawInput::default()
             };
             let mut output = ctx.clone().run_ui(raw, |ui| {
-                assert!(!plugin_card(ui, &stranger, 0, &plugins, moved, &mut None));
+                assert!(!plugin_card(ui, &stranger, 0, &plugins, moved, &mut None, &mut None));
             });
             output.textures_delta.clear();
         };

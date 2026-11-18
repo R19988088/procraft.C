@@ -382,7 +382,9 @@ fun <T> PanelPresence(
     }
     @Suppress("UNCHECKED_CAST")
     val shown = if (target != hidden) target else if (fading) last[0] as T? ?: return else return
-    Box(Modifier.fillMaxSize().onGloballyPositioned { origin = it.positionOnScreen() }) {
+    // on the screen, less what the interface keeps clear of: where the frost behind panels is
+    val corner = LocalClearance.current.corner
+    Box(Modifier.fillMaxSize().onGloballyPositioned { origin = it.positionOnScreen() - corner }) {
         content(shown, if (target == hidden) fade.value else 1f, 1f, origin)
     }
 }
@@ -437,9 +439,10 @@ fun MenuPresence(open: Boolean, origin: androidx.compose.ui.graphics.TransformOr
     var pivot by remember { mutableStateOf(Offset.Zero) }
     val a = alpha.value.coerceIn(0f, 1f)
     val k = scale.value
+    val corner = LocalClearance.current.corner
     val look = Modifier
         .onGloballyPositioned { c ->
-            pivot = c.positionOnScreen() + Offset(origin.pivotFractionX * c.size.width, origin.pivotFractionY * c.size.height)
+            pivot = c.positionOnScreen() - corner + Offset(origin.pivotFractionX * c.size.width, origin.pivotFractionY * c.size.height)
         }
         .graphicsLayer {
             this.alpha = a

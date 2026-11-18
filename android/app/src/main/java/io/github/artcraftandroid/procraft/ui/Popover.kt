@@ -42,8 +42,9 @@ val LocalBackdrops = staticCompositionLocalOf<Backdrops?> { null }
  */
 class Backdrops(private val send: (List<Float>, List<Float>) -> Unit) {
     /**
-     * Where the app's window is on the screen (pixels): not its corner in a split screen or a
-     * window of its own, so a place on the screen is made one in the window.
+     * Where the canvas's corner is on the screen (pixels): the window's (not the screen's in a split
+     * screen or a window of its own), moved in by what the interface keeps clear of, so a place on
+     * the screen is made one on the canvas.
      */
     var windowOnScreen: () -> Offset = { Offset.Zero }
 
@@ -143,6 +144,8 @@ fun Popover(
     val paint = fill ?: if (backdrops != null) Pc.PopoverFrost else Pc.PopoverFill
     val key = remember { Any() }
     val density = LocalDensity.current
+    // the canvas's corner in the window
+    val canvasCorner = LocalClearance.current.corner
     // the blur grows and fades with the panel: its body as drawn (already grown), and how much
     // it shows
     val look = LocalPanelLook.current
@@ -157,7 +160,7 @@ fun Popover(
         Modifier
     } else {
         Modifier.onGloballyPositioned { c ->
-            val at = c.positionInWindow()
+            val at = c.positionInWindow() - canvasCorner
             val k = look.scale
             val (arrowH, radius) = with(density) { Pc.ArrowHeight.toPx() to corner.toPx() }
             val (l, t, r) = Triple(if (side == ArrowSide.LEFT) arrowH else 0f, if (side == ArrowSide.TOP) arrowH else 0f, if (side == ArrowSide.RIGHT) arrowH else 0f)

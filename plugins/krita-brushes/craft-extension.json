@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.krita-brushes",
+  "name": "Krita brushes",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Krita brush presets and bundles drawn as Krita draws them: their tips, spacing, pen dynamics, textures and masking brushes, edited in a Krita brush studio of their own.",
+  "compat": { "procraft": { "interface": 4 } },
+  "permissions": ["panel", "brush.data"],
+  "hooks": [],
+  "actions": [{ "key": "studio", "label": "Krita brush studio" }],
+  "brush_engines": [
+    { "key": "krita", "label": "Krita brushes", "accepts": ["kpp", "bundle", "myb"], "studio": "studio" }
+  ]
+}

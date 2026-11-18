@@ -77,6 +77,8 @@ import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.TextRenderer
 import io.github.artcraftandroid.procraft.core.TextAlignment
 import io.github.artcraftandroid.procraft.core.TextInfo
+import io.github.artcraftandroid.procraft.core.TextRunInfo
+import io.github.artcraftandroid.procraft.core.TextStyleChange
 import kotlin.math.roundToInt
 
 private val SheetFill get() = if (Pc.light) Color(0xFFF3F6F7) else Color(0xFF535353)
@@ -115,6 +117,14 @@ fun BoxScope.TextEditor(vm: CanvasViewModel) {
     val focus = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     val box by rememberUpdatedState(windowBox(vm, info))
+    // a touch on the text brings the keyboard back if it was put away; not while the style sheet
+    // has its place: the sheet stays (its keyboard button swaps them back), never under the keyboard
+    fun touchedText() {
+        if (!textTouchBringsKeyboard(vm.textStyleOpen)) return
+        vm.textKeyboard = true
+        focus.requestFocus()
+        keyboard?.show()
+    }
     // a tap outside the box ends the edit, keeping it; dragging inside it moves the text, and
     // dragging a side's dot (past the touch slop) moves that side: the box's width
     Box(Modifier.fillMaxSize().pointerInput(Unit) {
@@ -133,12 +143,8 @@ fun BoxScope.TextEditor(vm: CanvasViewModel) {
                     // after the move: a finger's lift can carry its last one
                     if (!c.pressed) break
                 }
-                if (dragging) vm.endTextSide() else {
-                    // a tap on the dot is a tap on the text
-                    vm.textKeyboard = true
-                    focus.requestFocus()
-                    keyboard?.show()
-                }
+                // a tap on the dot is a tap on the text
+                if (dragging) vm.endTextSide() else touchedText()
                 return@awaitEachGesture
             }
             if (!box.contains(down.position)) {
@@ -167,10 +173,7 @@ fun BoxScope.TextEditor(vm: CanvasViewModel) {
                 }
                 return@awaitEachGesture
             }
-            // a touch on the text brings the keyboard back if it was put away
-            vm.textKeyboard = true
-            focus.requestFocus()
-            keyboard?.show()
+            touchedText()
             var last = down.position
             while (true) {
                 val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
@@ -182,13 +185,16 @@ fun BoxScope.TextEditor(vm: CanvasViewModel) {
         }
     })
     TextBox(vm, info)
-    // undo and redo are the app's, not the field's (a width change goes back a step at a time)
+    // undo and redo are the app's, not the field's (a width change goes back a step at a time);
+    // Ctrl+Y redoes too, as on the canvas
     BasicTextField(
         vm.textField, vm::changeTextField,
         Modifier.size(1.dp).alpha(0f).focusRequester(focus).onPreviewKeyEvent { e ->
-            val z = e.type == KeyEventType.KeyDown && e.key == Key.Z && (e.isCtrlPressed || e.isMetaPressed)
-            if (z) { if (e.isShiftPressed) vm.redo() else vm.undo() }
-            z
+            val command = e.type == KeyEventType.KeyDown && (e.isCtrlPressed || e.isMetaPressed)
+            val z = command && e.key == Key.Z
+            val y = command && e.key == Key.Y && !e.isShiftPressed
+            if (z && !e.isShiftPressed) vm.undo() else if (z || y) vm.redo()
+            z || y
         },
     )
     LaunchedEffect(vm.textStyleOpen, vm.textKeyboard) {
@@ -204,6 +210,12 @@ fun BoxScope.TextEditor(vm: CanvasViewModel) {
         if (vm.textStyleOpen) TextStyleSheet(vm, info) else if (reach > 0) TextBar(vm)
     }
 }
+
+/**
+ * Whether a touch on the text being edited brings the on-screen keyboard up: not while the style
+ * sheet is open, as the sheet has the keyboard's place (its keyboard button swaps them back).
+ */
+internal fun textTouchBringsKeyboard(styleOpen: Boolean): Boolean = !styleOpen
 
 /** Less of the window than this share between its bottom and what shows above is a system bar, not a keyboard. */
 private const val KEYBOARD_LEAST = 0.15f
@@ -436,13 +448,21 @@ private fun TextStyleSheet(vm: CanvasViewModel, info: TextInfo) {
 /** Below this width the sheet shows its cards in two pages. */
 private val WIDE_SHEET = 900.dp
 
+/** The look the style sheet shows: the letters chosen's, else the text's own. */
+private fun shownLook(vm: CanvasViewModel, info: TextInfo): TextRunInfo = vm.textLook ?: TextRunInfo(
+    len = 0u, font = info.font, style = info.style, size = info.size, kerning = info.kerning, tracking = info.tracking,
+    baseline = info.baseline, opacity = info.opacity, underline = info.underline, outline = info.outline,
+    r = info.r, g = info.g, b = info.b,
+)
+
 @Composable
 private fun FontCard(vm: CanvasViewModel, info: TextInfo, modifier: Modifier) {
+    val look = shownLook(vm, info)
     // Font and Style are one card split by a line: square where they meet
     Card("Font", modifier, RoundedCornerShape(topStart = CardCorner, bottomStart = CardCorner)) {
         LazyColumn(Modifier.padding(start = 10.dp, end = 17.dp), contentPadding = PaddingValues(top = 6.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
             items(TextRenderer.families) { f ->
-                Cell(f.name, f.family == info.font, TextRenderer.typeface(f.family, "Regular")) { vm.changeText { it.copy(font = f.family) } }
+                Cell(f.name, f.family == look.font, TextRenderer.typeface(f.family, "Regular")) { vm.restyleText(TextStyleChange.Font(f.family)) }
             }
         }
     }
@@ -450,10 +470,11 @@ private fun FontCard(vm: CanvasViewModel, info: TextInfo, modifier: Modifier) {
 
 @Composable
 private fun StyleCard(vm: CanvasViewModel, info: TextInfo, modifier: Modifier) {
+    val look = shownLook(vm, info)
     Card("Style", modifier, RoundedCornerShape(topEnd = CardCorner, bottomEnd = CardCorner)) {
         LazyColumn(Modifier.padding(start = 10.dp, end = 17.dp), contentPadding = PaddingValues(top = 6.dp), verticalArrangement = Arrangement.spacedBy(9.dp)) {
             items(TextRenderer.styles) { st ->
-                Cell(st.name, st.name == info.style, TextRenderer.typeface(info.font, st.name)) { vm.changeText { it.copy(style = st.name) } }
+                Cell(st.name, st.name == look.style, TextRenderer.typeface(look.font, st.name)) { vm.restyleText(TextStyleChange.Style(st.name)) }
             }
         }
     }
@@ -463,14 +484,16 @@ private fun StyleCard(vm: CanvasViewModel, info: TextInfo, modifier: Modifier) {
 private fun DesignCard(vm: CanvasViewModel, info: TextInfo, modifier: Modifier) {
     val dpi = vm.canvasDpi()
     val pt = { px: Float -> px * 72f / dpi }
+    // the letters chosen's, but the leading the whole text's
+    val look = shownLook(vm, info)
     Card("Design", modifier) {
         Column(Modifier.padding(horizontal = 4.dp)) {
-            DesignRow("Size", sizeToSlider(info.size), "%.1fpt".format(pt(info.size)), fromMiddle = false) { v -> vm.changeText { it.copy(size = sliderToSize(v)) } }
-            DesignRow("Kerning", info.kerning / 2f + 0.5f, "%.1f%%".format(info.kerning * 100f)) { v -> vm.changeText { it.copy(kerning = v * 2f - 1f) } }
-            DesignRow("Tracking", info.tracking / 2f + 0.5f, "%.1f%%".format(info.tracking * 100f)) { v -> vm.changeText { it.copy(tracking = v * 2f - 1f) } }
+            DesignRow("Size", sizeToSlider(look.size), "%.1fpt".format(pt(look.size)), fromMiddle = false) { v -> vm.restyleText(TextStyleChange.Size(sliderToSize(v))) }
+            DesignRow("Kerning", look.kerning / 2f + 0.5f, "%.1f%%".format(look.kerning * 100f)) { v -> vm.restyleText(TextStyleChange.Kerning(v * 2f - 1f)) }
+            DesignRow("Tracking", look.tracking / 2f + 0.5f, "%.1f%%".format(look.tracking * 100f)) { v -> vm.restyleText(TextStyleChange.Tracking(v * 2f - 1f)) }
             DesignRow("Leading", info.leading / 2f + 0.5f, "${pt(info.leading * info.size).roundToInt()}pt") { v -> vm.changeText { it.copy(leading = v * 2f - 1f) } }
-            DesignRow("Baseline", info.baseline / 2f + 0.5f, "${pt(info.baseline * info.size).roundToInt()}pt") { v -> vm.changeText { it.copy(baseline = v * 2f - 1f) } }
-            DesignRow("Opacity", info.opacity, "%.1f%%".format(info.opacity * 100f), fromMiddle = false) { v -> vm.changeText { it.copy(opacity = v) } }
+            DesignRow("Baseline", look.baseline / 2f + 0.5f, "${pt(look.baseline * look.size).roundToInt()}pt") { v -> vm.restyleText(TextStyleChange.Baseline(v * 2f - 1f)) }
+            DesignRow("Opacity", look.opacity, "%.1f%%".format(look.opacity * 100f), fromMiddle = false) { v -> vm.restyleText(TextStyleChange.Opacity(v)) }
         }
     }
 }
@@ -487,6 +510,8 @@ private fun AttributesCard(vm: CanvasViewModel, info: TextInfo, modifier: Modifi
     )
     // the buttons 36 tall, but the alignments 35 when two by two
     val gridTall = if (wide) 36.dp else 35.dp
+    // underline and outline the letters chosen's (on for all of them unless all have it already)
+    val look = shownLook(vm, info)
     Card("Attributes", modifier) {
         Column(
             Modifier.padding(start = if (wide) 10.dp else 6.5.dp, end = if (wide) 10.dp else 6.5.dp, top = if (wide) 6.dp else 7.dp),
@@ -499,8 +524,8 @@ private fun AttributesCard(vm: CanvasViewModel, info: TextInfo, modifier: Modifi
             }
             if (!wide) Spacer(Modifier.height(13.dp))
             val looks: @Composable (Modifier, Modifier, Modifier) -> Unit = { u, o, v ->
-                Attribute(PcIcons.TextUnderline, "Underline", info.underline, u, 38.dp, 36.dp) { vm.changeText { it.copy(underline = !it.underline) } }
-                Attribute(PcIcons.TextOutline, "Outline", info.outline, o, 38.dp, 36.dp) { vm.changeText { it.copy(outline = !it.outline) } }
+                Attribute(PcIcons.TextUnderline, "Underline", look.underline, u, 38.dp, 36.dp) { vm.restyleText(TextStyleChange.Underline(!look.underline)) }
+                Attribute(PcIcons.TextOutline, "Outline", look.outline, o, 38.dp, 36.dp) { vm.restyleText(TextStyleChange.Outline(!look.outline)) }
                 Attribute(PcIcons.TextVertical, "Vertical", info.vertical, v, 41.dp, 36.dp) { vm.changeText { it.copy(vertical = !it.vertical) } }
             }
             if (wide) {

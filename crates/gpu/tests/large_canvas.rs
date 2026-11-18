@@ -1,8 +1,9 @@
 //! What a large canvas does on this device's GPU, to run on a tablet: its limits and memory, then
 //! a smudge, wet paint with a grain and both ways a crop takes a layer across, at the sides in
-//! `LARGE_SIDES` (comma separated; 2048, 2300 and 3000 if unset), on `LARGE_LAYERS` painted layers
-//! (5 if unset). Built with `cargo ndk -t arm64-v8a test -p procraft-gpu --test large_canvas
-//! --no-run`, pushed to /data/local/tmp and run with `--ignored --nocapture --test-threads=1`.
+//! `LARGE_SIDES` (comma separated; 2048, 2300 and 3000 if unset; 7200 is past what a tablet's
+//! binding holds), on `LARGE_LAYERS` painted layers (5 if unset). Built with `cargo ndk -t
+//! arm64-v8a test -p procraft-gpu --test large_canvas --no-run`, pushed to /data/local/tmp and run
+//! with `--ignored --nocapture --test-threads=1`.
 //!
 //! Keep it well under the device's free memory: a process started from `adb shell` can't be
 //! killed and GPU memory is charged to no process, so going past it panics the kernel (2300 with
@@ -73,8 +74,8 @@ fn a_large_canvas_smudges_and_crops_with_no_gpu_error() {
     for side in number_list("LARGE_SIDES", &[2048, 2300, 3000]) {
         let row = u64::from((side * 4).div_ceil(256) * 256);
         let layer_bytes = row * u64::from(side);
-        // what each binds at most, as a stroke's own buffers
-        for (name, style, bound) in [("smudge", smudge, layer_bytes), ("wet paint", wet, 2 * layer_bytes)] {
+        // past what a binding holds or not, the stroke works on its layer a part at a time
+        for (name, style) in [("smudge", smudge), ("wet paint", wet)] {
             let (mut doc, mut canvas) = painted(&gpu, side, layers);
             let id = doc.current();
             let before = canvas.read_layer(&gpu, id).unwrap();
@@ -89,11 +90,11 @@ fn a_large_canvas_smudges_and_crops_with_no_gpu_error() {
             canvas.render(&gpu, &mut doc, None);
             let refused = canvas.take_smudge_refused();
             let changed = canvas.read_layer(&gpu, id).unwrap() != before;
-            println!("{side} {name}: refused {refused}, changed {changed}, {during}");
+            let past = layer_bytes > limits.max_storage_buffer_binding_size;
+            println!("{side} {name}: past a binding {past}, refused {refused}, changed {changed}, {during}");
             assert_eq!(gpu.errors(), 0, "{side} {name}");
             assert!(!gpu.is_lost(), "{side} {name}");
-            assert_eq!(refused, bound > limits.max_storage_buffer_binding_size, "{side} {name}");
-            assert_eq!(changed, !refused, "{side} {name}");
+            assert!(!refused && changed, "{side} {name}");
         }
         let (doc, canvas) = painted(&gpu, side, layers);
         let id = doc.current();

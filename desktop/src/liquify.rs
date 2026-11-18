@@ -10,7 +10,8 @@ use procraft_core::{AdjustShown, CanvasSession, LiquifyKind};
 use crate::icons::{self, Icon};
 use crate::look::{Look, Shade, Themed, Weight, argb, pc, text};
 use crate::transform::{
-    MENU_ARROW, MENU_GROUP, MENU_LINE, MENU_TEXT, MENU_WIDTH, menu_slider, menu_title, popover_frame,
+    MENU_ARROW, MENU_GROUP, MENU_LINE, MENU_TEXT, MENU_WIDTH, menu_slider, menu_slider_let_go, menu_title,
+    popover_frame,
 };
 
 const PANEL_FILL: Themed = Themed(0xF71E1E1E, 0xF7F1F1F1);
@@ -264,8 +265,13 @@ impl Liquify {
             let row = Rect::from_min_size(group.min + vec2(0.0, 8.0), vec2(group.width(), 59.0));
             let amount = shown.liquify_amount;
             let label = percent(amount, None);
-            if let Some(v) = menu_slider(ui, row, "Amount", amount, &label) {
+            let (v, let_go) = menu_slider_let_go(ui, row, "Amount", amount, &label);
+            if let Some(v) = v {
                 session.adjustment_liquify_amount(v);
+            }
+            // each drag its own undo step
+            if let_go {
+                session.adjustment_liquify_amount_end();
             }
         });
     }

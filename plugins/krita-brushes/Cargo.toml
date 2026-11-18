@@ -1,0 +1,23 @@
+[package]
+name = "krita-brushes"
+version = "1.0.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "A plugin for ProCraft: Krita's brush presets and bundles, drawn as Krita draws them"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# In the app, the app unpacks (its utilities); built for anything else, this does.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+miniz_oxide = "0.8"
+
+# Not a member of the app's workspace, and linked into nothing: it builds to a module of its own.
+[workspace]
+
+[profile.release]
+opt-level = 3
+lto = true
+panic = "abort"
+strip = true

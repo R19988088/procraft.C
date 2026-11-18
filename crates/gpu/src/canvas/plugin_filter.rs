@@ -35,11 +35,15 @@ use crate::{Gpu, GpuError};
 
 const TEMPLATE: &str = include_str!("../shaders/plugin_filter_1.wgsl");
 const PICTURE_TEMPLATE: &str = include_str!("../shaders/plugin_picture_2.wgsl");
+const PICTURE_TEMPLATE_6: &str = include_str!("../shaders/plugin_picture_6.wgsl");
 
 /// The most a filter's text may be, in bytes.
 const MOST_TEXT: usize = 64 << 10;
 /// How many controls a filter may have, and where each value is in the uniform.
 const VALUE_PLACES: [&str; 8] = ["a.x", "a.y", "a.z", "a.w", "b.x", "b.y", "b.z", "b.w"];
+/// Where each value of a picture's (interface 6) is in its uniform: its controls, up to sixteen.
+pub(super) const PICTURE_PLACES: [&str; 16] =
+    ["a.x", "a.y", "a.z", "a.w", "b.x", "b.y", "b.z", "b.w", "c.x", "c.y", "c.z", "c.w", "d.x", "d.y", "d.z", "d.w"];
 /// What a pixel may spend in loops, in roughly simple operations, and in code that isn't in one.
 const BUDGET: u64 = 1 << 16;
 const MOST_STRAIGHT: u64 = 1 << 16;
@@ -81,14 +85,26 @@ pub(super) struct Kind {
     given: &'static [&'static str],
     /// The one function it must have.
     entry: &'static str,
+    /// Where the values it is given are in its uniform (none: it is given none).
+    places: &'static [&'static str],
 }
 
-const FILTER: Kind = Kind { template: TEMPLATE, own_globals: &OWN_GLOBALS, given: &GIVEN, entry: PIXEL };
+const FILTER: Kind =
+    Kind { template: TEMPLATE, own_globals: &OWN_GLOBALS, given: &GIVEN, entry: PIXEL, places: &VALUE_PLACES };
 pub(super) const PICTURE: Kind = Kind {
     template: PICTURE_TEMPLATE,
     own_globals: &["host_u", "host_budget"],
     given: &["hue", "picture_size"],
     entry: "picture",
+    places: &[],
+};
+/// A picture written to interface 6: given its plugin's controls as `v`, as a filter is.
+pub(super) const PICTURE_6: Kind = Kind {
+    template: PICTURE_TEMPLATE_6,
+    own_globals: &["host_u", "host_budget", "v"],
+    given: &["hue", "picture_size"],
+    entry: "picture",
+    places: &PICTURE_PLACES,
 };
 
 /// A filter's code that has held up, with what its loops pay written in. Nothing has run.
@@ -131,13 +147,14 @@ pub fn read_filter(text: &str, keys: &[String]) -> Result<FilterCode, String> {
     on_a_big_stack(move || read(&text, &keys, &FILTER)).unwrap_or_else(|| Err("reading it panicked".to_owned()))
 }
 
-/// Reads `text`, code of `kind` with no controls, as [`read_filter`] reads a filter's.
-pub(super) fn read_kind(text: &str, kind: &'static Kind) -> Result<FilterCode, String> {
+/// Reads `text`, code of `kind` given the values of `keys` (none for a kind given none), as
+/// [`read_filter`] reads a filter's.
+pub(super) fn read_kind(text: &str, kind: &'static Kind, keys: &[String]) -> Result<FilterCode, String> {
     if text.len() > MOST_TEXT {
         return Err("too long".to_owned());
     }
-    let text = text.to_owned();
-    on_a_big_stack(move || read(&text, &[], kind)).unwrap_or_else(|| Err("reading it panicked".to_owned()))
+    let (text, keys) = (text.to_owned(), keys.to_vec());
+    on_a_big_stack(move || read(&text, &keys, kind)).unwrap_or_else(|| Err("reading it panicked".to_owned()))
 }
 
 /// Whether `key` is a plain field name; what isn't must not go into the template.
@@ -151,7 +168,7 @@ fn plain_key(key: &str) -> bool {
 /// for the text to change the meaning of.
 fn joined(text: &str, keys: &[String], kind: &Kind) -> String {
     let fields: String = keys.iter().map(|key| format!("{key}: f32, ")).collect();
-    let read: Vec<String> = VALUE_PLACES.iter().take(keys.len()).map(|place| format!("host_u.{place}")).collect();
+    let read: Vec<String> = kind.places.iter().take(keys.len()).map(|place| format!("host_u.{place}")).collect();
     let (fields, read) =
         if keys.is_empty() { ("host_none: f32,".to_owned(), "0.0".to_owned()) } else { (fields, read.join(", ")) };
     let template = kind
@@ -227,7 +244,7 @@ fn declared(text: &str) -> Vec<&str> {
 
 /// `text` as code, checked, and what its loops pay written in.
 fn read(text: &str, keys: &[String], kind: &Kind) -> Result<FilterCode, String> {
-    if keys.len() > VALUE_PLACES.len() || !keys.iter().all(|key| plain_key(key)) {
+    if keys.len() > kind.places.len() || !keys.iter().all(|key| plain_key(key)) {
         return Err("its controls can't be its values".to_owned());
     }
     // what its text declares reaches the whole module, the template too: a function of its own

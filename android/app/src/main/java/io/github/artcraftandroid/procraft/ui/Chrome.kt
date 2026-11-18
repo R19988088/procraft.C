@@ -45,6 +45,7 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
@@ -54,7 +55,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.Panel
+import io.github.artcraftandroid.procraft.core.SideSliderTap
 import io.github.artcraftandroid.procraft.core.ToolKind
+import io.github.artcraftandroid.procraft.core.sideSliderDragShare
+import io.github.artcraftandroid.procraft.core.sideSliderTap
 
 private val SliderLeft = 5.dp
 private val SizeTrackTop = 6.dp
@@ -87,7 +91,8 @@ fun TopBar(vm: CanvasViewModel, modifier: Modifier = Modifier) {
             }
             ActionButton(PcIcons.Actions, "Actions", fit.button, selected = vm.panel == Panel.ACTIONS) { vm.toggle(Panel.ACTIONS) }
             ActionButton(PcIcons.Adjustments, "Adjustments", fit.button, selected = vm.panel == Panel.ADJUSTMENTS || vm.adjustment != null || vm.opacityLayer != null || vm.recoloring) { vm.adjustmentsPressed() }
-            ActionButton(PcIcons.Selection, "Selection", fit.button, selected = vm.selecting, glyph = 33.dp) { vm.toggleSelecting() }
+            // lit while the selection tool is open, or while something is selected
+            ActionButton(PcIcons.Selection, "Selection", fit.button, selected = vm.selecting || vm.hasSelection, glyph = 33.dp) { vm.toggleSelecting() }
             ActionButton(PcIcons.Transform, "Transform", fit.button, selected = vm.transforming, glyph = 44.dp) { vm.toggleTransform() }
         }
         // the layers and colour panels take the highlight from the current tool while open
@@ -343,9 +348,11 @@ private fun SliderPanel(vm: CanvasViewModel, which: CanvasViewModel.SliderPanel,
 
 /**
  * An upright slider moved by dragging anywhere on it: the thumb follows the finger (relative,
- * not jump-to-touch), 1 at the top. Moved, its [panel] shows while it moves; held still, it stays up.
- * Its [notches] (saved values) show as marks on the track; a value dragged near one is pulled onto
- * it, and a tap on one goes there. On a notch, the thumb shows a blue bar.
+ * not jump-to-touch), finer the farther out to the side the finger goes, 1 at the top. Moved, its
+ * [panel] shows while it moves; held still or its thumb tapped, it stays up; a tap elsewhere on
+ * the track takes the thumb there. Its [notches] (saved values) show as marks on the track; a
+ * value dragged near one is pulled onto it, and a tap on one goes there. On a notch, the thumb
+ * shows a blue bar.
  */
 @Composable
 fun BrushSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Modifier, panel: SliderPanelHooks? = null, notches: List<Float> = emptyList(), height: Dp = Pc.SliderHeight) {
@@ -384,7 +391,9 @@ fun BrushSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Mo
                             if (!moved) hooks?.show(false)
                             moved = true
                             last = c.position.y
-                            raw = (raw - dy / travel).coerceIn(0f, 1f)
+                            // the farther out to the side the finger is, the finer the thumb follows
+                            val across = (c.position.x - size.width / 2f).toDp().value
+                            raw = (raw - dy / travel * sideSliderDragShare(across)).coerceIn(0f, 1f)
                             change(near(raw) ?: raw)
                         }
                         c.consume()
@@ -394,11 +403,15 @@ fun BrushSlider(value: Float, onChange: (Float) -> Unit, modifier: Modifier = Mo
                         while (!lifted && !moved) lifted = !follow()
                     }
                     if (!lifted && !moved) hooks?.show(true)
-                    // a tap on a notch's mark goes to it
+                    // a tap on the thumb opens the panel and keeps it up; elsewhere the thumb goes
+                    // there (or onto a notch's mark there)
                     if (lifted && !moved && !taken) {
                         val inset = Pc.ThumbInset.toPx()
                         val at = 1f - (down.position.y - inset - Pc.ThumbHeight.toPx() / 2f) / travel
-                        near(at, Pc.ThumbHeight.toPx() / 2f / travel)?.let { change(it) }
+                        when (val tap = sideSliderTap(at, current, Pc.ThumbHeight.toPx() / 2f / travel, marks)) {
+                            is SideSliderTap.Panel -> hooks?.show(true)
+                            is SideSliderTap.Jump -> change(tap.value)
+                        }
                     }
                     while (!lifted) lifted = !follow()
                     if (taken) hooks?.show(true) else if (moved) hooks?.hide()
@@ -462,7 +475,8 @@ private val NotchMark = Color(0x1AFFFFFF)
 
 /**
  * The brush's outline where the pen paints or hovers, in the brush's own shape (the round tip's a
- * circle): a thin dark line with a light edge, or in the colour painted with.
+ * circle): a thin dark line with a light edge, or in the colour painted with. Hovering, the brush's
+ * stamp fills it in the colour, as strong as the brush paints, if its Hover fill says so.
  */
 @Composable
 fun BrushCursor(vm: CanvasViewModel) {
@@ -473,13 +487,30 @@ fun BrushCursor(vm: CanvasViewModel) {
     val style = vm.cursorStyle
     val paint = CanvasSpace.color(vm.colorRgb())
     val shape = vm.cursorShape
+    val turn = vm.cursorTurn
+    val fill = vm.cursorFill.takeIf { vm.cursorHovering }
+    val strength = vm.opacity.coerceIn(0f, 1f)
     androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
-        // its loops across the brush's diameter, about where it is
+        // the stamp under the outline, across the brush's diameter, turned as the stamps are
+        if (fill != null) {
+            rotate(Math.toDegrees(turn.toDouble()).toFloat(), pivot = at) {
+                drawImage(
+                    fill,
+                    dstOffset = androidx.compose.ui.unit.IntOffset((at.x - r).roundToInt(), (at.y - r).roundToInt()),
+                    dstSize = androidx.compose.ui.unit.IntSize((2f * r).roundToInt(), (2f * r).roundToInt()),
+                    alpha = strength,
+                    colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(paint),
+                )
+            }
+        }
+        // its loops across the brush's diameter, about where it is, turned as the stamps are
+        val (sin, cos) = kotlin.math.sin(turn) to kotlin.math.cos(turn)
         val paths = shape.map { ring ->
             Path().apply {
                 for (i in 0 until ring.size / 2) {
-                    val x = at.x + ring[i * 2] * r * 2f
-                    val y = at.y + ring[i * 2 + 1] * r * 2f
+                    val (dx, dy) = ring[i * 2] to ring[i * 2 + 1]
+                    val x = at.x + (dx * cos - dy * sin) * r * 2f
+                    val y = at.y + (dx * sin + dy * cos) * r * 2f
                     if (i == 0) moveTo(x, y) else lineTo(x, y)
                 }
                 close()

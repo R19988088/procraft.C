@@ -432,10 +432,11 @@ impl CanvasSession {
         }
         let Some(before) = st.current_pixels() else { return false };
         let within = st.reach_selection();
-        // measured on every layer seen while a plugin says so, else on the reference layer when
-        // another layer is it
+        // measured on every layer seen while a plugin says so (as they are over no background, as
+        // a layer's own pixels are, so a faint line stops it there as it does on its own layer),
+        // else on the reference layer when another layer is it
         let elsewhere = if st.hooks.as_ref().is_some_and(|hooks| hooks.fill_all_layers()) {
-            st.composite_pixels()
+            st.seen_layers_pixels()
         } else {
             st.doc.reference().filter(|&r| r != current).and_then(|r| st.layer_pixels(r))
         };

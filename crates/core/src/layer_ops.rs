@@ -18,14 +18,15 @@ impl State {
         canvas.read_layer(gpu, id).ok()
     }
 
-    /// The canvas as composited (premultiplied RGBA8, rows top to bottom): every layer as it is
-    /// seen, everything queued drawn first.
-    pub(crate) fn composite_pixels(&mut self) -> Option<Vec<u8>> {
+    /// Every layer as it is seen, composited without the background (premultiplied RGBA8, rows
+    /// top to bottom; see-through where no layer is painted), everything queued drawn first: what
+    /// ColorDrop goes by across the layers, as it goes by one layer's own pixels.
+    pub(crate) fn seen_layers_pixels(&mut self) -> Option<Vec<u8>> {
         self.finish_stroke();
         self.settle();
         self.flush();
         let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) else { return None };
-        canvas.read_composite_without(gpu, &mut self.doc, &[]).ok()
+        canvas.read_composite_without_background(gpu, &mut self.doc).ok()
     }
 
     /// A layer's pixels inside `rect` (rows top to bottom), everything queued drawn first.
