@@ -11,14 +11,18 @@ use procraft_engine::environment::Equirect;
 
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const ALBEDO: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-/// A projected stroke's pixels, as a canvas keeps a stroke.
+/// A projected stroke's pixels, as a canvas keeps a stroke (on a GPU that can't draw into half
+/// floats, 8 bits a channel: it is kept by a blend by max, never built up).
 const STROKE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// What a layer is drawn into as the camera sees it: as a layer is held.
 const SEEN: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// What coverage carried onto a texture is read back from.
 const COVERAGE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-/// Each screen pixel's distance to the nearest surface.
+/// Each screen pixel's distance to the nearest surface (on a GPU that can't draw into floats, a
+/// float's bytes in 8 bits a channel: see `project.wgsl`).
 const DISTANCE: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
+/// How far the distances start: none nearer than this.
+const FAR: f32 = 1e30;
 /// Where a part's triangles lie in its texture.
 const ISLANDS: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 /// A stroke's grain in a part's texture's space: one grey per texel.
@@ -328,6 +332,8 @@ pub struct MeshView {
     mipper: Option<Mipper>,
     /// What finds which tiles of a texture a stroke reaches.
     footprint: Option<Footprint>,
+    /// The same in a fragment pass, on a GPU without compute passes.
+    footprint_marks: Option<FootprintMarks>,
     /// The environment it is lit by, and the layout and samplers to bind it with.
     lighting: Lighting,
     view_layout: wgpu::BindGroupLayout,
@@ -539,6 +545,9 @@ impl StudioDraw {
 /// What carrying strokes onto the model takes: its pipelines, and the nearest surface's distance
 /// for each screen pixel (with a depth buffer to find it), the screen's size.
 struct Projector {
+    /// What projected strokes and the distances are drawn in here (see [`STROKE`], [`DISTANCE`]).
+    stroke_format: wgpu::TextureFormat,
+    distance_format: wgpu::TextureFormat,
     distance_pipeline: wgpu::RenderPipeline,
     project_pipeline: wgpu::RenderPipeline,
     picture_pipeline: wgpu::RenderPipeline,
@@ -775,7 +784,10 @@ impl MeshView {
             fragment: Some(wgpu::FragmentState {
                 module: &module,
                 entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &crate::lighting::radiance_constants(gpu),
+                    ..Default::default()
+                },
                 targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
             }),
             multiview_mask: None,
@@ -800,6 +812,7 @@ impl MeshView {
             projector: None,
             mipper: None,
             footprint: None,
+            footprint_marks: None,
             lighting,
             view_layout,
             cube_sampler,
@@ -1953,7 +1966,7 @@ impl MeshView {
             };
             let distance = make(
                 "screen distance",
-                DISTANCE,
+                projector.distance_format,
                 wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             );
             let depth = make("screen depth", DEPTH, wgpu::TextureUsages::RENDER_ATTACHMENT);
@@ -2005,7 +2018,13 @@ impl MeshView {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 1e30, g: 0.0, b: 0.0, a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(if projector.distance_format == DISTANCE {
+                            wgpu::Color { r: f64::from(FAR), g: 0.0, b: 0.0, a: 1.0 }
+                        } else {
+                            // the float's bytes, as the shader keeps them
+                            let [r, g, b, a] = FAR.to_bits().to_le_bytes().map(|v| f64::from(v) / 255.0);
+                            wgpu::Color { r, g, b, a }
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -2200,11 +2219,16 @@ impl MeshView {
         }
         let tile = (side / FOOTPRINT_TILES).max(8).next_multiple_of(8);
         let across = side.div_ceil(tile);
-        let f = self.footprint.get_or_insert_with(|| Footprint::new(gpu));
         // from a multiple of 8 each way, so each group of the shader's lies within one tile
         let (ox, oy) = ((reach.x0.max(0) as u32) & !7, (reach.y0.max(0) as u32) & !7);
         let (w, h) = ((reach.x1.max(0) as u32).saturating_sub(ox), (reach.y1.max(0) as u32).saturating_sub(oy));
         let region = [ox, oy, w, h, tile, across, 0, 0];
+        if !gpu.computes() {
+            let f = self.footprint_marks.get_or_insert_with(|| FootprintMarks::new(gpu));
+            let words = f.marked(gpu, stroke, &region, across)?;
+            return Some(tile_rects(&words, across, tile, side));
+        }
+        let f = self.footprint.get_or_insert_with(|| Footprint::new(gpu));
         gpu.queue.write_buffer(&f.uniform, 0, bytemuck::cast_slice(&region));
         let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("stroke footprint"),
@@ -2397,7 +2421,7 @@ impl MeshView {
             (texture, view)
         };
         if projector.scratch.is_none() {
-            projector.scratch = Some(make_square("projected stroke", STROKE));
+            projector.scratch = Some(make_square("projected stroke", projector.stroke_format));
         }
         if projector.islands.len() < self.parts.len() {
             projector.islands.resize_with(self.parts.len(), || None);
@@ -2552,6 +2576,181 @@ impl Footprint {
             wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         );
         Footprint { pipeline, layout, uniform, marks, read }
+    }
+}
+
+/// What finds a stroke's footprint on a GPU without compute passes: a fragment a tile drawing it
+/// marked or not (see `footprint_frag.wgsl`), and where the marks are read back.
+struct FootprintMarks {
+    pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    uniform: wgpu::Buffer,
+    marks: wgpu::Texture,
+    read: wgpu::Buffer,
+}
+
+/// A row of the marks read back takes this many bytes (a copy's rows are 256-byte aligned).
+const MARKS_ROW: u32 = 256;
+
+impl FootprintMarks {
+    fn new(gpu: &Gpu) -> FootprintMarks {
+        let device = &gpu.device;
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("stroke footprint marks"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("stroke footprint marks"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/footprint_frag.wgsl").into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("stroke footprint marks"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("stroke footprint marks"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_full"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_marks"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::R8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("stroke footprint marks"),
+            size: 32,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let marks = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("stroke footprint marks"),
+            size: wgpu::Extent3d { width: FOOTPRINT_TILES, height: FOOTPRINT_TILES, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("stroke footprint marks read"),
+            size: u64::from(MARKS_ROW * FOOTPRINT_TILES),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        FootprintMarks { pipeline, layout, uniform, marks, read }
+    }
+
+    /// The tiles of `stroke` that hold anything within `region` (as the shader takes it), `across`
+    /// to a row, as the compute pass marks them (a bit each); none if the GPU can't tell.
+    fn marked(&self, gpu: &Gpu, stroke: &wgpu::TextureView, region: &[u32; 8], across: u32) -> Option<Vec<u32>> {
+        let across = across.min(FOOTPRINT_TILES);
+        gpu.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(region));
+        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("stroke footprint marks"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(stroke) },
+            ],
+        });
+        let view = self.marks.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder =
+            gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("stroke footprint") });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("stroke footprint marks"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_scissor_rect(0, 0, across.max(1), across.max(1));
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        encoder.copy_texture_to_buffer(
+            self.marks.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.read,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(MARKS_ROW),
+                    rows_per_image: Some(FOOTPRINT_TILES),
+                },
+            },
+            wgpu::Extent3d { width: FOOTPRINT_TILES, height: FOOTPRINT_TILES, depth_or_array_layers: 1 },
+        );
+        gpu.queue.submit([encoder.finish()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.read.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        gpu.device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+        rx.recv().ok()?.ok()?;
+        let mut words = vec![0u32; (FOOTPRINT_TILES * FOOTPRINT_TILES).div_ceil(32) as usize];
+        {
+            let mapped = self.read.slice(..).get_mapped_range().ok()?;
+            for y in 0..across {
+                for x in 0..across {
+                    let marked = mapped.get((y * MARKS_ROW + x) as usize).is_some_and(|&b| b > 127);
+                    let t = y * across + x;
+                    if let (true, Some(w)) = (marked, words.get_mut((t / 32) as usize)) {
+                        *w |= 1 << (t % 32);
+                    }
+                }
+            }
+        }
+        self.read.unmap();
+        Some(words)
     }
 }
 
@@ -2772,7 +2971,20 @@ impl Projector {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
+        // floats where the GPU draws into them, else 8 bits a channel (see STROKE and DISTANCE)
+        let stroke_format = if gpu.draws_half_floats() { STROKE } else { wgpu::TextureFormat::Rgba8Unorm };
+        let distance_format = if gpu.draws(DISTANCE) { DISTANCE } else { wgpu::TextureFormat::Rgba8Unorm };
+        let bytes = if distance_format == DISTANCE { 0.0 } else { 1.0 };
+        let halved = if stroke_format == STROKE { 0.0 } else { 1.0 };
+        let distances = [("DISTANCE_BYTES", bytes)];
+        let laid = [("DISTANCE_BYTES", bytes), ("LAID_HALVED", halved)];
         let pipeline = |label, vs, fs, format, depth: bool, blend: Option<wgpu::BlendState>| {
+            // (those that read or draw the distances told how they are kept, and the laid how they lay)
+            let constants: &[(&str, f64)] = match fs {
+                "fs_project_laid" => &laid,
+                "fs_distance" | "fs_project" | "fs_project_picture" => &distances,
+                _ => &[],
+            };
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&pipeline_layout),
@@ -2798,7 +3010,7 @@ impl Projector {
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
                     entry_point: Some(fs),
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions { constants, ..Default::default() },
                     targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })],
                 }),
                 multiview_mask: None,
@@ -2823,7 +3035,7 @@ impl Projector {
                 entry_point: Some("fs_dilate"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: STROKE,
+                    format: stroke_format,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -2915,7 +3127,7 @@ impl Projector {
                 entry_point: Some("fs_material"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: STROKE,
+                    format: stroke_format,
                     blend: Some(MAX),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -2962,7 +3174,7 @@ impl Projector {
                 entry_point: Some("fs_grain"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: STROKE,
+                    format: stroke_format,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -2996,10 +3208,19 @@ impl Projector {
             cache: None,
         });
         Projector {
-            distance_pipeline: pipeline("screen distance", "vs_distance", "fs_distance", DISTANCE, true, None),
-            project_pipeline: pipeline("project stroke", "vs_project", "fs_project", STROKE, false, Some(MAX)),
-            picture_pipeline: pipeline("project picture", "vs_project", "fs_project_picture", STROKE, false, Some(MAX)),
-            laid_pipeline: pipeline("project laid", "vs_project", "fs_project_laid", STROKE, false, Some(MAX)),
+            stroke_format,
+            distance_format,
+            distance_pipeline: pipeline("screen distance", "vs_distance", "fs_distance", distance_format, true, None),
+            project_pipeline: pipeline("project stroke", "vs_project", "fs_project", stroke_format, false, Some(MAX)),
+            picture_pipeline: pipeline(
+                "project picture",
+                "vs_project",
+                "fs_project_picture",
+                stroke_format,
+                false,
+                Some(MAX),
+            ),
+            laid_pipeline: pipeline("project laid", "vs_project", "fs_project_laid", stroke_format, false, Some(MAX)),
             seen_pipeline: pipeline("seen layer", "vs_seen", "fs_seen", SEEN, true, None),
             seen_hiding_pipeline: pipeline("seen hiding", "vs_seen", "fs_seen_hiding", SEEN, true, None),
             islands_pipeline: pipeline("islands", "vs_islands", "fs_islands", ISLANDS, false, None),

@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.layer-tools",
+  "name": "Layer tools",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Picked layers take one opacity together, Paste can go into a mask, and the eyedropper can pick from the current layer alone.",
+  "compat": { "procraft": { "interface": 1 } },
+  "permissions": [],
+  "hooks": ["opacity_together", "paste_mask", "pick_layer"],
+  "controls": [
+    { "key": "opacity", "type": "switch", "label": "Opacity of picked layers" },
+    { "key": "paste", "type": "switch", "label": "Paste into masks", "starts": false, "keeps": "paste_into_mask" },
+    { "key": "eyedropper", "type": "switch", "label": "Eyedropper picks from layer", "starts": false, "keeps": "eyedropper_layer" }
+  ],
+  "replaces": [
+    { "id": "io.github.artcraftandroid.opacity-together", "switch": "opacity" },
+    { "id": "io.github.artcraftandroid.paste-into-masks" },
+    { "id": "io.github.artcraftandroid.eyedropper-layer" }
+  ]
+}

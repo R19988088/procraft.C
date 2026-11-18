@@ -28,6 +28,9 @@ const R_TAP: Duration = Duration::from_millis(300);
 
 /// The mouse's pointer id: touches have the platform's.
 const MOUSE: u64 = u64::MAX;
+/// How many moves a stroke the mouse pointer began with no tablet pen read waits for the pen's
+/// reading, to be the pen's: a reading late at all comes a frame or two after the press.
+const UNREAD_MOVES: u32 = 4;
 
 /// Which touch the interface follows as its pointer. egui follows the first touch down and no other
 /// until it lifts, so a hand resting on the canvas would keep a finger off the panels and the side
@@ -77,6 +80,78 @@ impl InterfaceTouches {
     }
 }
 
+/// Whether the interface has been told it is on a touch screen, for a tablet's pen that moves the
+/// mouse pointer. egui scrolls a list by dragging its contents only on a touch screen, which it
+/// takes one to be once it has had a touch: the system's pen comes as touches, but a tablet's pen
+/// that moves the mouse pointer (Windows Ink off, read through WinTab; X11; a Mac) makes none, so
+/// the lists stayed still under it. The first time such a pen is seen the interface is told of a
+/// touch of its own, cancelled as it comes, so it presses nothing: the lists then drag with that
+/// pen as with the system's.
+#[derive(Default)]
+pub struct PenTouchScreen {
+    told: bool,
+}
+
+impl PenTouchScreen {
+    /// A touch no finger or pen makes: a device and an id of its own.
+    const TOUCH: u64 = u64::MAX;
+
+    /// The interface's input for a frame, `pen_moves_mouse` while a tablet's pen moves the mouse
+    /// pointer: the first time one does, with the touch that tells it it is on a touch screen.
+    pub fn tell(&mut self, raw: &mut egui::RawInput, pen_moves_mouse: bool) {
+        if pen_moves_mouse && !std::mem::replace(&mut self.told, true) {
+            raw.events.push(egui::Event::Touch {
+                device_id: egui::TouchDeviceId(Self::TOUCH),
+                id: egui::TouchId(Self::TOUCH),
+                phase: egui::TouchPhase::Cancel,
+                pos: egui::Pos2::ZERO,
+                force: None,
+            });
+        }
+    }
+}
+
+/// The interface's input, frame by frame, for a pen that comes to `from`, is pressed, dragged `by`
+/// in ten steps and lifted: as the system's pen gives it (`touches`: its touches, which egui-winit
+/// also makes its pointer's), or as a tablet's pen moving the mouse pointer does (the pointer
+/// alone).
+#[cfg(test)]
+pub fn pen_drag(from: egui::Pos2, by: egui::Vec2, touches: bool) -> Vec<Vec<egui::Event>> {
+    use egui::{Event, PointerButton, TouchPhase};
+    let touch = |phase, pos| Event::Touch {
+        device_id: egui::TouchDeviceId(1),
+        id: egui::TouchId(1),
+        phase,
+        pos,
+        force: Some(0.5),
+    };
+    let button = |pos, pressed| Event::PointerButton {
+        pos,
+        button: PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let mut frames = Vec::new();
+    if touches {
+        frames.push(vec![touch(TouchPhase::Start, from), Event::PointerMoved(from), button(from, true)]);
+    } else {
+        frames.push(vec![Event::PointerMoved(from)]);
+        frames.push(vec![button(from, true)]);
+    }
+    let mut at = from;
+    for _ in 0..10 {
+        at += by / 10.0;
+        let moved = Event::PointerMoved(at);
+        frames.push(if touches { vec![touch(TouchPhase::Move, at), moved] } else { vec![moved] });
+    }
+    frames.push(if touches {
+        vec![touch(TouchPhase::End, at), button(at, false), Event::PointerGone]
+    } else {
+        vec![button(at, false)]
+    });
+    frames
+}
+
 pub struct Input {
     clock: Instant,
     /// What the touches asked, for the app to do at the next frame.
@@ -101,6 +176,11 @@ pub struct Input {
     /// A tablet's pen pressed the mouse pointer (X11, a Mac): its pressure as last read, for the
     /// stroke's moves while it goes unread a moment (another pointer heard from in between).
     pen_pressure: Option<f32>,
+    /// The mouse pointer pressed on the canvas with no tablet pen read there: where, and how many
+    /// moves since, while it may still turn out to be the pen's (see [`Input::pen_came`]).
+    unread_press: Option<((f32, f32), u32)>,
+    /// Where the tablet pen moving the mouse pointer is read: the pen's own readings (a test's).
+    read_mouse_pen: fn((f32, f32)) -> Option<crate::pen::MousePen>,
     /// The brush cursor follows the mouse hovering, so its moves draw a frame.
     pub hover_shown: bool,
     space: bool,
@@ -138,6 +218,8 @@ impl Default for Input {
             key_drag: None,
             pen_panning: None,
             pen_pressure: None,
+            unread_press: None,
+            read_mouse_pen: crate::pen::mouse_pen_at,
             hover_shown: false,
             space: false,
             space_used: false,
@@ -255,8 +337,8 @@ impl Input {
 
     /// What the mouse pointer is now, at `at`: a tablet's pen moving it (X11 gives a pen as the
     /// mouse), as a pen or its eraser end with its pressure there; else the mouse.
-    fn mouse_kind(at: (f32, f32)) -> (PointerKind, f32) {
-        match crate::pen::mouse_pen_at(at) {
+    fn mouse_kind(&self, at: (f32, f32)) -> (PointerKind, f32) {
+        match (self.read_mouse_pen)(at) {
             Some(pen) => (if pen.eraser { PointerKind::StylusEraser } else { PointerKind::Stylus }, pen.pressure),
             None => (PointerKind::Mouse, 1.0),
         }
@@ -265,15 +347,36 @@ impl Input {
     /// The pressure of the mouse pointer's sample at `at`: a stroke a pen began keeps the pen's
     /// last pressure through a moment it goes unread, rather than jumping to full as the mouse's.
     fn mouse_pressure(&mut self, at: (f32, f32)) -> f32 {
-        let read = crate::pen::mouse_pen_at(at).map(|pen| pen.pressure);
+        let read = (self.read_mouse_pen)(at).map(|pen| pen.pressure);
         if self.pen_pressure.is_some() && read.is_some() {
             self.pen_pressure = read;
         }
         read.or(self.pen_pressure).unwrap_or(1.0)
     }
 
-    /// A sample of pointer `id` at `(x, y)`: a pen's with its lean, if the system gave one.
-    fn sample(&self, id: u64, (x, y): (f32, f32), pressure: f32) -> Vec<PenSample> {
+    /// The mouse pointer pressed on the canvas, now at `at`: if it went down with no tablet pen
+    /// read and the pen's reading has come since, within the stroke's first moves, the stroke is
+    /// begun again as the pen's, where it went down. The pen's reading may come just after the
+    /// press it made (the driver's messages crossing, or its packets only now coming to this
+    /// window, as it comes to the front): taken for the mouse's, the stroke would have no pressure.
+    fn pen_came(&mut self, session: &CanvasSession, at: (f32, f32)) {
+        let Some((down, moves)) = self.unread_press.take() else { return };
+        if (self.read_mouse_pen)(at).is_none() {
+            self.unread_press = (moves < UNREAD_MOVES).then_some((down, moves + 1));
+            return;
+        }
+        let (kind, pressure) = self.mouse_kind(at);
+        let out = session.touch_cancel_one(MOUSE);
+        self.take(out);
+        self.pen_pressure = Some(pressure);
+        self.pressed(session, MOUSE, kind, down, pressure);
+    }
+
+    /// A sample of pointer `id` at `at`: a pen's with its lean, if the system gave one, and a
+    /// tablet's pen moving the mouse pointer where its tablet says it was, finer than the pointer's
+    /// whole pixels (with no smoothing a slow line through them goes in steps).
+    fn sample(&self, id: u64, at: (f32, f32), pressure: f32) -> Vec<PenSample> {
+        let (x, y) = if id == MOUSE { crate::pen::mouse_pen_fine_at(at).unwrap_or(at) } else { at };
         let (tilt, orientation) = crate::pen::lean(id).unwrap_or((0.0, 0.0));
         let roll = crate::pen::roll(id).unwrap_or(0.0);
         vec![PenSample { x, y, pressure: pressure.clamp(0.0, 1.0), tilt, orientation, time_ms: self.now_ms(), roll }]
@@ -283,6 +386,10 @@ impl Input {
         self.down.retain(|d| *d != id);
         self.down.push(id);
         self.canvas_pressed = true;
+        // a pen's stroke goes by its lean only if its driver says how it leans
+        if matches!(kind, PointerKind::Stylus | PointerKind::StylusEraser) {
+            session.set_pen_tilt_known(crate::pen::lean(id).is_some());
+        }
         let out = session.touch_down(id, kind, self.sample(id, at, pressure));
         self.take(out);
     }
@@ -395,6 +502,7 @@ impl Input {
                     return true;
                 }
                 if self.down.contains(&MOUSE) {
+                    self.pen_came(session, p);
                     let pressure = self.mouse_pressure(p);
                     self.moved(session, MOUSE, p, pressure);
                     return true;
@@ -426,12 +534,15 @@ impl Input {
                         false
                     }
                     (MouseButton::Left, ElementState::Pressed) if !self.panning && !over(p) => {
-                        let (kind, pressure) = Self::mouse_kind(p);
+                        let (kind, pressure) = self.mouse_kind(p);
                         self.pen_pressure = (kind != PointerKind::Mouse).then_some(pressure);
+                        self.unread_press = (kind == PointerKind::Mouse).then_some((p, 0));
                         self.pressed(session, MOUSE, kind, p, pressure);
                         true
                     }
                     (MouseButton::Left, ElementState::Released) if self.down.contains(&MOUSE) => {
+                        self.pen_came(session, p);
+                        self.unread_press = None;
                         let pressure = self.mouse_pressure(p);
                         self.pen_pressure = None;
                         self.lifted(session, MOUSE, p, pressure, false);
@@ -470,15 +581,22 @@ impl Input {
                 }
                 true
             }
-            WindowEvent::PinchGesture { delta, .. } => {
+            WindowEvent::PinchGesture { delta, phase, .. } => {
                 let Some(p) = self.cursor.filter(|p| !over(*p)) else { return false };
                 session.view_gesture(p.0, p.1, 0.0, 0.0, (1.0 + *delta as f32).max(0.01), 0.0);
+                // let go near a right angle, the canvas turns onto it, as after fingers
+                if *phase == TouchPhase::Ended {
+                    session.settle_turn();
+                }
                 true
             }
-            WindowEvent::RotationGesture { delta, .. } => {
+            WindowEvent::RotationGesture { delta, phase, .. } => {
                 let Some(p) = self.cursor.filter(|p| !over(*p)) else { return false };
                 // turned anticlockwise is positive; the view turns clockwise on the screen
                 session.view_gesture(p.0, p.1, 0.0, 0.0, 1.0, -delta.to_radians());
+                if *phase == TouchPhase::Ended {
+                    session.settle_turn();
+                }
                 true
             }
             WindowEvent::Touch(touch) => self.on_touch(session, touch, &over),
@@ -706,6 +824,24 @@ mod tests {
     }
 
     #[test]
+    fn a_pen_moving_the_mouse_pointer_tells_the_interface_once_that_it_is_on_a_touch_screen() {
+        let (ctx, mut told) = (egui::Context::default(), PenTouchScreen::default());
+        let mut frame = |pen_moves_mouse: bool| {
+            let mut raw = egui::RawInput::default();
+            told.tell(&mut raw, pen_moves_mouse);
+            let touches = raw.events.iter().filter(|e| matches!(e, egui::Event::Touch { .. })).count();
+            ctx.run_ui(raw, |_| {}).textures_delta.clear();
+            (touches, ctx.input(|i| (i.has_touch_screen(), i.any_touches())))
+        };
+        // the mouse alone: no touch screen
+        assert_eq!(frame(false), (0, (false, false)));
+        // a tablet's pen moves the pointer: told once, with no touch left down
+        assert_eq!(frame(true), (1, (true, false)));
+        assert_eq!(frame(true), (0, (true, false)));
+        assert_eq!(frame(false), (0, (true, false)));
+    }
+
+    #[test]
     fn a_finger_on_the_interface_beside_a_resting_hand_is_no_gesture_on_the_canvas() {
         let (session, mut input) = (shown(), Input::default());
         session.set_touch_settings(procraft_core::TouchSettings::default());
@@ -892,6 +1028,49 @@ mod tests {
         assert_eq!(input.cursor(), None);
     }
 
+    thread_local! {
+        /// The tablet pen this test's mouse pointer reads, if any.
+        static TABLET_PEN: std::cell::Cell<Option<crate::pen::MousePen>> = const { std::cell::Cell::new(None) };
+    }
+
+    fn tablet_pen(_: (f32, f32)) -> Option<crate::pen::MousePen> {
+        TABLET_PEN.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn a_stroke_the_mouse_pointer_began_is_the_tablet_pens_once_the_pens_reading_comes_just_after() {
+        let device_id = DeviceId::dummy();
+        let moved = |x: f64| WindowEvent::CursorMoved { device_id, position: PhysicalPosition::new(x, 100.0) };
+        let press = |state| WindowEvent::MouseInput { device_id, state, button: MouseButton::Left };
+        // the pointer pressed at (100, 100) with no tablet pen read, moved `moves` times before the
+        // pen's reading comes (its tip not yet down, as its packets run ahead of the mouse), and
+        // moved on: whether the stroke became the pen's, which hovers there until it presses
+        let pen_took_it = |moves: Option<usize>| {
+            let (session, mut input) = (shown(), Input { read_mouse_pen: tablet_pen, ..Input::default() });
+            // a pen has drawn with a pressure: pens are known to give one
+            drag(&mut input, &session, 7020, (300.0, 300.0));
+            input.commands.clear();
+            TABLET_PEN.with(|p| p.set(None));
+            send(&mut input, &session, &moved(100.0));
+            send(&mut input, &session, &press(ElementState::Pressed));
+            assert!(painted(&input), "the mouse's stroke begins");
+            for i in 0..8 {
+                if Some(i) == moves {
+                    TABLET_PEN.with(|p| p.set(Some(crate::pen::MousePen { pressure: 0.0, eraser: false })));
+                }
+                send(&mut input, &session, &moved(102.0 + i as f64));
+            }
+            send(&mut input, &session, &press(ElementState::Released));
+            input.commands.iter().any(|c| matches!(c, TouchCommand::PenHovers { x, y } if (*x, *y) == (100.0, 100.0)))
+        };
+        // the reading came with the first move, or a few later
+        assert!(pen_took_it(Some(0)));
+        assert!(pen_took_it(Some(3)));
+        // too long after: the stroke stays as it began; and the mouse alone stays the mouse
+        assert!(!pen_took_it(Some(6)));
+        assert!(!pen_took_it(None));
+    }
+
     #[test]
     fn what_paints_from_afar_is_what_isnt_under_the_hand() {
         let (session, mut input) = (shown(), Input::default());
@@ -919,5 +1098,105 @@ mod tests {
         let finger = WindowEvent::Touch(Touch { device_id, phase, location, force: None, id: 7011 });
         send(&mut input, &session, &finger);
         assert!(input.pressing() && !input.pressing_from_afar());
+    }
+
+    /// A brush file (`BRUSH_FILE`) drawn through the desktop's input by a tablet's pen moving the
+    /// mouse pointer, read in whole pixels (WinTab giving nothing finer), on a 2048 px canvas fitted
+    /// to a 1920 by 1080 window: a circle, a triangle, a square and hatching, at 150 px a second,
+    /// the pointer moved as the pen reaches each next pixel. Each is drawn twice: above as a stroke
+    /// takes input it isn't told comes in whole pixels (its first sample half a pixel off them, the
+    /// rest whole), below as it is. The artwork goes to `PROCRAFT_DUMP/whole-pixels.png`.
+    /// `BRUSH_FILE=x.brush PROCRAFT_DUMP=dir cargo test -p procraft-desktop dump_whole_pixel_strokes -- --ignored`
+    #[test]
+    #[ignore]
+    fn dump_whole_pixel_strokes() {
+        let (Ok(file), Ok(dir)) = (std::env::var("BRUSH_FILE"), std::env::var("PROCRAFT_DUMP")) else { return };
+        let Ok(gpu) = procraft_gpu::Gpu::headless() else { return };
+        let session = CanvasSession::new(2048, 2048);
+        session.set_display_scale(1.0);
+        session.use_gpu(gpu);
+        session.show_in(1920, 1080);
+        let name = std::path::Path::new(&file).file_name().map(|n| n.to_string_lossy().into_owned());
+        let set = session.import_any_brushes(std::fs::read(&file).unwrap(), name, 0).unwrap();
+        assert!(session.select_brush(set, 0));
+        session.set_color(0.0, 0.0, 0.0);
+        TABLET_PEN.with(|p| p.set(Some(crate::pen::MousePen { pressure: 0.6, eraser: false })));
+        let mut input = Input { read_mouse_pen: tablet_pen, ..Input::default() };
+        let m = session.view_matrix();
+        eprintln!("zoom {}", m[0].hypot(m[1]));
+        // canvas pixel (x, y) on the window
+        let shown = |(x, y): (f32, f32)| (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]);
+        let device_id = DeviceId::dummy();
+        let moved = |(x, y): (f32, f32)| WindowEvent::CursorMoved {
+            device_id,
+            position: PhysicalPosition::new(f64::from(x), f64::from(y)),
+        };
+        let press = |state| WindowEvent::MouseInput { device_id, state, button: MouseButton::Left };
+        // a stroke through `corners` (canvas pixels), or round a circle
+        let mut draw = |path: &dyn Fn(f32) -> (f32, f32), told: bool| {
+            let length: f32 = (1..=400)
+                .map(|i| {
+                    let (a, b) = (shown(path((i - 1) as f32 / 400.0)), shown(path(i as f32 / 400.0)));
+                    (a.0 - b.0).hypot(a.1 - b.1)
+                })
+                .sum();
+            let (x, y) = shown(path(0.0));
+            let mut last = (x.round(), y.round());
+            send(&mut input, &session, &moved(if told { last } else { (last.0 + 0.5, last.1) }));
+            send(&mut input, &session, &press(ElementState::Pressed));
+            let begun = Instant::now();
+            let steps = (length * 4.0) as usize;
+            for i in 1..=steps {
+                let (x, y) = shown(path(i as f32 / steps as f32));
+                let at = (x.round(), y.round());
+                if at != last {
+                    // when the pen gets there
+                    let due = Duration::from_secs_f32(i as f32 / 4.0 / 150.0);
+                    while begun.elapsed() < due {
+                        std::thread::sleep(Duration::from_micros(200));
+                    }
+                    send(&mut input, &session, &moved(at));
+                    last = at;
+                }
+            }
+            send(&mut input, &session, &press(ElementState::Released));
+        };
+        let along = |corners: Vec<(f32, f32)>| {
+            move |t: f32| {
+                let pieces = (corners.len() - 1) as f32;
+                let at = (t * pieces).min(pieces - 1e-4);
+                let (i, f) = (at.floor() as usize, at.fract());
+                let (a, b) = (corners[i], corners[i + 1]);
+                (a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f)
+            }
+        };
+        for (row, told) in [(560.0f32, false), (1360.0, true)] {
+            draw(
+                &|t: f32| {
+                    let a = std::f32::consts::TAU * t;
+                    (560.0 + 130.0 * a.cos(), row + 120.0 * a.sin())
+                },
+                told,
+            );
+            draw(
+                &along(vec![(820.0, row + 120.0), (950.0, row - 130.0), (1080.0, row + 120.0), (820.0, row + 120.0)]),
+                told,
+            );
+            draw(
+                &along(vec![
+                    (1160.0, row - 110.0),
+                    (1380.0, row - 115.0),
+                    (1385.0, row + 110.0),
+                    (1165.0, row + 115.0),
+                    (1160.0, row - 110.0),
+                ]),
+                told,
+            );
+            for k in 0..6 {
+                let x = 1480.0 + 30.0 * k as f32;
+                draw(&along(vec![(x, row + 80.0), (x + 120.0, row - 80.0)]), told);
+            }
+        }
+        session.export_png(format!("{dir}/whole-pixels.png")).unwrap();
     }
 }

@@ -1,0 +1,31 @@
+ProCraft is an open-source painting app for Android tablets, made for drawing with a pen. Its painting engine and GPU renderer are written from scratch in Rust, under an interface in Kotlin and Jetpack Compose. It is in beta.
+
+<b>Brushes</b>
+<ul>
+<li>Brushes that follow your pen's pressure and tilt, built from a shape and a grain, with stabilisation, tapers, wet mixing and colour dynamics</li>
+<li>A library of brush sets, and a Brush Studio to change any brush or make your own</li>
+<li>Brush files from other painting programs, such as Krita and GIMP, imported and drawn close to how they draw there</li>
+</ul>
+
+<b>Layers and colour</b>
+<ul>
+<li>Layers with blend modes, opacity, alpha lock, clipping masks, masks and groups, and a reference layer</li>
+<li>Colour disc, classic, harmony and value pickers, palettes, colour history and an eyedropper; drag a colour onto the canvas to fill</li>
+</ul>
+
+<b>Editing</b>
+<ul>
+<li>Adjustments, each with its own toolbar, on a whole layer or painted on where you want them</li>
+<li>Selections (automatic, freehand, shapes, feathered) and transforms (freeform, uniform, distort, warp, with snapping)</li>
+<li>Shapes that snap clean when you hold the pen at the end of a stroke, drawing guides and drawing assist (2D grid, isometric, perspective, symmetry), and text</li>
+</ul>
+
+<b>More</b>
+<ul>
+<li>Animation and page assists, and a reference window</li>
+<li>3D painting on OBJ and USDZ models, with lights and environments</li>
+<li>A gallery with stacks and canvas presets; import and share PNG, JPEG, PSD, PDF, TIFF, GIF and MP4; a time-lapse of every artwork</li>
+<li>Optional plugins, each off until you turn it on in Prefs › Plugins, and sandboxed</li>
+</ul>
+
+ProCraft has no ads, no tracking and no internet access: the app doesn't ask for the internet permission. It is for tablets; phones are to get an app of their own.

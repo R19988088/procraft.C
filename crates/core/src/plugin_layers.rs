@@ -58,6 +58,8 @@ const MOST_DRAWN: usize = 96 << 20;
 /// How many of the layers' changes are kept, by the step that made each: more than the canvas
 /// keeps steps.
 const STEPS_KEPT: usize = 256;
+/// How many plugin layers' items are kept as their plugins last gave them to draw.
+const DRAWN_KEPT: usize = 4;
 /// The most samples an item read back may hold, and the most pixels its selection may cover.
 const MOST_SAMPLES: usize = 1 << 20;
 const MOST_CLIP: usize = 1 << 28;
@@ -312,6 +314,9 @@ pub(crate) struct Item {
     pub(crate) scale: f32,
     pub(crate) rotation: f32,
     pub(crate) seen_at: f32,
+    /// The canvas's zoom, if the input came in whole screen pixels (its points evened out over
+    /// the steps).
+    pub(crate) whole_pixels: Option<f32>,
     pub(crate) alpha_lock: bool,
     pub(crate) input: InputSettings,
     pub(crate) symmetry: Option<Symmetry>,
@@ -472,7 +477,8 @@ impl Item {
         r.field(field::SEED, &self.seed.to_le_bytes());
         r.field(field::POINTER, &[pointer_number(self.pointer)]);
         r.floats(field::SCALE, &[self.scale]);
-        r.floats(field::VIEW, &[self.rotation, self.seen_at]);
+        // (the third, 0 for input read finer, after the two that came first)
+        r.floats(field::VIEW, &[self.rotation, self.seen_at, self.whole_pixels.unwrap_or(0.0)]);
         r.field(field::ALPHA_LOCK, &[u8::from(self.alpha_lock)]);
         let i = &self.input;
         let mut input = Vec::new();
@@ -535,6 +541,7 @@ impl Item {
             scale: 1.0,
             rotation: 0.0,
             seen_at: 1.0,
+            whole_pixels: None,
             alpha_lock: false,
             input: InputSettings::default(),
             symmetry: None,
@@ -601,6 +608,10 @@ impl Item {
                     if let Some([rotation, seen_at]) = floats::<2>(bytes) {
                         (item.rotation, item.seen_at) = (rotation, seen_at.clamp(1e-4, 1e4));
                     }
+                    item.whole_pixels = floats::<3>(bytes)
+                        .map(|[_, _, zoom]| zoom)
+                        .filter(|zoom| *zoom > 0.0)
+                        .map(|z| z.clamp(1e-4, 1e4));
                 }
                 field::ALPHA_LOCK => item.alpha_lock = bytes.first().is_some_and(|b| *b != 0),
                 field::INPUT => item.input = input_of(bytes).unwrap_or_default(),
@@ -909,6 +920,7 @@ fn input_of(bytes: &[u8]) -> Option<InputSettings> {
         pressure_curve: if points.len() >= 2 { Curve::new(&points) } else { Curve::linear() },
         speed_distance: speed_distance.clamp(0.25, 1.0),
         tip_attached,
+        tilt_known: true,
     })
 }
 
@@ -961,8 +973,14 @@ impl Recording {
         item.started = 0.0;
         item.seed = crate::quickshape::SHAPE_SEED;
         item.input = InputSettings::default();
-        (item.rotation, item.seen_at) = (0.0, 1.0);
+        (item.rotation, item.seen_at, item.whole_pixels) = (0.0, 1.0, None);
         item.shape = Some(Arc::new((kind, nodes.to_vec())));
+    }
+
+    /// Its input turned out to come finer than whole pixels: laid again, it is read so from its
+    /// start (the stroke as drawn was read so from where that showed, a sample or two in).
+    pub(crate) fn read_finer(&mut self) {
+        self.item.whole_pixels = None;
     }
 
     /// The last of its samples, `samples`, as the pen lifts.
@@ -979,14 +997,107 @@ impl Recording {
 pub(crate) struct LayerStep {
     made: u64,
     layer: LayerId,
-    before: Option<Arc<Vec<u8>>>,
-    after: Option<Arc<Vec<u8>>>,
+    before: Option<Pieces>,
+    after: Option<Pieces>,
     /// Where its items were laid before the step and after it, when known.
     laid: Option<LaidPair>,
 }
 
+#[cfg(test)]
+impl LayerStep {
+    /// The canvas step it goes with.
+    pub(crate) fn made(&self) -> u64 {
+        self.made
+    }
+}
+
+/// The bytes the layers' data `steps` keep take (each piece once).
+#[cfg(test)]
+pub(crate) fn steps_bytes(steps: &[LayerStep]) -> usize {
+    let mut seen: std::collections::HashSet<*const u8> = std::collections::HashSet::new();
+    let pieces = steps.iter().flat_map(|s| [s.before.as_ref(), s.after.as_ref()]).flatten().flat_map(|p| &p.0);
+    pieces.filter(|(_, piece)| seen.insert(piece.as_ptr())).map(|(_, piece)| piece.len()).sum()
+}
+
+/// The least and the most bytes of a piece of a layer's data kept for undo; and how many of the
+/// rolled hash's top bits are all 0 where a piece ends (12: one place in 4096, so pieces of about 4
+/// KB). The top bits hang on the last 64 bytes, the lowest on the last few: data much alike (a
+/// stroke's samples) still ends pieces in places.
+const PIECE_LEAST: usize = 1 << 10;
+const PIECE_MOST: usize = 64 << 10;
+const PIECE_BITS: u32 = 12;
+
+/// A layer's data as undo keeps it, a version a step: cut in pieces where its bytes say, so what a
+/// change leaves as it was is cut alike and kept once, shared by the versions that hold it (a
+/// stroke added to hundreds keeps a few pieces of its own, not the whole again). Each piece with
+/// its hash.
+#[derive(Clone)]
+pub(crate) struct Pieces(Vec<(u64, Arc<[u8]>)>);
+
+/// A byte's number in the hash rolled along data to cut it (see [`Pieces::cut`]).
+fn gear(byte: u8) -> u64 {
+    static TABLE: std::sync::OnceLock<[u64; 256]> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        std::array::from_fn(|i| {
+            // splitmix64
+            let mut z = (i as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        })
+    });
+    table.get(usize::from(byte)).copied().unwrap_or(0)
+}
+
+impl Pieces {
+    /// `data` in pieces, those `like` has too shared with it.
+    fn cut(data: &[u8], like: Option<&Pieces>) -> Pieces {
+        let known: std::collections::HashMap<u64, &Arc<[u8]>> =
+            like.map(|l| l.0.iter().map(|(hash, piece)| (*hash, piece)).collect()).unwrap_or_default();
+        let mut pieces = Vec::new();
+        let mut keep = |piece: &[u8]| {
+            let mut h = DefaultHasher::new();
+            piece.hash(&mut h);
+            let hash = h.finish();
+            let shared = known.get(&hash).copied().filter(|p| p.as_ref() == piece).map(Arc::clone);
+            pieces.push((hash, shared.unwrap_or_else(|| Arc::from(piece))));
+        };
+        let (mut start, mut rolling) = (0, 0u64);
+        for (i, &byte) in data.iter().enumerate() {
+            rolling = (rolling << 1).wrapping_add(gear(byte));
+            let len = i + 1 - start;
+            if (len >= PIECE_LEAST && rolling >> (64 - PIECE_BITS) == 0) || len >= PIECE_MOST {
+                keep(data.get(start..=i).unwrap_or_default());
+                start = i + 1;
+            }
+        }
+        if start < data.len() {
+            keep(data.get(start..).unwrap_or_default());
+        }
+        Pieces(pieces)
+    }
+
+    /// The data whole again.
+    fn whole(&self) -> Vec<u8> {
+        let mut whole = Vec::with_capacity(self.0.iter().map(|(_, piece)| piece.len()).sum());
+        for (_, piece) in &self.0 {
+            whole.extend_from_slice(piece);
+        }
+        whole
+    }
+}
+
 /// Where a layer's items were laid before a step and after it.
 type LaidPair = (Arc<Vec<LaidItem>>, Arc<Vec<LaidItem>>);
+
+/// A layer's items as its plugin gave them to draw: from which data, with the plugins as they were
+/// then (see [`crate::hooks::Hooks::generation`]).
+pub(crate) struct DrawnItems {
+    layer: LayerId,
+    data: Arc<Vec<u8>>,
+    generation: u64,
+    items: Arc<Vec<Item>>,
+}
 
 impl State {
     /// The kind of plugin layer `layer` is (`<id>.<key>`), if it is one.
@@ -1010,6 +1121,7 @@ impl State {
         tool: ToolKind,
         pointer: PointerKind,
         seed: u32,
+        whole_pixels: Option<f32>,
         samples: &[Sample],
     ) {
         self.recording = None;
@@ -1037,6 +1149,7 @@ impl State {
             scale,
             rotation: self.view.map_or(0.0, |v| v.rotation()),
             seen_at: self.view.map_or(1.0, |v| v.zoom()) / self.display_scale,
+            whole_pixels,
             alpha_lock: self.doc.layer(layer).is_some_and(|l| l.alpha_lock),
             input: self.input.clone(),
             symmetry: Symmetry::of(&self.doc.stroke_guide()),
@@ -1390,14 +1503,55 @@ impl State {
                 .with_input(item.input.clone())
                 .on_view_turned(item.rotation)
                 .seen_at(item.seen_at);
+            let builder = match item.whole_pixels {
+                Some(zoom) => builder.read_in_whole_pixels(zoom),
+                None => builder,
+            };
             if exact { builder.exact_path() } else { builder }
         };
-        let mut builder = make(brush, diameter * scale, item.seed);
+        let mut builder = make(brush.clone(), diameter * scale, item.seed);
         let mut second_builder = second.as_ref().map(|(b, _, d)| make(b.clone(), d * scale, item.seed ^ SECOND_SEED));
         let guide = item.symmetry.map_or_else(Guide::default, |s| s.moved(t).guide());
-        let Some(canvas) = self.canvas.as_mut() else { return (IRect::EMPTY, false) };
+        let starting = crate::plugin_brushes::Starting {
+            colour: item.colour,
+            secondary: item.secondary,
+            diameter: diameter * scale,
+            start_diameter: brush.diameter(crate::starting_sliders_of(&brush, item.tool).size),
+            opacity: item.opacity.clamp(0.0, 1.0),
+            tool: match item.tool.stroke_tool() {
+                procraft_gpu::StrokeTool::Erase => 1,
+                procraft_gpu::StrokeTool::Smudge => 2,
+                _ => 0,
+            },
+            pointer: match item.pointer {
+                crate::PointerKind::Finger => 0,
+                crate::PointerKind::Mouse => 2,
+                _ => 1,
+            },
+            seed: item.seed,
+            under_at: None,
+            turn: item.rotation,
+        };
+        let hooks = self.hooks.clone().filter(|_| brush.engine.is_some());
+        let (Some(canvas), Some(gpu)) = (self.canvas.as_mut(), self.gpu.as_ref()) else { return (IRect::EMPTY, false) };
+        let engine = hooks.and_then(|hooks| {
+            let look = (item.alpha_lock, false);
+            crate::plugin_brushes::engine_stroke(&hooks, &brush, item.tool.stroke_tool(), starting, look, canvas, gpu)
+        });
+        let (style, second) = match engine {
+            Some(o) => {
+                builder = builder.with_engine(Box::new(o.first));
+                // (a shape is its first alone)
+                let o_second = o.second.filter(|_| !exact);
+                second_builder = o_second.map(|_| {
+                    make(brush.clone(), diameter * scale, item.seed ^ SECOND_SEED).with_engine(Box::new(o.second_half))
+                });
+                (o.style, o_second)
+            }
+            None => (style, second.map(|(_, s, _)| s)),
+        };
         match second {
-            Some((_, second, _)) => canvas.begin_dual_stroke(layer, style, second),
+            Some(second) => canvas.begin_dual_stroke(layer, style, second),
             None => canvas.begin_stroke(layer, style),
         }
         // in the steps they came in: drawn as they came, the last as the pen lifted
@@ -1539,7 +1693,7 @@ impl State {
             return;
         };
         // (one step may change several layers' data: flipping the canvas)
-        type Back = (LayerId, Option<Arc<Vec<u8>>>, Option<Arc<Vec<LaidItem>>>);
+        type Back = (LayerId, Option<Pieces>, Option<Arc<Vec<LaidItem>>>);
         let changes: Vec<Back> = self
             .layer_steps
             .iter()
@@ -1549,7 +1703,13 @@ impl State {
                 (s.layer, if undone { s.before.clone() } else { s.after.clone() }, laid)
             })
             .collect();
-        for (layer, data, laid) in changes {
+        for (layer, pieces, laid) in changes {
+            let data = pieces.map(|pieces| {
+                let data = Arc::new(pieces.whole());
+                // known in pieces already: the next step made from it is cut no more
+                self.last_cut = Some((layer, Arc::clone(&data), pieces));
+                data
+            });
             self.doc.set_plugin_data(layer, data);
             // its pixels put back as they were laid then
             match laid {
@@ -1570,9 +1730,32 @@ impl State {
         after: Option<Arc<Vec<u8>>>,
         laid: Option<LaidPair>,
     ) {
+        let before = before.map(|data| self.pieces_of(layer, &data));
+        let after = after.map(|data| self.pieces_of(layer, &data));
         self.layer_steps.push(LayerStep { made, layer, before, after, laid });
+        // those of steps no canvas can undo or redo any more go, and the data they held with them
+        let canvases = [
+            self.canvas.as_ref(),
+            self.crop_undo.as_ref().map(|(canvas, _)| canvas),
+            self.crop_redo.as_ref().map(|(canvas, ..)| canvas),
+        ];
+        self.layer_steps.retain(|s| canvases.iter().flatten().any(|canvas| canvas.keeps_step(s.made)));
         let over = self.layer_steps.len().saturating_sub(STEPS_KEPT);
         self.layer_steps.drain(..over);
+    }
+
+    /// `layer`'s `data` in pieces for undo, cut once: what it shares with the data cut last is kept
+    /// once (a step's data before is the step before's after).
+    fn pieces_of(&mut self, layer: LayerId, data: &Arc<Vec<u8>>) -> Pieces {
+        if let Some((was, cut, pieces)) = &self.last_cut
+            && *was == layer
+            && Arc::ptr_eq(cut, data)
+        {
+            return pieces.clone();
+        }
+        let pieces = Pieces::cut(data, self.last_cut.as_ref().map(|(_, _, pieces)| pieces));
+        self.last_cut = Some((layer, Arc::clone(data), pieces.clone()));
+        pieces
     }
 
     /// `layer`'s kind and data, if it is a plugin's layer whose plugin can take changes to its items
@@ -1602,10 +1785,36 @@ impl State {
         done.flatten()
     }
 
-    /// The items `layer` draws now, in order, each with its id; none if its plugin can't say.
+    /// The items `layer` draws now, in order, each with its id; none if its plugin can't say. Asked
+    /// of the plugin once for the layer's data as it is (with the plugins as they are): asked again,
+    /// they come from what it said then.
     pub(crate) fn layer_items(&self, layer: LayerId) -> Option<Vec<Item>> {
+        let (_, data) = self.editable_layer(layer)?;
+        let generation = self.hooks.as_ref().map_or(0, |hooks| hooks.generation());
+        if let Some(data) = &data {
+            let known = self.drawn_items.borrow();
+            let same = |d: &&DrawnItems| d.layer == layer && d.generation == generation && Arc::ptr_eq(&d.data, data);
+            if let Some(drawn) = known.iter().find(same) {
+                return Some(drawn.items.as_ref().clone());
+            }
+        }
         let list = self.on_layer_data(layer, |running| running.layer_draw(MOST_DRAWN))?;
-        Some(read_drawn(&list))
+        self.items_asked.set(self.items_asked.get() + 1);
+        let items = read_drawn(&list);
+        if let Some(data) = data {
+            self.keep_drawn(layer, data, generation, &items);
+        }
+        Some(items)
+    }
+
+    /// `items` are what `layer`'s plugin draws of `data` (the plugins as of `generation`).
+    fn keep_drawn(&self, layer: LayerId, data: Arc<Vec<u8>>, generation: u64, items: &[Item]) {
+        let mut known = self.drawn_items.borrow_mut();
+        known.retain(|d| d.layer != layer);
+        if known.len() >= DRAWN_KEPT {
+            known.remove(0);
+        }
+        known.push(DrawnItems { layer, data, generation, items: Arc::new(items.to_vec()) });
     }
 
     /// Those of `items` (`layer`'s, in order) that may reach `rect`: by where each reached as last
@@ -1685,9 +1894,14 @@ impl State {
         let steps = self.canvas.as_ref().map_or(0, procraft_gpu::Canvas::steps_made);
         self.flush();
         let laid_before = self.laid_items(layer);
-        self.lay_items_again(layer, &read_drawn(&list), name);
+        let items = read_drawn(&list);
+        self.lay_items_again(layer, &items, name);
         let made = self.canvas.as_ref().filter(|c| c.steps_made() > steps).and_then(procraft_gpu::Canvas::undo_step);
-        let after = Some(Arc::new(after));
+        let after = Arc::new(after);
+        // what it draws of its data now, known without asking again
+        let generation = self.hooks.as_ref().map_or(0, |hooks| hooks.generation());
+        self.keep_drawn(layer, Arc::clone(&after), generation, &items);
+        let after = Some(after);
         self.doc.set_plugin_data(layer, after.clone());
         if let Some(made) = made {
             let laid = laid_before.zip(self.laid_items(layer));
@@ -1714,7 +1928,7 @@ impl State {
     pub(crate) fn fill_plugin_layer(&mut self, layer: LayerId, at: Vec2, colour: [f32; 3], threshold: f32) -> bool {
         let (width, height) = (self.doc.width(), self.doc.height());
         let pixels = if self.hooks.as_ref().is_some_and(|hooks| hooks.fill_all_layers()) {
-            self.composite_pixels()
+            self.seen_layers_pixels()
         } else {
             match self.doc.reference().filter(|&r| r != layer) {
                 Some(reference) => self.layer_pixels(reference),
@@ -2237,6 +2451,7 @@ mod tests {
             scale: 2.0,
             rotation: 0.5,
             seen_at: 0.25,
+            whole_pixels: Some(0.5),
             alpha_lock: true,
             input: InputSettings {
                 stabilization: 0.2,
@@ -2277,6 +2492,28 @@ mod tests {
         let mut no_samples = Record::default();
         no_samples.field(field::BRUSH, b"{}");
         assert_eq!(Item::read(&no_samples.bytes(), &[]), None);
+    }
+
+    #[test]
+    fn data_cut_in_pieces_comes_back_whole_and_shares_what_the_version_before_holds() {
+        let mut seed = 7u32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (seed >> 16) as u8
+        };
+        let before: Vec<u8> = (0..300_000).map(|_| next()).collect();
+        // a few bytes near its start changed, and more added at its end
+        let mut after = before.clone();
+        after[100..104].copy_from_slice(&[1, 2, 3, 4]);
+        after.extend((0..3000).map(|_| next()));
+        let a = Pieces::cut(&before, None);
+        let b = Pieces::cut(&after, Some(&a));
+        assert_eq!((a.whole(), b.whole()), (before, after.clone()));
+        assert_eq!(Pieces::cut(&[], None).whole(), Vec::<u8>::new());
+        let shared: usize =
+            b.0.iter().filter(|(_, p)| a.0.iter().any(|(_, q)| Arc::ptr_eq(p, q))).map(|(_, p)| p.len()).sum();
+        assert!(shared > 260_000, "{shared} of {} shared", after.len());
+        assert!(a.0.iter().all(|(_, p)| p.len() <= PIECE_MOST));
     }
 
     #[test]

@@ -465,6 +465,17 @@ impl Canvas<'_> {
     }
 }
 
+/// The `orientation` a canvas shown `turns` quarter turns clockwise is kept with (as
+/// [`shown_turns`] reads it).
+fn orientation_for(turns: u32) -> i64 {
+    match turns % 4 {
+        1 => 4,
+        2 => 2,
+        3 => 3,
+        _ => 1,
+    }
+}
+
 /// The quarter turns clockwise a canvas made with the screen at `orientation` is shown at: 1
 /// upright, 2 upside down, 3 and 4 on its side one way and the other (as measured on files made
 /// each way: a mark at the top left of a canvas made at 3 is stored at the top right).
@@ -565,7 +576,7 @@ fn text_look(canvas: &Canvas<'_>, attrs: &Object<'_>) -> LayerText {
 
 /// `src` (`w` × `h`, `bpp` bytes a pixel, top row first) turned `turns` quarter turns clockwise,
 /// then mirrored.
-fn orient(src: Vec<u8>, w: usize, h: usize, bpp: usize, turns: u32, flip_x: bool, flip_y: bool) -> Vec<u8> {
+pub fn orient(src: Vec<u8>, w: usize, h: usize, bpp: usize, turns: u32, flip_x: bool, flip_y: bool) -> Vec<u8> {
     if turns == 0 && !flip_x && !flip_y {
         return src;
     }
@@ -773,6 +784,9 @@ pub struct Export<'a> {
     /// (a PNG, upright).
     pub reference: Option<&'a ReferenceWindow>,
     pub reference_picture: Option<&'a [u8]>,
+    /// How the canvas shows: turned this many quarter turns clockwise (its pixels kept as they
+    /// are; the preview should be turned so).
+    pub turns: u32,
 }
 
 /// The Reference window as a package keeps it. The format keeps the window's kind under
@@ -907,7 +921,7 @@ pub fn write(e: &Export<'_>) -> Vec<u8> {
         ("legacyBehaviour", Value::Int(1)),
         ("mask", mask),
         ("name", name),
-        ("orientation", Value::Int(1)),
+        ("orientation", Value::Int(orientation_for(e.turns))),
         ("primaryItem", selected.clone()),
         ("selectedLayer", selected),
         ("selectedSamplerLayer", sampled),
@@ -1456,6 +1470,7 @@ mod tests {
             time_lapse: None,
             reference,
             reference_picture: picture,
+            turns: 0,
         })
     }
 
@@ -1569,6 +1584,7 @@ mod tests {
             time_lapse: None,
             reference: None,
             reference_picture: None,
+            turns: 0,
         });
 
         let back = read(&bytes).unwrap();
@@ -1609,6 +1625,7 @@ mod tests {
                 time_lapse: None,
                 reference: None,
                 reference_picture: None,
+                turns: 0,
             }))
             .unwrap()
             .document
@@ -1674,6 +1691,7 @@ mod tests {
             time_lapse: None,
             reference: None,
             reference_picture: None,
+            turns: 0,
         });
         // the picture's 6 tiles, the mask's one, none for the clear layer
         let zip = ZipReader::new(&bytes).unwrap();
@@ -1719,6 +1737,7 @@ mod tests {
             time_lapse: None,
             reference: None,
             reference_picture: None,
+            turns: 0,
         });
         let zip = ZipReader::new(&bytes).unwrap();
         let mut older = ZipWriter::new();
@@ -1775,6 +1794,7 @@ mod tests {
             time_lapse: None,
             reference: None,
             reference_picture: None,
+            turns: 0,
         });
         let back = read(&bytes).unwrap();
         let d = &back.document;
@@ -1816,6 +1836,7 @@ mod tests {
             time_lapse: None,
             reference: None,
             reference_picture: None,
+            turns: 0,
         });
         let back = read(&bytes).unwrap();
         let kinds = |d: &Document| d.layers().iter().map(|l| l.kind).collect::<Vec<_>>();
@@ -1851,6 +1872,7 @@ mod tests {
             time_lapse: None,
             reference: None,
             reference_picture: None,
+            turns: 0,
         });
         let zip = ZipReader::new(&bytes).unwrap();
         let archive = Archive::read(&zip.read("Document.archive").unwrap()).unwrap();
@@ -1886,6 +1908,7 @@ mod tests {
                 time_lapse: None,
                 reference: None,
                 reference_picture: None,
+                turns: 0,
             })
         };
         if let Some(a) = doc.animation.as_mut() {
@@ -2006,6 +2029,7 @@ mod tests {
             time_lapse: None,
             reference: None,
             reference_picture: None,
+            turns: 0,
         };
         let back = read(&write(&export)).unwrap();
         let layer = back.document.layers().iter().find(|l| l.text.is_some()).unwrap();
@@ -2041,6 +2065,7 @@ mod tests {
                 time_lapse: None,
                 reference: None,
                 reference_picture: None,
+                turns: 0,
             }))
             .unwrap()
             .document
@@ -2111,6 +2136,7 @@ mod tests {
                 time_lapse: t,
                 reference: None,
                 reference_picture: None,
+                turns: 0,
             })
         };
         let t = TimeLapse {
@@ -2219,6 +2245,7 @@ mod tests {
                 time_lapse: None,
                 reference: None,
                 reference_picture: None,
+                turns: 0,
             });
             std::fs::write(out, package).unwrap();
         }

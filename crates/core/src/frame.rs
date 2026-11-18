@@ -13,6 +13,15 @@ use crate::{
 };
 
 impl State {
+    /// Whether the window's surface asks for wide colour (see [`configure`]): only for a canvas
+    /// whose colours go past sRGB (Display P3, CMYK shown through Display P3, an imported profile),
+    /// and only while the app allows it. An sRGB canvas shows the same in either, so its window
+    /// stays plain sRGB: the layer screens' compositors handle best (a wide one has blurred the
+    /// interface over the canvas, or dulled the canvas while nothing moved, on some tablets).
+    pub(crate) fn wide_colour(&self) -> bool {
+        self.wide_colour_allowed && (self.doc.profile.is_p3() || self.doc.icc.is_some())
+    }
+
     /// Draws the whole canvas fitted and centred on black into `view` (`format`, `size` pixels,
     /// its colours shown in `screen`): Project canvas, on a second display.
     pub(crate) fn draw_fitted(
@@ -64,6 +73,8 @@ impl State {
             }
             SelectionDisplay::Tint => SelectionLook::Tint(Profile::Srgb.convert(SELECTION_TINT, screen)),
             SelectionDisplay::Fill => SelectionLook::Fill(Profile::Srgb.convert(SELECTION_FILL, screen)),
+            // the paint colour is in the canvas's colours
+            SelectionDisplay::ColourFill => SelectionLook::Fill(self.doc.profile.convert(self.color, screen)),
         }
     }
 
@@ -103,10 +114,12 @@ impl State {
         let grid = self.surround_grid(Vec2::ZERO);
         let surround = self.surround();
         let selection_shown = self.selection_shown(started, screen);
+        // while a transform is open the selection shows no bands: its box shows what moves
+        let banded = self.transform.is_none();
         // a model is drawn in place of the flat canvas, and the drawing pad may be a sphere
         if self.scene_shown() {
             let convert = colours_to(self.doc.profile, screen);
-            let selected = self.selection.is_some();
+            let selected = self.selection.is_some() && banded;
             let look = selected.then_some(selection_shown);
             // the bands drift, so they keep drawing, a frame each time they have moved a pixel
             if matches!(look, Some(SelectionLook::Stripes(_))) {
@@ -124,7 +137,7 @@ impl State {
             let s = self.display_scale;
             // the bands over what is not selected drift, so they keep drawing
             let shown = selection_shown;
-            let look = canvas.has_selection().then_some(shown);
+            let look = (canvas.has_selection() && banded).then_some(shown);
             let animating = matches!(look, Some(SelectionLook::Stripes(_)));
             let convert = colours_to(self.doc.profile, screen);
             // a canvas with a profile of its own shows through a table, made when that changes
@@ -184,6 +197,13 @@ impl State {
         }
         self.heed_filter_run();
     }
+}
+
+/// The least time between the beginnings of two frames for a screen showing at most `hertz` frames
+/// a second: a tenth under its period, so a frame is ready for every refresh as frames drift
+/// against it. None for a rate that can't be.
+pub(crate) fn frame_spacing(hertz: f32) -> Option<Duration> {
+    (hertz.is_finite() && hertz >= 1.0).then(|| Duration::from_secs_f32(0.9 / hertz.min(1000.0)))
 }
 
 /// The profile a configured surface shows colours in.

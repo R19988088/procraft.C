@@ -26,6 +26,8 @@ pub struct Zoom {
     /// The artwork's picture in the gallery, and its canvas on screen (points).
     cell: Rect,
     canvas: Place,
+    /// How far the picture in the gallery shows the artwork turned: quarter turns clockwise.
+    turns: u32,
     pub opening: bool,
     started: Instant,
     /// The canvas as it closed.
@@ -34,26 +36,27 @@ pub struct Zoom {
 
 impl Zoom {
     /// Opening `session` (shown in a window `size` pixels, `scale` pixels a point) from its
-    /// picture at `cell`.
-    pub fn opening(session: &CanvasSession, cell: Rect, size: (u32, u32), scale: f32) -> Zoom {
+    /// picture at `cell`, turned `turns` quarter turns clockwise.
+    pub fn opening(session: &CanvasSession, cell: Rect, turns: u32, size: (u32, u32), scale: f32) -> Zoom {
         let matrix = session.opening_view_matrix(size.0, size.1);
         Zoom {
             cell,
             canvas: canvas_place(session, &matrix, scale),
+            turns,
             opening: true,
             started: Instant::now(),
             picture: None,
         }
     }
 
-    /// Closing `session` into its picture at `cell`.
-    pub fn closing(ctx: &egui::Context, session: &CanvasSession, cell: Rect) -> Zoom {
+    /// Closing `session` into its picture at `cell`, turned `turns` quarter turns clockwise.
+    pub fn closing(ctx: &egui::Context, session: &CanvasSession, cell: Rect, turns: u32) -> Zoom {
         let picture = session.canvas_thumbnail(PICTURE_SIDE).map(|t| {
             let image = egui::ColorImage::from_rgba_premultiplied([t.width as usize, t.height as usize], &t.rgba);
             ctx.load_texture("closing canvas", image, egui::TextureOptions::LINEAR)
         });
         let canvas = canvas_place(session, &session.view_matrix(), ctx.pixels_per_point());
-        Zoom { cell, canvas, opening: false, started: Instant::now(), picture }
+        Zoom { cell, canvas, turns, opening: false, started: Instant::now(), picture }
     }
 
     /// Not under way yet (the canvas is still being made): it starts from the gallery again.
@@ -81,13 +84,17 @@ impl Zoom {
         let e = self.progress();
         // from the cell (0) towards the canvas (1)
         let t = if self.opening { e } else { 1.0 - e };
-        let full = if self.cell.height() > 0.0 { self.canvas.size.y / self.cell.height() } else { 1.0 };
+        // the picture's size and turn as the artwork is upright (its sides swapped on its side)
+        let upright = if self.turns % 2 == 1 { vec2(self.cell.height(), self.cell.width()) } else { self.cell.size() };
+        let turned = (self.turns % 4) as f32 * std::f32::consts::FRAC_PI_2;
+        let full = if upright.y > 0.0 { self.canvas.size.y / upright.y } else { 1.0 };
         let k = 1.0 + (full - 1.0) * t;
         let centre = self.cell.center().lerp(self.canvas.centre, t);
-        // the shorter way round
-        let angle = (self.canvas.angle + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        // from the picture's turn to the canvas's, the shorter way round
+        let angle = (self.canvas.angle - turned + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+            - std::f32::consts::PI;
         let at =
-            Place { centre, size: self.cell.size() * k, angle: angle * t, mirrored: self.canvas.mirrored && t > 0.5 };
+            Place { centre, size: upright * k, angle: turned + angle * t, mirrored: self.canvas.mirrored && t > 0.5 };
         (at, TSTransform::new(centre.to_vec2() - self.cell.center().to_vec2() * k, k))
     }
 

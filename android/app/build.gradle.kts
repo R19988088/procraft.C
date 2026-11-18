@@ -1,3 +1,4 @@
+import java.io.ByteArrayOutputStream
 import javax.inject.Inject
 import org.gradle.process.ExecOperations
 
@@ -11,7 +12,7 @@ plugins {
 val cargoWorkspaceDir: File = rootDir.parentFile
 val rustAbis: List<String> =
     providers.gradleProperty("procraft.abis").getOrElse("arm64-v8a,x86_64").split(',').map { it.trim() }.filter { it.isNotEmpty() }
-val minApi = 28
+val minApi = 26
 
 // The app's version: gradle.properties' procraft.version, or the version tag's when the release
 // workflow builds a release. The version code follows from it (0.0.1-beta → 101, 0.0.1-beta.2 →
@@ -70,23 +71,44 @@ abstract class CargoNdkBuild : DefaultTask() {
     fun build() {
         val targets = abis.get().flatMap { listOf("-t", it) }
         val out = outputDir.get().asFile.absolutePath
-        // the library mustn't hold the paths it was built in (panic locations name source files)
+        // the library mustn't hold the paths it was built in (panic locations name source files);
+        // the standard library's source goes under the name rustc gives it without the rust-src
+        // component (/rustc/<commit>/), as with it installed rustc names the local copy instead
         val cargoHome = System.getenv("CARGO_HOME")?.takeIf { it.isNotBlank() } ?: File(System.getProperty("user.home"), ".cargo").absolutePath
+        val commit = rustc("-vV").lineSequence().first { it.startsWith("commit-hash:") }.substringAfter(':').trim()
+        val stdSource = File(rustc("--print", "sysroot"), "lib/rustlib/src/rust").absolutePath
         val remap = listOf(
             "--remap-path-prefix=${File(workspaceDir.get()).absolutePath}=/procraft",
             "--remap-path-prefix=$cargoHome=/cargo",
+            "--remap-path-prefix=$stdSource=/rustc/$commit/",
         )
         execOperations.exec {
             workingDir(workspaceDir.get())
             environment("ANDROID_NDK_HOME", ndkDir.get())
             environment("CARGO_ENCODED_RUSTFLAGS", remap.joinToString("\u001f"))
+            // never incremental: it splits the code differently, and the library would differ from a release's
+            environment("CARGO_INCREMENTAL", "0")
+            // from Cargo.lock as it is: a build of the same commit elsewhere (F-Droid's) comes out the same
             commandLine(
                 listOf(cargo.get(), "ndk") + targets +
-                    listOf("--platform", apiLevel.get().toString(), "-o", out, "build", "--release", "-p", "procraft-core", "--lib"),
+                    listOf("--platform", apiLevel.get().toString(), "-o", out, "build", "--release", "--locked", "-p", "procraft-core", "--lib"),
             )
         }
         // only the app's library ships (cargo-ndk copies any other shared library cargo left)
         File(out).walk().filter { it.isFile && it.name != "libprocraft_core.so" }.forEach { it.delete() }
+    }
+
+    /** What `rustc` prints for `args`, run where cargo runs it (the same toolchain). */
+    private fun rustc(vararg args: String): String {
+        val cargoFile = File(cargo.get())
+        val rustc = if (cargoFile.isAbsolute) cargoFile.resolveSibling(cargoFile.name.replace("cargo", "rustc")).path else "rustc"
+        val printed = ByteArrayOutputStream()
+        execOperations.exec {
+            workingDir(workspaceDir.get())
+            commandLine(listOf(rustc) + args)
+            standardOutput = printed
+        }
+        return printed.toString().trim()
     }
 }
 
@@ -106,7 +128,7 @@ abstract class UniffiBindgen : DefaultTask() {
         execOperations.exec {
             workingDir(workspaceDir.get())
             commandLine(
-                cargo.get(), "run", "--quiet", "-p", "procraft-bindgen", "--",
+                cargo.get(), "run", "--quiet", "--locked", "-p", "procraft-bindgen", "--",
                 "generate", library.get().asFile.absolutePath, "--language", "kotlin", "--out-dir", out.absolutePath, "--no-format",
             )
         }

@@ -32,9 +32,10 @@ pub(super) type CardStroke = ((u32, u32, u32), Option<egui::ColorImage>);
 
 impl Library {
     /// The cards' strokes forgotten, and any being drawn left to finish unread: the libraries
-    /// changed.
+    /// changed. Their pictures are let go at the next frame (see [`Library::show`]): the frame
+    /// this is told in may draw them yet.
     pub(super) fn forget_cards(&mut self) {
-        self.card_previews.clear();
+        self.card_retired.extend(self.card_previews.drain().filter_map(|(_, stroke)| stroke));
         self.card_wanted.clear();
         self.card_drawing = None;
     }
@@ -161,7 +162,7 @@ impl Library {
     }
 
     /// Brings library `i` into use and shows it.
-    fn open_library(&mut self, session: &CanvasSession, libraries: &[BrushLibraryInfo], i: usize) {
+    pub(super) fn open_library(&mut self, session: &CanvasSession, libraries: &[BrushLibraryInfo], i: usize) {
         self.showing_libraries = false;
         if libraries.get(i).is_some_and(|l| l.current) {
             return;
@@ -359,7 +360,7 @@ impl Library {
             }
         } else if let Some(file) = crate::files::pick_file("Import a brush library") {
             // read on a thread of its own, then added as a library and brought into use
-            self.add_brushes(vec![file], true);
+            self.add_brushes(session, vec![file], true);
         }
     }
 

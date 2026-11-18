@@ -205,6 +205,55 @@ pub struct LayerText {
     /// The text box's top left corner, canvas pixels, and how wide it wraps (0: no wrapping).
     pub origin: [f32; 2],
     pub width: f32,
+    /// The look of each stretch of the text in turn, covering it all, when it isn't one look
+    /// throughout; then the look above is the first stretch's. One look throughout keeps none
+    /// (as text was kept before it could have more), the look above being all of it's.
+    pub runs: Vec<TextRun>,
+}
+
+/// A stretch of a text layer's characters in a look of its own: its typeface and style, size,
+/// spacing, raise, opacity, underline, outline and colour, as [`LayerText`] has them. The
+/// alignment, the leading, upper case and running down are the whole text's.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct TextRun {
+    /// How many of the text's characters (Unicode scalar values) it covers.
+    pub len: u32,
+    pub font: String,
+    pub style: String,
+    pub size: f32,
+    pub kerning: f32,
+    pub tracking: f32,
+    pub baseline: f32,
+    pub opacity: f32,
+    pub underline: bool,
+    pub outline: bool,
+    pub color: [f32; 3],
+}
+
+impl Default for TextRun {
+    fn default() -> Self {
+        LayerText::default().run(0)
+    }
+}
+
+impl TextRun {
+    /// The same look with every number in range.
+    fn sanitized(mut self) -> TextRun {
+        let unit = |v: f32| if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 };
+        self.size = if self.size.is_finite() { self.size.clamp(1.0, 4096.0) } else { 64.0 };
+        self.kerning = unit(self.kerning);
+        self.tracking = unit(self.tracking);
+        self.baseline = unit(self.baseline);
+        self.opacity = if self.opacity.is_finite() { self.opacity.clamp(0.0, 1.0) } else { 1.0 };
+        self.color = self.color.map(|c| if c.is_finite() { c.clamp(0.0, 1.0) } else { 0.0 });
+        self
+    }
+
+    /// Whether `other` looks the same, however long either is.
+    pub fn looks_like(&self, other: &TextRun) -> bool {
+        TextRun { len: 0, ..self.clone() } == TextRun { len: 0, ..other.clone() }
+    }
 }
 
 impl Default for LayerText {
@@ -227,11 +276,81 @@ impl Default for LayerText {
             color: [0.0; 3],
             origin: [0.0; 2],
             width: 0.0,
+            runs: Vec::new(),
         }
     }
 }
 
 impl LayerText {
+    /// The look above as a stretch `len` characters long.
+    pub fn run(&self, len: u32) -> TextRun {
+        TextRun {
+            len,
+            font: self.font.clone(),
+            style: self.style.clone(),
+            size: self.size,
+            kerning: self.kerning,
+            tracking: self.tracking,
+            baseline: self.baseline,
+            opacity: self.opacity,
+            underline: self.underline,
+            outline: self.outline,
+            color: self.color,
+        }
+    }
+
+    /// Each stretch of the text in its look, in order, covering it all: its runs, or one in the
+    /// look above when it keeps none (or they don't cover the text).
+    pub fn runs(&self) -> Vec<TextRun> {
+        let count = self.text.chars().count();
+        let covered: usize = self.runs.iter().map(|r| r.len as usize).sum();
+        if self.runs.is_empty() || covered != count {
+            return vec![self.run(u32::try_from(count).unwrap_or(u32::MAX))];
+        }
+        self.runs.clone()
+    }
+
+    /// Sets the look of each stretch of the text in turn (`runs`, covering it): stretches next to
+    /// each other that look alike are joined and empty ones dropped, the look above becomes the
+    /// first's, and one look throughout keeps none. Runs that don't cover the text are left out
+    /// (the look above stays all of it's).
+    pub fn set_runs(&mut self, runs: Vec<TextRun>) {
+        let count = self.text.chars().count();
+        let covered: usize = runs.iter().map(|r| r.len as usize).sum();
+        if covered != count {
+            self.runs.clear();
+            return;
+        }
+        let mut joined: Vec<TextRun> = Vec::new();
+        for run in runs.into_iter().filter(|r| r.len > 0) {
+            match joined.last_mut() {
+                Some(last) if last.looks_like(&run) => last.len += run.len,
+                _ => joined.push(run),
+            }
+        }
+        if let Some(first) = joined.first().cloned() {
+            self.set_look(&first);
+        }
+        if joined.len() <= 1 {
+            joined.clear();
+        }
+        self.runs = joined;
+    }
+
+    /// The look above becomes `look`'s (its runs as they are).
+    pub fn set_look(&mut self, look: &TextRun) {
+        self.font = look.font.clone();
+        self.style = look.style.clone();
+        self.size = look.size;
+        self.kerning = look.kerning;
+        self.tracking = look.tracking;
+        self.baseline = look.baseline;
+        self.opacity = look.opacity;
+        self.underline = look.underline;
+        self.outline = look.outline;
+        self.color = look.color;
+    }
+
     /// The same text with every number in range.
     pub fn sanitized(mut self) -> LayerText {
         let unit = |v: f32| if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 };
@@ -245,6 +364,11 @@ impl LayerText {
         self.origin = self.origin.map(|c| if c.is_finite() { c.clamp(-1.0e6, 1.0e6) } else { 0.0 });
         self.width = if self.width.is_finite() { self.width.clamp(0.0, 1.0e6) } else { 0.0 };
         self.text = self.text.chars().take(100_000).collect();
+        // (runs that don't cover the text as kept are dropped)
+        let runs: Vec<TextRun> = std::mem::take(&mut self.runs).into_iter().map(TextRun::sanitized).collect();
+        if !runs.is_empty() {
+            self.set_runs(runs);
+        }
         self
     }
 

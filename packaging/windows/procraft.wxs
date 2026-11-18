@@ -7,8 +7,9 @@
 
   For every user of the machine, with a wizard: Welcome, the install folder (Program Files\ProCraft
   at first, then wherever the last version went), Ready, progress, and Finish with a ticked
-  "Launch ProCraft". It installs ProCraft.exe, the licence files and a Start menu shortcut. A newer
-  version takes an older one's place. Modelled on SolidCraft's (tangency-labs/solidcraft).
+  "Launch ProCraft". It installs ProCraft.exe, Microsoft's DirectX Shader Compiler beside it
+  (dxcompiler.dll and dxil.dll, with their licences), the licence files and a Start menu shortcut.
+  A newer version takes an older one's place. Modelled on SolidCraft's (tangency-labs/solidcraft).
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <!-- Never change the UpgradeCode: it is what lets a new installer replace an earlier one. -->
@@ -73,6 +74,12 @@
       <Component Id="LicenseApache"><File Source="$(var.BinDir)\LICENSE-APACHE" /></Component>
       <Component Id="Notice"><File Source="$(var.BinDir)\NOTICE" /></Component>
       <Component Id="Attribution"><File Source="$(var.BinDir)\ATTRIBUTION.md" /></Component>
+      <!-- Direct3D 12 makes the shaders with these where they are beside ProCraft.exe -->
+      <Component Id="DxCompiler"><File Source="$(var.BinDir)\dxcompiler.dll" /></Component>
+      <Component Id="Dxil"><File Source="$(var.BinDir)\dxil.dll" /></Component>
+      <Component Id="DxcLicenseLlvm"><File Source="$(var.BinDir)\DXC-LICENSE-LLVM.txt" /></Component>
+      <Component Id="DxcLicenceMit"><File Source="$(var.BinDir)\DXC-LICENCE-MIT.txt" /></Component>
+      <Component Id="DxcLicenseMs"><File Source="$(var.BinDir)\DXC-LICENSE-MS.txt" /></Component>
     </ComponentGroup>
   </Fragment>
 </Wix>

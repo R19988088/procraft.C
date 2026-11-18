@@ -8,7 +8,7 @@ use procraft_core::CanvasSession;
 
 use crate::icons;
 use crate::look::Look;
-use crate::transform::{BUTTON_ROOMY, BUTTON_WIDTH, Button, Tapped, floating_toolbar};
+use crate::transform::{BUTTON_ROOMY, Button, Tapped, floating_toolbar};
 
 /// What Rotate 45° turns it by.
 const EIGHTH_TURN: f32 = std::f32::consts::FRAC_PI_4;
@@ -34,7 +34,7 @@ pub fn show(ctx: &egui::Context, look: &mut Look, session: &CanvasSession) {
         Button::new(&icons::CROSS, "Cancel", 28.0),
         Button::new(&icons::TICK, "Done", 28.0),
     ];
-    match floating_toolbar(ctx, look, "model picture bar", (BUTTON_ROOMY, BUTTON_WIDTH), &[], &buttons, 43.0) {
+    match floating_toolbar(ctx, look, "model picture bar", BUTTON_ROOMY, &[], &buttons, 43.0) {
         Some(Tapped::Button(0)) => session.model_picture_flip(true),
         Some(Tapped::Button(1)) => session.model_picture_flip(false),
         Some(Tapped::Button(2)) => session.model_picture_move(0.0, 0.0, 1.0, EIGHTH_TURN),

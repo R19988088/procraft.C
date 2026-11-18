@@ -1,11 +1,12 @@
 """Builds the plugins under plugins/ and packs each as a .procraft-plugin file, which the app imports:
 
-    python tools/pack_plugin.py [touch-offset | extract-lines] [--out DIR]
+    python tools/pack_plugin.py [touch-offset | effects] [--out DIR]
     python tools/pack_plugin.py --bundle
 
 With no name it packs them all. What goes in is what the manifest's `holds` says: for `hooks`, the
 folder's crate built to WebAssembly (rustup target add wasm32-unknown-unknown), and for code on the
-`picker` hook its picture.wgsl too; for `filter`, its text. A file is a zip of the craft-extension.json, with those listed by size and SHA-256 as the app
+`picker` hook its picture.wgsl too; for `filter`, its text: filter.wgsl, or the filters/<key>.wgsl of each
+filter its `filters` list names. A file is a zip of the craft-extension.json, with those listed by size and SHA-256 as the app
 asks, and them (plugin.wasm, filter.wgsl or both). They land in target/plugins unless --out says
 where. A file packed again from the same folder comes out the same, byte for byte.
 
@@ -28,6 +29,7 @@ TARGET = 'wasm32-unknown-unknown'
 MODULE = 'plugin.wasm'
 FILTER = 'filter.wgsl'
 PICTURE = 'picture.wgsl'
+FILTERS = 'filters'
 MANIFEST = 'craft-extension.json'
 TARGET_DIR = os.path.join(ROOT, 'target', 'plugins')
 BUNDLED = os.path.join(ROOT, 'crates', 'core', 'bundled-plugins')
@@ -35,17 +37,30 @@ SOURCES = 'sources.txt'
 EXTENSION = '.procraft-plugin'
 
 
+def std_source(folder):
+    """The `--remap-path-prefix` that names the standard library's source as rustc does without the
+    rust-src component (/rustc/<its commit>/): with it installed, rustc names the local copy instead
+    (in the user's toolchain folder)."""
+    def rustc(*args):
+        return subprocess.run(['rustc', *args], cwd=folder, capture_output=True, text=True, check=True).stdout
+    sysroot = rustc('--print', 'sysroot').strip()
+    commit = next(line.split(':', 1)[1].strip() for line in rustc('-vV').splitlines() if line.startswith('commit-hash:'))
+    return f"--remap-path-prefix={os.path.join(sysroot, 'lib', 'rustlib', 'src', 'rust')}=/rustc/{commit}/"
+
+
 def built(name, folder):
     """The module of the crate in `folder`, with no local path in it: a panic's location names its
-    source file, so the repository and cargo's home go in under fixed names (a module packed
-    anywhere comes out the same, and names nobody's folders)."""
+    source file, so the repository, cargo's home and the standard library's source go in under fixed
+    names (a module packed anywhere comes out the same, and names nobody's folders)."""
     env = dict(os.environ)
     cargo_home = env.get('CARGO_HOME') or os.path.join(os.path.expanduser('~'), '.cargo')
-    flags = [f'--remap-path-prefix={ROOT}=/procraft', f'--remap-path-prefix={cargo_home}=/cargo']
+    flags = [f'--remap-path-prefix={ROOT}=/procraft', f'--remap-path-prefix={cargo_home}=/cargo', std_source(folder)]
     env.pop('RUSTFLAGS', None)
     env['CARGO_ENCODED_RUSTFLAGS'] = '\x1f'.join(flags)
+    # an incremental build splits the code differently, and its functions come out in another order
+    env['CARGO_INCREMENTAL'] = '0'
     subprocess.run(
-        ['cargo', 'build', '--release', '--target', TARGET, '--target-dir', TARGET_DIR],
+        ['cargo', 'build', '--release', '--locked', '--target', TARGET, '--target-dir', TARGET_DIR],
         cwd=folder,
         check=True,
         env=env,
@@ -101,8 +116,11 @@ def pack(name, out):
     if 'hooks' in manifest['holds']:
         files[MODULE] = built(name, folder)
     if 'filter' in manifest['holds']:
-        with open(os.path.join(folder, FILTER), 'rb') as f:
-            files[FILTER] = f.read()
+        # one filter, or several listed, each of its own file
+        listed = [f"{FILTERS}/{filter['key']}.wgsl" for filter in manifest.get('filters', [])]
+        for inside in listed or [FILTER]:
+            with open(os.path.join(folder, *inside.split('/')), 'rb') as f:
+                files[inside] = f.read()
     # a picker brings its picture
     if 'picker' in manifest.get('hooks', []):
         with open(os.path.join(folder, PICTURE), 'rb') as f:

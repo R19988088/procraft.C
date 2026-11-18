@@ -25,6 +25,8 @@ const LOUPE_EDGE: u32 = 0xFF808080;
 const MODE_BAR: Themed = Themed(0xD63B3B3B, 0xD6EEEEEE);
 const MODE_TEXT: u32 = 0xFFC5C5C5;
 const MODES_FILL: Themed = Themed(0xFF7B7B7B, 0xFFFFFFFF);
+/// The hover fill's stamp is made at most this many pixels across (larger, it is drawn bigger).
+const CURSOR_FILL_MOST: usize = 256;
 
 /// A passing message under the top bar; a warning stays longer.
 struct Notice {
@@ -64,6 +66,11 @@ pub struct Overlays {
     cursor_turn: f32,
     /// How the cursor is drawn (Advanced cursor settings).
     pub cursor_style: CursorStyle,
+    /// The brush's stamp the cursor fills while the pointer hovers (its Hover fill), its side in
+    /// pixels and how strongly the brush paints; none painting, or when the brush has no fill.
+    cursor_fill: Option<(Vec<u8>, usize, f32)>,
+    /// The stamp's picture, by what it was made from.
+    cursor_fill_picture: Option<(u64, TextureHandle)>,
 }
 
 impl Default for Overlays {
@@ -79,6 +86,8 @@ impl Default for Overlays {
             cursor_shape: Vec::new(),
             cursor_turn: 0.0,
             cursor_style: CursorStyle::Brush,
+            cursor_fill: None,
+            cursor_fill_picture: None,
         }
     }
 }
@@ -98,6 +107,8 @@ impl Overlays {
         }
         // turned as the pen turns, through the stroke
         self.cursor_turn = cursor_turn(session);
+        // filled only while it hovers
+        self.cursor_fill = None;
         self.cursor = at.map(|(x, y)| {
             let (r, outline) = self.cursor.map(|(_, r, o)| (r, o)).unwrap_or_else(|| {
                 let info = session.info();
@@ -121,6 +132,11 @@ impl Overlays {
         self.cursor = at.map(|at| {
             let outline = session.current_brush_setting("cursor_outline".into()).round() as i32;
             (at, info.brush_diameter * info.zoom / 2.0 / ppp, outline)
+        });
+        // the stamp it paints, filling it, if the brush's Hover fill says so
+        self.cursor_fill = at.filter(|_| session.current_brush_setting("hover_fill".into()).round() >= 1.0).map(|_| {
+            let side = ((info.brush_diameter * info.zoom).ceil() as usize).clamp(2, CURSOR_FILL_MOST);
+            (session.brush_stamp(side as u32), side, info.opacity.clamp(0.0, 1.0))
         });
     }
 
@@ -180,7 +196,7 @@ impl Overlays {
     pub fn show(&mut self, ui: &Ui, look: &mut Look, current: Color32, bar_shown: bool) -> Option<QuickShapeKind> {
         let ctx = ui.ctx().clone();
         let window = ctx.content_rect();
-        let under_bar = window.top() + if bar_shown { pc::BAR_HEIGHT } else { 0.0 };
+        let under_bar = window.top() + if bar_shown { crate::panel::bar_shown(&ctx) } else { 0.0 };
         let mut chosen = None;
         self.spent = None;
         self.frost = None;
@@ -210,6 +226,35 @@ impl Overlays {
                     }
                 }
                 self.notice_band(ui, under_bar, window);
+                // hovering, the brush's stamp in the colour, as strongly as it paints, under its
+                // outline
+                if let (Some((at, r, _)), Some((stamp, side, strength))) = (self.cursor, &self.cursor_fill)
+                    && r >= 2.0
+                    && stamp.len() >= side * side
+                {
+                    let key = crate::chrome::stamp_key(stamp, *side);
+                    let picture = match self.cursor_fill_picture.take() {
+                        Some((k, t)) if k == key => t,
+                        _ => {
+                            let pixels = stamp.iter().map(|&a| Color32::from_white_alpha(a)).collect();
+                            let image = egui::ColorImage { size: [*side, *side], pixels, ..Default::default() };
+                            ui.ctx().load_texture("cursor fill", image, TextureOptions::LINEAR)
+                        }
+                    };
+                    let (sin, cos) = self.cursor_turn.sin_cos();
+                    let corner = |x: f32, y: f32| at + vec2(x * cos - y * sin, x * sin + y * cos) * r;
+                    let colour = current.gamma_multiply(*strength);
+                    let mut mesh = egui::Mesh::with_texture(picture.id());
+                    for (x, y, u, v) in
+                        [(-1.0, -1.0, 0.0, 0.0), (1.0, -1.0, 1.0, 0.0), (1.0, 1.0, 1.0, 1.0), (-1.0, 1.0, 0.0, 1.0)]
+                    {
+                        mesh.vertices.push(egui::epaint::Vertex { pos: corner(x, y), uv: pos2(u, v), color: colour });
+                    }
+                    mesh.add_triangle(0, 1, 2);
+                    mesh.add_triangle(0, 2, 3);
+                    ui.painter().add(egui::Shape::mesh(mesh));
+                    self.cursor_fill_picture = Some((key, picture));
+                }
                 // the brush's outline where the pen paints: a thin dark ring with a light edge, or
                 // the colour, as the brush says
                 if let Some((at, r, outline)) = self.outline() {

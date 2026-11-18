@@ -12,7 +12,9 @@ use egui::{
     Align2, Color32, CornerRadius, Id, Key, KeyboardShortcut, Modifiers, Order, Pos2, Rect, Sense, Shape, Stroke,
     TextureHandle, TextureOptions, UiBuilder, Vec2, pos2, vec2,
 };
-use procraft_core::{CanvasSession, TextAlignment, TextDraw, TextDrawn, TextInfo, TextSide};
+use procraft_core::{
+    CanvasSession, TextAlignment, TextDraw, TextDrawn, TextInfo, TextRunInfo, TextSide, TextStyleChange,
+};
 
 use crate::alert::{Alert, Answer, Asking};
 use crate::icons::{self, Icon};
@@ -193,9 +195,11 @@ struct Geometry {
 pub struct TextEditor {
     /// The text being edited, as it stands; none when no text is.
     info: Option<TextInfo>,
-    /// What the field holds, and the letters chosen in it (characters, first to last).
+    /// What the field holds, the letters chosen in it (characters, first to last), and those the
+    /// core was last told of (it finds what was typed against them).
     typed: String,
     chosen: (usize, usize),
+    told: (usize, usize),
     /// Editing just began: the field takes the keys with all its text chosen.
     choose_all: bool,
     /// The style sheet is open in the bar's place; the text as it was when it opened (its
@@ -286,6 +290,7 @@ impl TextEditor {
             x: 0.0,
             y: 0.0,
             width: 0.0,
+            runs: Vec::new(),
         };
         // a medium sans, sized and placed as new text looks on screen
         let (screen, ppp) = (ctx.content_rect(), ctx.pixels_per_point());
@@ -313,6 +318,7 @@ impl TextEditor {
     fn start(&mut self, session: &CanvasSession, info: TextInfo) {
         self.typed = info.text.clone();
         self.chosen = (0, self.typed.chars().count());
+        self.told = self.chosen;
         self.choose_all = true;
         self.style_open = false;
         self.before_style = None;
@@ -326,8 +332,41 @@ impl TextEditor {
     fn change(&mut self, session: &CanvasSession, f: impl FnOnce(&mut TextInfo)) {
         let Some(info) = self.info.as_mut() else { return };
         f(info);
-        session.set_text(info.clone());
+        if let Some(now) = session.set_text(info.clone()) {
+            *info = now;
+        }
         self.draw(session);
+    }
+
+    /// The look of the letters chosen changed by `change` (with none chosen, of what is typed
+    /// next): theirs alone.
+    fn restyle(&mut self, session: &CanvasSession, change: TextStyleChange) {
+        let (start, end) = self.chosen;
+        if let Some(now) = session.text_restyle(start as u32, end as u32, change) {
+            self.info = Some(now);
+            self.draw(session);
+        }
+    }
+
+    /// The look the style sheet shows: the letters chosen's (the first one's), or what is typed
+    /// next at the caret; the text's own if the core has none.
+    fn chosen_look(&self, session: &CanvasSession, info: &TextInfo) -> TextRunInfo {
+        let (start, end) = self.chosen;
+        session.text_look(start as u32, end as u32).unwrap_or_else(|| TextRunInfo {
+            len: 0,
+            font: info.font.clone(),
+            style: info.style.clone(),
+            size: info.size,
+            kerning: info.kerning,
+            tracking: info.tracking,
+            baseline: info.baseline,
+            opacity: info.opacity,
+            underline: info.underline,
+            outline: info.outline,
+            r: info.r,
+            g: info.g,
+            b: info.b,
+        })
     }
 
     /// The text being edited as the core now has it (a change to its box's width undone or
@@ -405,14 +444,24 @@ impl TextEditor {
         if self.info.is_none() {
             return said;
         }
+        // changed in the core meanwhile (a colour chosen colours the letters chosen): drawn again
+        if let Some(now) = session.editing_text().and_then(|id| session.layer_text(id))
+            && self.info.as_ref() != Some(&now)
+        {
+            self.info = Some(now);
+            self.draw(session);
+        }
         // undo and redo are the app's, not the field's: undoing undoes the whole edit (with Shift
-        // first: the shortcut without it would take it too)
-        let shortcut =
-            |modifiers: Modifiers| ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(modifiers, Key::Z)));
-        if shortcut(Modifiers::COMMAND | Modifiers::SHIFT) {
+        // first: the shortcut without it would take it too); off a Mac Ctrl+Y redoes as well
+        let shortcut = |modifiers: Modifiers, key: Key| {
+            ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(modifiers, key)))
+        };
+        if shortcut(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z)
+            || (!cfg!(target_os = "macos") && shortcut(Modifiers::COMMAND, Key::Y))
+        {
             return Some(Said::Redo);
         }
-        if shortcut(Modifiers::COMMAND) {
+        if shortcut(Modifiers::COMMAND, Key::Z) {
             return Some(Said::Undo);
         }
         if let Some(drawn) = self.drawer.take() {
@@ -589,10 +638,15 @@ impl TextEditor {
             }
             _ => self.dragging = None,
         }
-        // what was typed
+        // what was typed (found against the letters chosen as it was typed), then where the
+        // letters chosen now are
         if self.info.as_ref().is_some_and(|i| i.text != self.typed) {
             let typed = self.typed.clone();
             self.change(session, |i| i.text = typed);
+        }
+        if self.chosen != self.told {
+            self.told = self.chosen;
+            session.text_select(self.chosen.0 as u32, self.chosen.1 as u32);
         }
         // Escape is Done
         if crate::ui::escape(ctx) {
@@ -744,6 +798,8 @@ impl TextEditor {
             return said;
         }
         let Some(info) = self.info.clone() else { return said };
+        // the letters chosen's look (what is typed next, with none chosen)
+        let chosen = self.chosen_look(session, &info);
         // the cards: wide, the four side by side; narrow, Typeface or Design
         let cards = Rect::from_min_max(
             pos2(sheet.left() + 10.0, bar.bottom()),
@@ -769,19 +825,19 @@ impl TextEditor {
             if let [font, style, design, attributes] =
                 lay(&[(263.5, 2.0), (184.5, 5.0), (328.0, 5.0), (325.0, 0.0)])[..]
             {
-                self.font_card(ui, session, &info, font, font_corners);
-                self.style_card(ui, session, &info, style, style_corners);
-                self.design_card(ui, session, &info, design);
-                self.attributes_card(ui, look, session, &info, attributes, true);
+                self.font_card(ui, session, &chosen, font, font_corners);
+                self.style_card(ui, session, &chosen, style, style_corners);
+                self.design_card(ui, session, &info, &chosen, design);
+                self.attributes_card(ui, look, session, &info, &chosen, attributes, true);
             }
         } else if self.page == 0 {
             if let [font, style] = lay(&[(424.5, 2.0), (297.5, 0.0)])[..] {
-                self.font_card(ui, session, &info, font, font_corners);
-                self.style_card(ui, session, &info, style, style_corners);
+                self.font_card(ui, session, &chosen, font, font_corners);
+                self.style_card(ui, session, &chosen, style, style_corners);
             }
         } else if let [design, attributes] = lay(&[(584.0, 5.0), (135.0, 0.0)])[..] {
-            self.design_card(ui, session, &info, design);
-            self.attributes_card(ui, look, session, &info, attributes, false);
+            self.design_card(ui, session, &info, &chosen, design);
+            self.attributes_card(ui, look, session, &info, &chosen, attributes, false);
         }
         // Typeface | Design, when the cards don't all fit
         if !wide {
@@ -825,7 +881,7 @@ impl TextEditor {
         &mut self,
         ui: &mut egui::Ui,
         session: &CanvasSession,
-        info: &TextInfo,
+        info: &TextRunInfo,
         rect: Rect,
         corners: CornerRadius,
     ) {
@@ -839,7 +895,7 @@ impl TextEditor {
             .collect();
         if let Some(i) = self.cells(ui, inside, "fonts", &rows) {
             let family = rows.get(i).map(|r| r.1.clone()).unwrap_or_default();
-            self.change(session, |t| t.font = family);
+            self.restyle(session, TextStyleChange::Font { family });
         }
     }
 
@@ -847,7 +903,7 @@ impl TextEditor {
         &mut self,
         ui: &mut egui::Ui,
         session: &CanvasSession,
-        info: &TextInfo,
+        info: &TextRunInfo,
         rect: Rect,
         corners: CornerRadius,
     ) {
@@ -857,8 +913,8 @@ impl TextEditor {
             .map(|s| (s.clone(), info.font.clone(), s.clone(), s == info.style))
             .collect();
         if let Some(i) = self.cells(ui, inside, "styles", &rows) {
-            let style = rows.get(i).map(|r| r.2.clone()).unwrap_or_default();
-            self.change(session, |t| t.style = style);
+            let name = rows.get(i).map(|r| r.2.clone()).unwrap_or_default();
+            self.restyle(session, TextStyleChange::Style { name });
         }
     }
 
@@ -951,6 +1007,7 @@ impl TextEditor {
                 x: 0.0,
                 y: 0.0,
                 width: 0.0,
+                runs: Vec::new(),
             };
             let b = procraft_core::text_box(info.clone());
             let (w, h) = (
@@ -964,17 +1021,26 @@ impl TextEditor {
         made.as_ref().map(|(t, s)| (t.id(), *s))
     }
 
-    fn design_card(&mut self, ui: &mut egui::Ui, session: &CanvasSession, info: &TextInfo, rect: Rect) {
+    /// Size, kerning, tracking, baseline and opacity: the letters chosen's; leading: the whole
+    /// text's.
+    fn design_card(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &CanvasSession,
+        info: &TextInfo,
+        chosen: &TextRunInfo,
+        rect: Rect,
+    ) {
         let inside = Self::card(ui, rect, "Design", CornerRadius::same(CARD_CORNER));
         let dpi = session.info().dpi.max(1.0);
         let pt = |px: f32| px * 72.0 / dpi;
         let rows: [(&str, f32, String, bool); 6] = [
-            ("Size", ((info.size - 1.0) / 1999.0).clamp(0.0, 1.0).sqrt(), format!("{:.1}pt", pt(info.size)), false),
-            ("Kerning", info.kerning / 2.0 + 0.5, format!("{:.1}%", info.kerning * 100.0), true),
-            ("Tracking", info.tracking / 2.0 + 0.5, format!("{:.1}%", info.tracking * 100.0), true),
+            ("Size", ((chosen.size - 1.0) / 1999.0).clamp(0.0, 1.0).sqrt(), format!("{:.1}pt", pt(chosen.size)), false),
+            ("Kerning", chosen.kerning / 2.0 + 0.5, format!("{:.1}%", chosen.kerning * 100.0), true),
+            ("Tracking", chosen.tracking / 2.0 + 0.5, format!("{:.1}%", chosen.tracking * 100.0), true),
             ("Leading", info.leading / 2.0 + 0.5, format!("{}pt", pt(info.leading * info.size).round()), true),
-            ("Baseline", info.baseline / 2.0 + 0.5, format!("{}pt", pt(info.baseline * info.size).round()), true),
-            ("Opacity", info.opacity, format!("{:.1}%", info.opacity * 100.0), false),
+            ("Baseline", chosen.baseline / 2.0 + 0.5, format!("{}pt", pt(chosen.baseline * chosen.size).round()), true),
+            ("Opacity", chosen.opacity, format!("{:.1}%", chosen.opacity * 100.0), false),
         ];
         let (x0, x1) = (inside.left() + 4.0 + 16.0, inside.right() - 4.0 - 16.0);
         let ink = argb(SHEET_INK);
@@ -1010,14 +1076,18 @@ impl TextEditor {
                 && let Some(p) = response.interact_pointer_pos()
             {
                 let v = ((p.x - x0) / track.width()).clamp(0.0, 1.0);
-                self.change(session, |t| match label {
-                    "Size" => t.size = 1.0 + 1999.0 * v * v,
-                    "Kerning" => t.kerning = v * 2.0 - 1.0,
-                    "Tracking" => t.tracking = v * 2.0 - 1.0,
-                    "Leading" => t.leading = v * 2.0 - 1.0,
-                    "Baseline" => t.baseline = v * 2.0 - 1.0,
-                    _ => t.opacity = v,
-                });
+                let change = match label {
+                    "Size" => TextStyleChange::Size { size: 1.0 + 1999.0 * v * v },
+                    "Kerning" => TextStyleChange::Kerning { value: v * 2.0 - 1.0 },
+                    "Tracking" => TextStyleChange::Tracking { value: v * 2.0 - 1.0 },
+                    "Baseline" => TextStyleChange::Baseline { value: v * 2.0 - 1.0 },
+                    "Opacity" => TextStyleChange::Opacity { value: v },
+                    _ => {
+                        self.change(session, |t| t.leading = v * 2.0 - 1.0);
+                        continue;
+                    }
+                };
+                self.restyle(session, change);
             }
         }
     }
@@ -1032,6 +1102,7 @@ impl TextEditor {
         look: &mut Look,
         session: &CanvasSession,
         info: &TextInfo,
+        chosen: &TextRunInfo,
         rect: Rect,
         wide: bool,
     ) {
@@ -1065,8 +1136,8 @@ impl TextEditor {
             y += 13.0 + gap;
         }
         let looks: [(&str, &Icon, f32, bool, f32); 3] = [
-            ("underline", &icons::TEXT_UNDERLINE, 38.0, info.underline, 94.0),
-            ("outline", &icons::TEXT_OUTLINE, 38.0, info.outline, 94.0),
+            ("underline", &icons::TEXT_UNDERLINE, 38.0, chosen.underline, 94.0),
+            ("outline", &icons::TEXT_OUTLINE, 38.0, chosen.outline, 94.0),
             ("vertical", &icons::TEXT_VERTICAL, 41.0, info.vertical, 111.0),
         ];
         if wide {
@@ -1105,13 +1176,14 @@ impl TextEditor {
         if let Some(a) = aligned {
             self.change(session, |t| t.align = a);
         }
-        if let Some(name) = toggled {
-            self.change(session, |t| match name {
-                "underline" => t.underline = !t.underline,
-                "outline" => t.outline = !t.outline,
-                "vertical" => t.vertical = !t.vertical,
-                _ => t.all_caps = !t.all_caps,
-            });
+        // underline and outline the letters chosen's (on for all of them unless all have it already);
+        // vertical and all caps the whole text's
+        match toggled {
+            Some("underline") => self.restyle(session, TextStyleChange::Underline { on: !chosen.underline }),
+            Some("outline") => self.restyle(session, TextStyleChange::Outline { on: !chosen.outline }),
+            Some("vertical") => self.change(session, |t| t.vertical = !t.vertical),
+            Some(_) => self.change(session, |t| t.all_caps = !t.all_caps),
+            None => {}
         }
     }
 
@@ -1150,7 +1222,7 @@ impl TextEditor {
     /// Copies the font files the user picks into the app and offers them; the text takes the first.
     fn import_font(&mut self, session: &CanvasSession) -> Option<Said> {
         let endings = ["ttf", "otf", "ttc", "otc", "TTF", "OTF", "TTC", "OTC"];
-        let picked = rfd::FileDialog::new().set_title("Import fonts").add_filter("Fonts", &endings).pick_files()?;
+        let picked = crate::files::dialog().set_title("Import fonts").add_filter("Fonts", &endings).pick_files()?;
         fonts_ready();
         // kept in the fonts folder by the core (a file that isn't a font is dropped)
         let mut kept = picked.iter().filter_map(|from| {
@@ -1159,7 +1231,7 @@ impl TextEditor {
         });
         let first = kept.next()?;
         let more = kept.count() > 0;
-        self.change(session, |t| t.font = first.family);
+        self.restyle(session, TextStyleChange::Font { family: first.family });
         Some(Said::Notice(if more { "Fonts imported" } else { "Font imported" }, false))
     }
 }

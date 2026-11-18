@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.interface",
+  "name": "Interface",
+  "version": "1.1.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "The interface to suit you: its size, part by part if you like, and colour, undo and redo without their notice, and panels that stay open.",
+  "compat": { "procraft": { "interface": 6 } },
+  "permissions": [],
+  "hooks": ["interface_scale", "interface_part_scale", "keep_clear", "interface_colour", "hide_undo_notice", "pin_panels"],
+  "controls": [
+    { "key": "size_on", "type": "switch", "label": "Interface size" },
+    {
+      "key": "size", "type": "slider", "label": "Size", "least": 0.75, "most": 1.25, "step": 0.05, "starts": 1,
+      "shown_times": 100, "unit": "%", "keeps": "interface_size", "under": "size_on"
+    },
+    { "key": "parts", "type": "switch", "label": "Size parts separately", "under": "size_on" },
+    {
+      "key": "floating", "type": "slider", "label": "Floating panels", "least": 0.5, "most": 1.5, "step": 0.05,
+      "starts": 1, "shown_times": 100, "unit": "%", "under": "parts"
+    },
+    {
+      "key": "menus", "type": "slider", "label": "Popovers and menus", "least": 0.5, "most": 1.5, "step": 0.05,
+      "starts": 1, "shown_times": 100, "unit": "%", "under": "parts"
+    },
+    {
+      "key": "side_bar", "type": "slider", "label": "Side bar", "least": 0.5, "most": 1.5, "step": 0.05,
+      "starts": 1, "shown_times": 100, "unit": "%", "under": "parts"
+    },
+    {
+      "key": "top_bar", "type": "slider", "label": "Top bar", "least": 0.5, "most": 1.5, "step": 0.05,
+      "starts": 1, "shown_times": 100, "unit": "%", "under": "parts"
+    },
+    {
+      "key": "panels", "type": "slider", "label": "Panels", "least": 0.5, "most": 1.5, "step": 0.05,
+      "starts": 1, "shown_times": 100, "unit": "%", "under": "parts"
+    },
+    { "key": "clear", "type": "switch", "label": "Clear of status bar and camera", "under": "size_on" },
+    { "key": "colour", "type": "switch", "label": "Interface colour" },
+    { "key": "hue", "type": "slider", "label": "Hue", "least": 0, "most": 360, "step": 1, "starts": 212, "unit": "°", "live": true, "under": "colour" },
+    {
+      "key": "saturation", "type": "slider", "label": "Saturation", "least": 0, "most": 1, "step": 0.01, "starts": 1,
+      "shown_times": 100, "unit": "%", "live": true, "under": "colour"
+    },
+    { "key": "hide_undo", "type": "switch", "label": "Hide undo notices" },
+    { "key": "pin_panels", "type": "switch", "label": "Panels stay open" }
+  ],
+  "replaces": [
+    { "id": "io.github.artcraftandroid.interface-size", "switch": "size_on", "controls": { "clear": "clear" } },
+    {
+      "id": "io.github.artcraftandroid.interface-colour", "switch": "colour",
+      "controls": { "hue": "hue", "saturation": "saturation" }
+    },
+    { "id": "io.github.artcraftandroid.hide-undo-notice", "switch": "hide_undo" },
+    { "id": "io.github.artcraftandroid.pin-panels", "switch": "pin_panels" }
+  ]
+}

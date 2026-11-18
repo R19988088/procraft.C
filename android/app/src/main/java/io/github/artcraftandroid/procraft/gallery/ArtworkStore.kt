@@ -13,9 +13,19 @@ sealed interface GalleryEntry {
     val modified: Long
 }
 
-/** A saved artwork: its folder (see the native library's `project.rs` for what is inside). */
-data class Artwork(override val dir: File, override val name: String, val width: Int, val height: Int, override val modified: Long) : GalleryEntry {
+/**
+ * A saved artwork: its folder (see the native library's `project.rs` for what is inside), and how
+ * many quarter turns clockwise it shows turned by, as its canvas was left.
+ */
+data class Artwork(override val dir: File, override val name: String, val width: Int, val height: Int, override val modified: Long, val turns: Int = 0) : GalleryEntry {
+    /** Its thumbnail, turned as it shows. */
     val thumbnail: File get() = File(dir, "thumbnail.png")
+
+    /** Its width over its height as it shows (turned on its side, the other way). */
+    val ratio: Float get() {
+        val upright = if (width > 0 && height > 0) width.toFloat() / height else 0.75f
+        return if (turns % 2 != 0) 1f / upright else upright
+    }
 }
 
 /** Artworks kept together: a folder holding their folders, in their own order. */
@@ -47,6 +57,12 @@ class ArtworkStore(val root: File) {
     /** A copy under the same name, right after the original. */
     fun duplicate(a: Artwork): File = File(core.duplicate(a.dir.path))
 
+    /** Stack [s] and every artwork in it gone. */
+    fun deleteStack(s: Stack) = core.delete(s.dir.path)
+
+    /** A copy of stack [s], right after it: a copy of each of its artworks, in its order. */
+    fun duplicateStack(s: Stack): File = File(core.duplicate(s.dir.path))
+
     /**
      * [e] moved to [to] (its place in the order without it) in folder [into]: the gallery or a
      * stack, by default the one it is in; from a stack to the gallery, it is taken out of it.
@@ -66,7 +82,7 @@ class ArtworkStore(val root: File) {
 
     fun renameStack(s: Stack, name: String) = core.renameStack(s.dir.path, name)
 
-    private fun artwork(a: GalleryArtwork) = Artwork(File(a.dir), a.name, a.width.toInt(), a.height.toInt(), a.modifiedMs)
+    private fun artwork(a: GalleryArtwork) = Artwork(File(a.dir), a.name, a.width.toInt(), a.height.toInt(), a.modifiedMs, a.turns.toInt())
 
     private fun entry(e: CoreGalleryEntry): GalleryEntry = when (e) {
         is CoreGalleryEntry.Artwork -> artwork(e.artwork)

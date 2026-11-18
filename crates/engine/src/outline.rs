@@ -11,6 +11,8 @@ const MOST_CELLS: usize = 128;
 const LEAST_AREA: f32 = 0.05;
 /// At most this many loops.
 const MOST_LOOPS: usize = 12;
+/// Softened, a shape no stronger than this anywhere is taken for empty.
+const FAINTEST: f32 = 1.0 / 255.0;
 
 /// An edge of the grid a contour crosses: across (between a node and the one right of it) or
 /// down (between a node and the one below), at node (x, y).
@@ -19,7 +21,9 @@ type Edge = (bool, usize, usize);
 /// The loops along which `pixels` (`side` x `side`, greyscale, white = paint) crosses `level`
 /// (0..1), softened first so a grainy shape gives its overall form: in the image's units (0..1
 /// across, y down), each a closed ring (its last point joins its first), simplified to within
-/// half a cell, the largest first; loops far smaller than the largest are left out.
+/// half a cell, the largest first; loops far smaller than the largest are left out. A shape that
+/// once softened is never twice as strong as `level` (thin lines, specks, a faint picture) is
+/// traced halfway up to its strongest instead: any shape with paint has an outline.
 pub fn shape_outline(pixels: &[u8], side: usize, level: f32) -> Vec<Vec<Vec2>> {
     if side == 0 || pixels.len() < side * side {
         return Vec::new();
@@ -45,6 +49,12 @@ pub fn shape_outline(pixels: &[u8], side: usize, level: f32) -> Vec<Vec<Vec2>> {
     for _ in 0..2 {
         v = soften(&v, w);
     }
+    let peak = v.iter().copied().fold(0.0f32, f32::max);
+    if peak <= FAINTEST {
+        return Vec::new();
+    }
+    // (a shape that only just reaches the level has but a few cells over it: traced lower too)
+    let level = level.min(peak / 2.0);
     let at = |x: usize, y: usize| v.get(y * w + x).copied().unwrap_or(0.0);
     let inside = |x: usize, y: usize| at(x, y) >= level;
     // where along an edge the value crosses the level, in the image's units
@@ -256,5 +266,28 @@ mod tests {
         assert!(shape_outline(&vec![0; 64 * 64], 64, 0.5).is_empty());
         assert!(shape_outline(&[], 0, 0.5).is_empty());
         assert!(shape_outline(&[255; 10], 64, 0.5).is_empty());
+    }
+
+    #[test]
+    fn thin_lines_and_specks_still_outline() {
+        // a ring a pixel and a half wide, and a few specks: softened, neither reaches the level
+        let line = image(256, |x, y| ((x - 0.5).hypot(y - 0.5) - 0.3).abs() < 0.003);
+        let loops = shape_outline(&line, 256, 0.25);
+        assert!(!loops.is_empty());
+        // round the ring, not somewhere else
+        for p in loops.iter().flatten() {
+            let r = (p.x - 0.5).hypot(p.y - 0.5);
+            assert!((r - 0.3).abs() < 0.05, "{p:?} at {r}");
+        }
+        let at = [(0.2, 0.3), (0.6, 0.7), (0.8, 0.2)];
+        let specks = image(256, |x, y| at.iter().any(|(cx, cy)| (x - cx).abs() < 0.004 && (y - cy).abs() < 0.004));
+        let loops = shape_outline(&specks, 256, 0.25);
+        assert!(!loops.is_empty());
+        for p in loops.iter().flatten() {
+            assert!(at.iter().any(|&(cx, cy)| (p.x - cx).hypot(p.y - cy) < 0.05), "{p:?}");
+        }
+        // faint all over its disc: outlined as the disc
+        let faint: Vec<u8> = image(256, |x, y| (x - 0.5).hypot(y - 0.5) <= 0.4).iter().map(|v| v / 8).collect();
+        assert_eq!(shape_outline(&faint, 256, 0.25).len(), 1);
     }
 }

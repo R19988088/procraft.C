@@ -1,7 +1,7 @@
 // Brush stamps into the stroke texture: one instanced quad per stamp, turned and squashed as the
 // stamp says, with the round tip or a shape image, and a moving grain if the brush has one.
-// Written premultiplied; the pipeline blends them "over" (light glaze) or keeps the maximum
-// (uniform glaze).
+// Written premultiplied; the pipeline blends them "over" or keeps the maximum (see stamp_rule.wgsl
+// for strokes that take their rule pixel by pixel).
 
 // how far a stamp's quad reaches past the stamp each way (pixels): its shape fills all of it
 const QUAD_REACH: f32 = 0.70710678;
@@ -32,6 +32,10 @@ struct StampUniform {
     shape_lod_cap: f32,
     // pixels a side of the image a moving grain is read from
     grain_side: f32,
+    // what its shapes are (the canvas's TipKind): 0 masks, how much each pixel paints; 1 pictures
+    // in their own colours; 2 lightness maps, their grey the colour's lightness; 3 gradient maps,
+    // their grey a colour between the brush's and the secondary. All but masks RGBA, premultiplied.
+    tip_kind: u32,
 }
 
 @group(0) @binding(0) var<uniform> su: StampUniform;
@@ -60,6 +64,9 @@ struct StampIn {
     @location(10) brightness_add: f32,
     // how far the grain's patch under the stamp turns, where it is read from staying put
     @location(11) grain_turn: f32,
+    // which shape image it is, counted on from the stroke's; how strongly a lightness map shows;
+    // its sharpness threshold and how much below it stays as it is
+    @location(12) tip: vec4<f32>,
 }
 
 struct StampOut {
@@ -81,6 +88,10 @@ struct StampOut {
     @location(6) look: vec4<f32>,
     // what light pressure lets through: the most a capped stroke builds up to
     @location(7) transfer: f32,
+    // the layer of `shapes` it is drawn with
+    @location(9) @interpolate(flat) layer: i32,
+    // how strongly a lightness map shows, and the sharpness threshold and its soft share
+    @location(11) @interpolate(flat) finish: vec3<f32>,
 }
 
 @vertex
@@ -113,7 +124,57 @@ fn vs_stamp(@builtin(vertex_index) vi: u32, inst: StampIn) -> StampOut {
     o.grain_press = inst.more.x;
     o.grain_bleed = inst.more.y;
     o.transfer = inst.more.z;
+    o.layer = su.shape + i32(inst.tip.x);
+    o.finish = inst.tip.yzw;
     return o;
+}
+
+// HSL lightness, as an image editor's lightness blending reckons it
+fn hsl_lightness(c: vec3<f32>) -> f32 {
+    return 0.5 * (max(c.r, max(c.g, c.b)) + min(c.r, min(c.g, c.b)));
+}
+
+// `c` moved to lightness `l`, its hue and saturation kept as far as the colour gamut lets
+fn with_lightness(c: vec3<f32>, l: f32) -> vec3<f32> {
+    let moved = c + (l - hsl_lightness(c));
+    let m = hsl_lightness(moved);
+    let lo = min(moved.r, min(moved.g, moved.b));
+    let hi = max(moved.r, max(moved.g, moved.b));
+    var out = moved;
+    if (lo < 0.0) {
+        out = m + (out - m) * m / max(m - lo, 1e-6);
+    }
+    if (hi > 1.0) {
+        out = m + (out - m) * (1.0 - m) / max(hi - m, 1e-6);
+    }
+    return clamp(out, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// textures that colour a stamp (see blend.wgsl's texture rules): by their grey, its lightness, or
+// a colour along the gradient from the colour to the secondary
+const TEXTURE_LIGHTNESS: u32 = 46u;
+const TEXTURE_GRADIENT: u32 = 47u;
+
+// `colour` at the lightness grey `g` says (a middle grey keeping its own), as strongly as
+// `strength` goes: the same curve through the colour's own lightness a lightness tip takes
+fn lightness_from(colour: vec3<f32>, g: f32, strength: f32) -> vec3<f32> {
+    let m = (g - 0.5) * strength + 0.5;
+    let b = 4.0 * hsl_lightness(colour) - 1.0;
+    return with_lightness(colour, clamp((1.0 - b) * m * m + b * m, 0.0, 1.0));
+}
+
+// the colour a picture-like tip's texel `t` (premultiplied) gives a stamp of `colour`, by the
+// stroke's tip kind: its own; the colour at the lightness its grey says (a middle grey keeping the
+// colour's own, the stronger the further from it); or between the colour and the secondary
+fn tip_colour(colour: vec3<f32>, t: vec4<f32>, strength: f32) -> vec3<f32> {
+    let straight = t.rgb / max(t.a, 1e-5);
+    if (su.tip_kind == 1u) {
+        return straight;
+    }
+    if (su.tip_kind == 2u) {
+        return lightness_from(colour, straight.r, strength);
+    }
+    return mix(colour, su.secondary.rgb, straight.r);
 }
 
 // hue (0..1), saturation and brightness of a colour, and back
@@ -152,10 +213,10 @@ fn tinted(c: vec3<f32>, t: vec4<f32>, brightness_add: f32) -> vec3<f32> {
 }
 
 // the shape image's texel under `uv`, unfiltered
-fn shape_texel(uv: vec2<f32>, layer: i32) -> f32 {
+fn shape_texel(uv: vec2<f32>, layer: i32) -> vec4<f32> {
     let size = vec2<i32>(textureDimensions(shapes));
     let at = clamp(vec2<i32>(floor(uv * vec2<f32>(size))), vec2<i32>(0), size - 1);
-    return textureLoad(shapes, at, layer, 0).r;
+    return textureLoad(shapes, at, layer, 0);
 }
 
 @fragment
@@ -167,6 +228,7 @@ fn fs_stamp(i: StampOut) -> @location(0) vec4<f32> {
 fn stamp_paint(i: StampOut) -> vec4<f32> {
     let r = i.radius;
     var a = 0.0;
+    var colour = i.color;
     if (su.shape < 0) {
         let d = length(i.q) * r;
         // a one-pixel anti-aliased rim, and the brush's own falloff from hardness·r outwards
@@ -181,11 +243,26 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
         let side = f32(textureDimensions(shapes).x);
         let lod = clamp(log2(0.5 * side / (r + QUAD_REACH)), 0.0, su.shape_lod_cap + log2(side / 256.0));
         let inside = all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
-        var s = textureSampleLevel(shapes, shape_smp, uv, su.shape, lod).r;
+        var t = textureSampleLevel(shapes, shape_smp, uv, i.layer, lod);
         if (su.shape_sharp == 1u) {
-            s = shape_texel(uv, su.shape);
+            t = shape_texel(uv, i.layer);
+        }
+        var s = t.r;
+        if (su.tip_kind > 0u) {
+            // a picture-like tip: as far as it is opaque, in the colour it gives
+            s = t.a;
+            colour = tip_colour(colour, t, i.finish.x);
         }
         a = select(0.0, s, inside);
+    }
+    // made sharp: what is over the threshold paints fully, what is well under it not at all
+    if (i.finish.y > 0.0) {
+        let tolerance = 1.0 - i.finish.y;
+        if (a > tolerance) {
+            a = 1.0;
+        } else if (a <= (1.0 - i.finish.z) * tolerance) {
+            a = 0.0;
+        }
     }
     if (su.grain >= 0) {
         let scale = su.grain_scale * i.look.y;
@@ -208,18 +285,31 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
             }
         }
         let g = clamp((raw - 0.5) * (1.0 + su.grain_contrast) + 0.5 + su.grain_brightness, 0.0, 1.0);
-        // combined with the shape by the grain's blend mode, as deep as it says, inside the shape
-        a = grain_combine(a, g, clamp(su.grain_depth * i.look.x, 0.0, 1.0), su.grain_blend);
+        let depth = clamp(su.grain_depth * i.look.x, 0.0, 1.0);
+        if (su.grain_blend == TEXTURE_LIGHTNESS) {
+            // the texture's grey the colour's lightness, as strongly as the stamp says
+            colour = lightness_from(colour, g, depth);
+        } else if (su.grain_blend == TEXTURE_GRADIENT) {
+            // a colour between the colour and the secondary by the texture's grey, mixed in as far
+            colour = mix(colour, mix(su.color.rgb, su.secondary.rgb, g), depth);
+        } else {
+            // combined with the shape by the grain's blend mode, as deep as it says, inside the shape
+            a = grain_combine(a, g, depth, su.grain_blend);
+        }
+    }
+    // a leaning pen shades it down its shape's height: from the gradation's share less at the
+    // top of the shape to all of it at the bottom, cubed (so the top fades fast), before the bleed
+    // takes its contrast
+    if (i.look.w > 0.0) {
+        let down = clamp(i.q.y * i.fill.y * 0.5 + 0.5, 0.0, 1.0);
+        let g = 1.0 - i.look.w * (1.0 - down);
+        a = a * g * g * g;
     }
     // the pressure's bleed, a contrast on the shape and its grain: none of the faint parts, all
     // of the strong ones, and more of both the harder the pen presses
     if (i.grain_bleed > 0.0) {
         let b = 8.0 * i.grain_bleed;
         a = clamp((1.0 + b) * a - b / sqrt(max(b * i.grain_press, 1e-4)), 0.0, 1.0);
-    }
-    // a leaning pen shades it across its width, strongest at its leading edge
-    if (i.look.w > 0.0) {
-        a = a * (1.0 - i.look.w * clamp(0.5 - 0.5 * i.q.x, 0.0, 1.0));
     }
     // the round tip's rim takes a pixel as covered to its middle: a tip under a pixel across
     // covers only its area of one (a shape's quad reaches past it, which thins it as far)
@@ -230,5 +320,5 @@ fn stamp_paint(i: StampOut) -> vec4<f32> {
     // paint keeps inside the selection
     let inside_selection = textureSampleLevel(selected, shape_smp, i.pos.xy / su.canvas_size, 0.0).r;
     a = a * i.alpha * inside_selection;
-    return vec4<f32>(i.color * a, a);
+    return vec4<f32>(colour * a, a);
 }

@@ -53,6 +53,7 @@ pub mod textures;
 pub mod tone;
 pub mod transform;
 pub mod usd;
+pub mod variant;
 pub mod view;
 pub mod warp;
 pub mod xml;

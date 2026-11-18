@@ -11,6 +11,9 @@
 #   procraft-<version>-linux-x86_64.AppImage      any distro (packaging/linux)
 #   procraft-<version>-linux-x86_64.deb           Debian, Ubuntu and the like
 #   procraft-<version>-linux-x86_64.tar.gz        the plain tree
+#   procraft-<version>-linux-aarch64.AppImage     the same three for 64-bit ARM (Raspberry Pi 4 and 5,
+#   procraft-<version>-linux-aarch64.deb          ARM laptops and boards)
+#   procraft-<version>-linux-aarch64.tar.gz
 #   procraft-<version>-macos-universal.dmg        Apple silicon and Intel Macs (packaging/macos):
 #                                                 signed with a Developer ID and notarized when
 #                                                 the APPLE_* secrets exist, else ad hoc
@@ -18,8 +21,8 @@
 #
 # The Mac file is built on the public repository alone (a private one pays for macOS runners'
 # minutes, ten times Linux's), and only once the repository's variable RELEASE_MAC is true. While
-# it is new, its failing leaves its file out rather than holding up the release; so does Windows
-# on ARM's.
+# it is new, its failing leaves its file out rather than holding up the release; so do Windows
+# on ARM's and Linux on ARM's (also built on the public repository alone).
 #
 # A manual run (Actions › Release › Run workflow) is a dry run: it builds them at the version in
 # gradle.properties and keeps them as the run's artifacts, and releases nothing. It also builds
@@ -85,7 +88,8 @@ jobs:
 
       - name: Install cargo-ndk and the Android NDK
         run: |
-          cargo install cargo-ndk --version "^4" --locked
+          # the version F-Droid's build of the same tag installs, so its APKs come out the same as ours
+          cargo install cargo-ndk --version 4.1.2 --locked
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" >/dev/null
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >>"$GITHUB_ENV"
 
@@ -365,11 +369,60 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # Linux on 64-bit ARM: built on GitHub's ARM runner, on the public repository alone (a private
+  # one has no ARM runners on its plan); an older Ubuntu, as for x86_64, for glibc 2.35 or newer
+  linux-aarch64:
+    name: Desktop (linux-aarch64)
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-22.04-arm
+    continue-on-error: true
+    env:
+      DIST: ${{ github.workspace }}/dist
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: v
+        name: Resolve version
+        run: |
+          listed="$(sed -n 's/^procraft\.version=//p' android/gradle.properties | tr -d '\r')"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="$listed"; fi
+          echo "version=$v" >>"$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-desktop-linux-aarch64
+
+      - name: Install nfpm
+        run: |
+          curl -fsSL https://github.com/goreleaser/nfpm/releases/download/v2.47.0/nfpm_2.47.0_Linux_arm64.tar.gz | tar -xz -C "$RUNNER_TEMP" nfpm
+          sudo install -m755 "$RUNNER_TEMP/nfpm" /usr/local/bin/nfpm
+          sudo apt-get update >/dev/null
+          sudo apt-get install -y --no-install-recommends desktop-file-utils >/dev/null
+
+      # the AppImage, .deb and .tar.gz for aarch64 (package.sh builds for the machine it runs on)
+      - name: Package for Linux on ARM
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: bash packaging/linux/package.sh
+
+      - name: Files
+        run: ls -l dist >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-desktop-linux-aarch64
+          path: dist/*
+          if-no-files-found: error
+
   release:
     name: GitHub Release
-    needs: [apk, desktop, windows-arm64, macos, ipados]
-    # the Mac and Windows on ARM jobs may have been skipped (a private repository) or left out
-    # their files; the iPad's is skipped
+    needs: [apk, desktop, windows-arm64, linux-aarch64, macos, ipados]
+    # the Mac, Windows on ARM and Linux on ARM jobs may have been skipped (a private repository)
+    # or left out their files; the iPad's is skipped
     if: ${{ github.ref_type == 'tag' && !cancelled() && needs.apk.result == 'success' && needs.desktop.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:

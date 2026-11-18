@@ -200,7 +200,7 @@ mod tests {
         let _ = crate::canvas::Pipelines::new(
             &gpu.device,
             &gpu.queue,
-            crate::canvas::liquify_format(&gpu.adapter),
+            crate::canvas::Abilities::of(&gpu),
             Some(first.cache.clone()),
         );
         first.made();
@@ -213,7 +213,7 @@ mod tests {
         let _ = crate::canvas::Pipelines::new(
             &gpu.device,
             &gpu.queue,
-            crate::canvas::liquify_format(&gpu.adapter),
+            crate::canvas::Abilities::of(&gpu),
             Some(second.cache.clone()),
         );
         second.made();

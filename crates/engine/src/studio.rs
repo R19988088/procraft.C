@@ -33,7 +33,6 @@ const STARTS: &[(&str, f32)] = &[
     ("pressure_roundness_max", 1.0),
     // the newer spacing (see [`Brush::spacing`])
     ("spacing_version", 1.0),
-    ("classic_taper", 1.0),
     ("shape_filtering", 2.0),
     ("grain_movement", 1.0),
     ("grain_zoom", 1.0),
@@ -124,13 +123,13 @@ impl Brush {
         if spacing <= 0.0 { 1.0 } else { 1.0 + (MOST_SIZE - 1.0) * (spacing / ROOMY_SPACING).min(1.0) }
     }
 
-    /// Whether the brush mixes its paint wet with what is under it: some dilution (without water
-    /// the other wet settings do nothing), in a blending rendering mode (Uniform or Intense
-    /// Blending) or the Intense or Heavy Glaze, as the reference's do (a glaze mixes with the
-    /// layer as it was before the stroke: see [`Self::mixes_with_stroke`]). The Light and Uniform
-    /// Glazes, which keep the strongest stamp, don't mix here.
+    /// Whether the brush mixes its paint wet with what is under it: once it has some dilution
+    /// (without water the other wet settings do nothing), whatever its rendering mode. A glaze
+    /// mixes with the layer as it was before the stroke (see [`Self::mixes_with_stroke`]), and
+    /// its paint shows as far as the glaze builds up: the Light and Uniform Glazes no further
+    /// than their strongest stamp or their transfer.
     pub fn mixes_wet(&self) -> bool {
-        self.setting("wet_dilution") > 0.0 && self.setting("rendering_mode") >= 1.5
+        self.setting("wet_dilution") > 0.0
     }
 
     /// Whether wet paint mixes with the stroke as it goes (the blending modes), not only with the
@@ -472,13 +471,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_intense_and_heavy_glazes_mix_wet_paint_with_the_layer_before_the_stroke() {
+    fn every_rendering_mode_mixes_wet_paint_the_glazes_with_the_layer_before_the_stroke() {
         let mut b = Brush::round_pen();
         b.set_setting("wet_dilution", 0.5);
         // (rendering mode, mixes wet, mixes with the stroke as it goes)
         for (mode, wet, with_stroke) in [
-            (0.0, false, false),
-            (1.0, false, false),
+            (0.0, true, false),
+            (1.0, true, false),
             (2.0, true, false),
             (3.0, true, false),
             (4.0, true, true),

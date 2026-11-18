@@ -72,12 +72,59 @@ class PenKeysTest {
         val first = MotionEvent.BUTTON_STYLUS_PRIMARY
         val second = MotionEvent.BUTTON_STYLUS_SECONDARY
         val buttons = PenButtons()
-        assertEquals(first to 0, buttons.next(first, penIn = true))
+        assertEquals(FIRST_BUTTON to 0, buttons.next(first, penIn = true))
         // still held: nothing new; another button's state that isn't a pen's counts for nothing
         assertEquals(0 to 0, buttons.next(first or MotionEvent.BUTTON_PRIMARY, penIn = true))
         // a hand landing while it is held reads as none held, and lets nothing go
         assertEquals(0 to 0, buttons.next(0, penIn = false))
-        assertEquals(second to first, buttons.next(second, penIn = true))
-        assertEquals(0 to second, buttons.next(0, penIn = true))
+        assertEquals(SECOND_BUTTON to FIRST_BUTTON, buttons.next(second, penIn = true))
+        assertEquals(0 to SECOND_BUTTON, buttons.next(0, penIn = true))
+    }
+
+    @Test
+    fun a_pen_s_second_button_is_heard_whichever_way_its_driver_gives_it() {
+        val buttons = PenButtons()
+        // as older drivers give a pen's buttons: the mouse's right and middle buttons
+        assertEquals(SECOND_BUTTON to 0, buttons.next(MotionEvent.BUTTON_TERTIARY, penIn = true))
+        assertEquals(0 to SECOND_BUTTON, buttons.next(0, penIn = true))
+        assertEquals(FIRST_BUTTON to 0, buttons.next(MotionEvent.BUTTON_SECONDARY, penIn = true))
+        assertEquals(0 to FIRST_BUTTON, buttons.next(0, penIn = true))
+        // one button given both ways at once is still one press
+        val both = MotionEvent.BUTTON_STYLUS_SECONDARY or MotionEvent.BUTTON_TERTIARY
+        assertEquals(SECOND_BUTTON to 0, buttons.next(both, penIn = true))
+        assertEquals(0 to 0, buttons.next(MotionEvent.BUTTON_TERTIARY, penIn = true))
+        assertEquals(0 to SECOND_BUTTON, buttons.next(0, penIn = true))
+        // the two pressed in one event are both pressed
+        val two = MotionEvent.BUTTON_STYLUS_PRIMARY or MotionEvent.BUTTON_STYLUS_SECONDARY
+        assertEquals((FIRST_BUTTON or SECOND_BUTTON) to 0, buttons.next(two, penIn = true))
+        assertEquals(0 to (FIRST_BUTTON or SECOND_BUTTON), buttons.next(0, penIn = true))
+        // a mouse's right or middle button (no pen in the event) is no pen's
+        assertEquals(0 to 0, buttons.next(MotionEvent.BUTTON_SECONDARY or MotionEvent.BUTTON_TERTIARY, penIn = false))
+        assertEquals(0, penButtonsIn(MotionEvent.BUTTON_PRIMARY or MotionEvent.BUTTON_BACK or MotionEvent.BUTTON_FORWARD))
+    }
+
+    @Test
+    fun a_pen_s_second_button_that_comes_as_a_key_is_its_second() {
+        // as Redmi's Smart Pen gives its two buttons: Page Up, Page Down
+        val pen = keyboard or InputDevice.SOURCE_STYLUS
+        assertEquals(true, penKeyButton(down, pen, noLetters, "Redmi Smart Pen"))
+        assertEquals(true, penKeyButton(down, keyboard, letters, "Redmi Smart Pen"))
+        assertEquals(false, penKeyButton(up, keyboard, letters, "Redmi Smart Pen"))
+    }
+
+    @Test
+    fun a_button_held_over_the_canvas_isn_t_let_go_by_touch_events_that_leave_it_out() {
+        val first = MotionEvent.BUTTON_STYLUS_PRIMARY
+        val buttons = PenButtons()
+        // held while hovering
+        assertEquals(FIRST_BUTTON to 0, buttons.next(first, penIn = true))
+        // the pen touches and moves, its events without the button: still held
+        assertEquals(0 to 0, buttons.next(0, penIn = true, touching = true))
+        assertEquals(0 to 0, buttons.next(0, penIn = true, touching = true))
+        // lifted (or hovering) without it: let go
+        assertEquals(0 to FIRST_BUTTON, buttons.next(0, penIn = true))
+        // pressed while touching still counts at once
+        assertEquals(FIRST_BUTTON to 0, buttons.next(first, penIn = true, touching = true))
+        assertEquals(0 to FIRST_BUTTON, buttons.next(0, penIn = true))
     }
 }

@@ -13,20 +13,21 @@ const MOST_IN_PIPE: usize = 256;
 
 /// The tips in a GIMP brush or pipe file, in order; none if it is neither.
 pub fn read(bytes: &[u8]) -> Option<Vec<AbrTip>> {
-    if let Some((tip, _)) = brush(bytes) {
+    if let Some((tip, _)) = brush(bytes, false) {
         return Some(vec![tip]);
     }
     pipe(bytes, MOST_IN_PIPE)
 }
 
 /// The first tip in a GIMP brush or pipe file that paints anything (a pipe's brushes read only
-/// until one does: an animated one may start blank), else its first; none if it is neither.
-pub fn read_first(bytes: &[u8]) -> Option<AbrTip> {
-    if let Some((tip, _)) = brush(bytes) {
+/// until one does: an animated one may start blank), else its first; none if it is neither. A
+/// brush in colour paints by its alpha, or as a mask if `masked` (see [`brush`]).
+pub fn read_first(bytes: &[u8], masked: bool) -> Option<AbrTip> {
+    if let Some((tip, _)) = brush(bytes, masked) {
         return Some(tip);
     }
     let mut first = None;
-    for tip in pipe_brushes(bytes)?.take(MOST_IN_PIPE) {
+    for tip in pipe_brushes(bytes, masked)?.take(MOST_IN_PIPE) {
         if tip.pixels.iter().any(|&v| v > 0) {
             return Some(tip);
         }
@@ -68,8 +69,11 @@ pub fn read_pattern(bytes: &[u8]) -> Option<AbrTip> {
     Some(AbrTip { name, spacing: None, width, height, pixels })
 }
 
-/// A brush at the start of `bytes`, and how many bytes it takes.
-fn brush(bytes: &[u8]) -> Option<(AbrTip, usize)> {
+/// A brush at the start of `bytes`, and how many bytes it takes. A brush in colour (RGBA) paints by
+/// its alpha, as GIMP lays it; or, `masked`, as a mask is made of it (as Krita's alpha mask
+/// application does): its dark and opaque parts paint, its grey Qt's weights of red, green and
+/// blue in 32nds.
+fn brush(bytes: &[u8], masked: bool) -> Option<(AbrTip, usize)> {
     let word = |at: usize| bytes.get(at..at + 4).and_then(|b| b.try_into().ok()).map(u32::from_be_bytes);
     let header = word(0)? as usize;
     let version = word(4)?;
@@ -88,7 +92,20 @@ fn brush(bytes: &[u8]) -> Option<(AbrTip, usize)> {
     let name = String::from_utf8_lossy(name.split(|&b| b == 0).next().unwrap_or_default()).trim().to_owned();
     let size = width as usize * height as usize * depth as usize;
     let image = bytes.get(header..header.checked_add(size)?)?;
-    let pixels = if depth == 1 { image.to_vec() } else { image.iter().skip(3).step_by(4).copied().collect() };
+    let pixels = match (depth, masked) {
+        (1, _) => image.to_vec(),
+        (_, false) => image.iter().skip(3).step_by(4).copied().collect(),
+        (_, true) => image
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|px| {
+                let [r, g, b, a] = px.map(u32::from);
+                let grey = (11 * r + 16 * g + 5 * b) / 32;
+                ((255 - grey.min(255)) * a / 255) as u8
+            })
+            .collect(),
+    };
     let tip = AbrTip { name, spacing: spacing.filter(|s| *s > 0.0), width, height, pixels };
     Some((tip, header + size))
 }
@@ -215,12 +232,13 @@ pub fn generated_half(hardness: f32) -> f32 {
 /// A pipe: its name, a line starting with how many brushes it has, then the brushes (the first
 /// `most` of them read).
 fn pipe(bytes: &[u8], most: usize) -> Option<Vec<AbrTip>> {
-    let tips: Vec<AbrTip> = pipe_brushes(bytes)?.take(most).collect();
+    let tips: Vec<AbrTip> = pipe_brushes(bytes, false)?.take(most).collect();
     (!tips.is_empty()).then_some(tips)
 }
 
-/// A pipe's brushes, each read as it is come to; none if it isn't one.
-fn pipe_brushes(bytes: &[u8]) -> Option<impl Iterator<Item = AbrTip> + '_> {
+/// A pipe's brushes, each read as it is come to (in colour as masks if `masked`); none if it isn't
+/// one.
+fn pipe_brushes(bytes: &[u8], masked: bool) -> Option<impl Iterator<Item = AbrTip> + '_> {
     let first = bytes.iter().position(|&b| b == b'\n')?;
     let second = first + 1 + bytes.get(first + 1..)?.iter().position(|&b| b == b'\n')?;
     let name = String::from_utf8_lossy(bytes.get(..first)?).trim().to_owned();
@@ -231,7 +249,7 @@ fn pipe_brushes(bytes: &[u8]) -> Option<impl Iterator<Item = AbrTip> + '_> {
         if n >= count {
             return None;
         }
-        let (mut tip, used) = brush(bytes.get(at..)?)?;
+        let (mut tip, used) = brush(bytes.get(at..)?, masked)?;
         (n, at) = (n + 1, at + used);
         // the pipe's name for its only brush; numbered for those with none of their own
         if count == 1 {
@@ -298,9 +316,9 @@ mod tests {
         let mut file = b"Leaves\n2 ncells:2\n".to_vec();
         file.extend(gbr(2, "First", 3, 2, 1, 50));
         file.extend(gbr(2, "Second", 3, 2, 1, 50));
-        assert_eq!(read_first(&file).unwrap().name, "First");
-        assert_eq!(read_first(&gbr(2, "Alone", 3, 2, 1, 50)).unwrap().name, "Alone");
-        assert!(read_first(b"nothing").is_none());
+        assert_eq!(read_first(&file, false).unwrap().name, "First");
+        assert_eq!(read_first(&gbr(2, "Alone", 3, 2, 1, 50), false).unwrap().name, "Alone");
+        assert!(read_first(b"nothing", false).is_none());
         // an animated pipe that starts blank: its first brush that paints
         let blank = |name: &str| {
             let mut b = gbr(2, name, 3, 2, 1, 50);
@@ -312,12 +330,30 @@ mod tests {
         file.extend(blank("Empty"));
         file.extend(gbr(2, "Star", 3, 2, 1, 50));
         file.extend(gbr(2, "Bigger", 3, 2, 1, 50));
-        assert_eq!(read_first(&file).unwrap().name, "Star");
+        assert_eq!(read_first(&file, false).unwrap().name, "Star");
         // all blank: the first
         let mut file = b"Blank\n2 ncells:2\n".to_vec();
         file.extend(blank("One"));
         file.extend(blank("Two"));
-        assert_eq!(read_first(&file).unwrap().name, "One");
+        assert_eq!(read_first(&file, false).unwrap().name, "One");
+    }
+
+    #[test]
+    fn a_colour_brush_paints_by_its_alpha_or_as_a_mask() {
+        // white, black and mid grey, all opaque, then black half clear
+        let mut file = gbr(2, "Blotches", 4, 1, 4, 25);
+        let at = file.len() - 16;
+        file[at..].copy_from_slice(&[255, 255, 255, 255, 0, 0, 0, 255, 128, 128, 128, 255, 0, 0, 0, 128]);
+        // by its alpha, as GIMP lays it: an opaque picture paints all over
+        assert_eq!(read_first(&file, false).unwrap().pixels, [255, 255, 255, 128]);
+        // as a mask: the dark and opaque parts paint
+        assert_eq!(read_first(&file, true).unwrap().pixels, [0, 255, 127, 128]);
+        // a pipe's brushes as well; a grey brush is the same either way
+        let mut pipe = b"Pipe\n1 ncells:1\n".to_vec();
+        pipe.extend(&file);
+        assert_eq!(read_first(&pipe, true).unwrap().pixels, [0, 255, 127, 128]);
+        let grey = gbr(2, "Grey", 3, 2, 1, 50);
+        assert_eq!(read_first(&grey, true), read_first(&grey, false));
     }
 
     #[test]

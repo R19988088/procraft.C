@@ -529,101 +529,181 @@ pub fn pdf(
     quality: u8,
     press: Option<&Lut>,
 ) -> Vec<u8> {
-    let dpi = dpi.clamp(1.0, 9999.0);
-    let (pw, ph) = (width as f32 * 72.0 / dpi, height as f32 * 72.0 / dpi);
-    let mut objects: Vec<Vec<u8>> = Vec::new();
-    // 1: the catalog, 2: the page tree; then per page: page, contents, image, its alpha
-    let first = 3;
-    let kids: Vec<String> = (0..pages.len()).map(|i| format!("{} 0 R", first + i * 4)).collect();
-    objects.push(b"<< /Type /Catalog /Pages 2 0 R >>".to_vec());
-    objects.push(format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids.join(" "), pages.len()).into_bytes());
-    // the colour profile goes after the pages
-    let device = if press.is_some() { "/DeviceCMYK" } else { "/DeviceRGB" };
-    let colours =
-        if icc.is_empty() { device.to_owned() } else { format!("[/ICCBased {} 0 R]", first + pages.len() * 4) };
-    // each page's four objects (the page, its contents, its image and the image's alpha) made
-    // side by side, then numbered in order
-    let page_objects = |&i: &usize| -> Vec<Vec<u8>> {
-        let (Some(rgba), n) = (pages.get(i), first + i * 4) else { return Vec::new() };
-        let mut made = Vec::with_capacity(4);
-        made.push(
-            format!(
-                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {pw:.2} {ph:.2}] /Contents {} 0 R /Resources << /XObject << /Im0 {} 0 R >> >> >>",
-                n + 1,
-                n + 2
-            )
-            .into_bytes(),
-        );
-        let draw = format!("q {pw:.2} 0 0 {ph:.2} 0 0 cm /Im0 Do Q");
-        made.push(stream(&format!("<< /Length {} >>", draw.len()), draw.as_bytes()));
+    let numbers: Vec<usize> = (0..pages.len()).collect();
+    // each page's picture made side by side (it holds its colours and alpha apart meanwhile),
+    // then written in order
+    let each = width as usize * height as usize * 4;
+    let make = |&i: &usize| pages.get(i).map(|rgba| PdfPicture::new(width, height, rgba, quality, press));
+    let Ok(mut out) = PdfWriter::new(Vec::new()) else { return Vec::new() };
+    for (i, made) in numbers.iter().zip(crate::par::side_by_side_within(&numbers, each, make)) {
+        if let Some(picture) = made.unwrap_or_else(|| make(i)) {
+            // written into memory: it can't fail
+            let _ = out.page(&picture, dpi, icc);
+        }
+    }
+    out.finish().unwrap_or_default()
+}
+
+/// A picture made ready to be a PDF's page: its colours (kept exactly, as JPEG, or as a press's
+/// inks in a CMYK JPEG) and, but for inks, its alpha.
+pub struct PdfPicture {
+    width: u32,
+    height: u32,
+    colours: Vec<u8>,
+    filter: &'static str,
+    /// The colours are a press's inks (as a CMYK JPEG keeps them, inverted); there is no alpha.
+    inks: bool,
+    alpha: Option<Vec<u8>>,
+}
+
+impl PdfPicture {
+    /// `rgba` (straight alpha, `width` × `height`) made ready: exact at `quality` 100, its colours
+    /// JPEG at that quality below (its alpha still exact). With a `press` table its inks,
+    /// flattened on white, as a CMYK JPEG at `quality`.
+    pub fn new(width: u32, height: u32, rgba: &[u8], quality: u8, press: Option<&Lut>) -> PdfPicture {
         if let Some(table) = press {
             let jpg = crate::jpeg::encode_cmyk(&inks(rgba, table, true), width, height, quality.max(1));
-            made.push(stream(
-                &format!(
-                    "<< /Type /XObject /Subtype /Image /Width {width} /Height {height} /Interpolate true /ColorSpace {colours} /Decode [1 0 1 0 1 0 1 0] /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>",
-                    jpg.len()
-                ),
-                &jpg,
-            ));
-            // no alpha: kept so the objects keep their numbers
-            made.push(b"null".to_vec());
-            return made;
+            return PdfPicture { width, height, colours: jpg, filter: "DCTDecode", inks: true, alpha: None };
         }
         let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
         for &[r, g, b, _] in rgba.as_chunks::<4>().0 {
             rgb.extend_from_slice(&[r, g, b]);
         }
-        let alpha = plane(rgba, 3);
-        let (rgb, filter) = if quality >= 100 {
+        let (colours, filter) = if quality >= 100 {
             (miniz_oxide::deflate::compress_to_vec_zlib(&rgb, 6), "FlateDecode")
         } else {
             (crate::jpeg::encode(&rgb, width, height, quality), "DCTDecode")
         };
-        let alpha = miniz_oxide::deflate::compress_to_vec_zlib(&alpha, 6);
-        made.push(stream(
-            &format!(
-                "<< /Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace {colours} /BitsPerComponent 8 /Filter /{filter} /SMask {} 0 R /Length {} >>",
+        let alpha = miniz_oxide::deflate::compress_to_vec_zlib(&plane(rgba, 3), 6);
+        PdfPicture { width, height, colours, filter, inks: false, alpha: Some(alpha) }
+    }
+}
+
+/// A PDF written a page at a time to `out`, each page one picture at its own size and
+/// resolution in its own colour profile (written once for every page that shares it).
+pub struct PdfWriter<W: std::io::Write> {
+    out: W,
+    written: usize,
+    /// Where each object starts, by its number less one; the catalog's and the page tree's
+    /// (1 and 2) are known only at the end.
+    offsets: Vec<usize>,
+    /// The pages' object numbers, in order.
+    pages: Vec<usize>,
+    /// The colour profiles written so far: the profile, whether it is a press's, and its object.
+    profiles: Vec<(Vec<u8>, bool, usize)>,
+}
+
+impl<W: std::io::Write> PdfWriter<W> {
+    pub fn new(mut out: W) -> std::io::Result<PdfWriter<W>> {
+        let head = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n";
+        out.write_all(head)?;
+        Ok(PdfWriter { out, written: head.len(), offsets: vec![0, 0], pages: Vec::new(), profiles: Vec::new() })
+    }
+
+    /// The number the next object written gets.
+    fn next(&self) -> usize {
+        self.offsets.len() + 1
+    }
+
+    /// Writes object `n` (the next one, or the catalog or page tree at the end).
+    fn object(&mut self, n: usize, body: &[u8]) -> std::io::Result<()> {
+        let head = format!("{n} 0 obj\n");
+        if let Some(slot) = self.offsets.get_mut(n.wrapping_sub(1)) {
+            *slot = self.written;
+        } else {
+            self.offsets.push(self.written);
+        }
+        for part in [head.as_bytes(), body, b"\nendobj\n"] {
+            self.out.write_all(part)?;
+            self.written += part.len();
+        }
+        Ok(())
+    }
+
+    /// `picture` as the next page, its size its pixels at `dpi`, its colours in the profile
+    /// `icc` (the device's if empty).
+    pub fn page(&mut self, picture: &PdfPicture, dpi: f32, icc: &[u8]) -> std::io::Result<()> {
+        let PdfPicture { width, height, .. } = *picture;
+        let dpi = if dpi.is_finite() { dpi.clamp(1.0, 9999.0) } else { 72.0 };
+        let (pw, ph) = (width as f32 * 72.0 / dpi, height as f32 * 72.0 / dpi);
+        let device = if picture.inks { "/DeviceCMYK" } else { "/DeviceRGB" };
+        let colours = if icc.is_empty() {
+            device.to_owned()
+        } else {
+            let known = self.profiles.iter().find(|(p, inks, _)| p == icc && *inks == picture.inks).map(|p| p.2);
+            let n = match known {
+                Some(n) => n,
+                None => {
+                    let n = self.next();
+                    let channels = if picture.inks { 4 } else { 3 };
+                    let body = stream(&format!("<< /N {channels} /Alternate {device} /Length {} >>", icc.len()), icc);
+                    self.object(n, &body)?;
+                    self.profiles.push((icc.to_vec(), picture.inks, n));
+                    n
+                }
+            };
+            format!("[/ICCBased {n} 0 R]")
+        };
+        // the page, its contents, its image and the image's alpha (null for inks)
+        let n = self.next();
+        let page = format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {pw:.2} {ph:.2}] /Contents {} 0 R /Resources << /XObject << /Im0 {} 0 R >> >> >>",
+            n + 1,
+            n + 2
+        );
+        self.object(n, page.as_bytes())?;
+        let draw = format!("q {pw:.2} 0 0 {ph:.2} 0 0 cm /Im0 Do Q");
+        self.object(n + 1, &stream(&format!("<< /Length {} >>", draw.len()), draw.as_bytes()))?;
+        let image = if picture.inks {
+            format!(
+                "<< /Type /XObject /Subtype /Image /Width {width} /Height {height} /Interpolate true /ColorSpace {colours} /Decode [1 0 1 0 1 0 1 0] /BitsPerComponent 8 /Filter /DCTDecode /Length {} >>",
+                picture.colours.len()
+            )
+        } else {
+            format!(
+                "<< /Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace {colours} /BitsPerComponent 8 /Filter /{} /SMask {} 0 R /Length {} >>",
+                picture.filter,
                 n + 3,
-                rgb.len()
-            ),
-            &rgb,
-        ));
-        made.push(stream(
-            &format!(
-                "<< /Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length {} >>",
-                alpha.len()
-            ),
-            &alpha,
-        ));
-        made
-    };
-    let numbers: Vec<usize> = (0..pages.len()).collect();
-    // each page holds its colours and alpha apart while it is made
-    let each = width as usize * height as usize * 4;
-    for (i, made) in numbers.iter().zip(crate::par::side_by_side_within(&numbers, each, page_objects)) {
-        objects.extend(made.unwrap_or_else(|| page_objects(i)));
+                picture.colours.len()
+            )
+        };
+        self.object(n + 2, &stream(&image, &picture.colours))?;
+        match &picture.alpha {
+            Some(alpha) => {
+                let dict = format!(
+                    "<< /Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length {} >>",
+                    alpha.len()
+                );
+                self.object(n + 3, &stream(&dict, alpha))?;
+            }
+            None => self.object(n + 3, b"null")?,
+        }
+        self.pages.push(n);
+        Ok(())
     }
-    if !icc.is_empty() {
-        let n = if press.is_some() { 4 } else { 3 };
-        objects.push(stream(&format!("<< /N {n} /Alternate {device} /Length {} >>", icc.len()), icc));
+
+    /// How many pages are written.
+    pub fn pages(&self) -> usize {
+        self.pages.len()
     }
-    let mut out = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec();
-    let mut offsets = Vec::with_capacity(objects.len());
-    for (i, body) in objects.iter().enumerate() {
-        offsets.push(out.len());
-        out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
-        out.extend_from_slice(body);
-        out.extend_from_slice(b"\nendobj\n");
+
+    /// Ends the PDF: its catalog, page tree and cross-reference table. Returns where it went.
+    pub fn finish(mut self) -> std::io::Result<W> {
+        self.object(1, b"<< /Type /Catalog /Pages 2 0 R >>")?;
+        let kids: Vec<String> = self.pages.iter().map(|n| format!("{n} 0 R")).collect();
+        let tree = format!("<< /Type /Pages /Kids [{}] /Count {} >>", kids.join(" "), self.pages.len());
+        self.object(2, tree.as_bytes())?;
+        let xref = self.written;
+        let count = self.offsets.len() + 1;
+        let mut table = format!("xref\n0 {count}\n0000000000 65535 f \n");
+        for o in &self.offsets {
+            table.push_str(&format!("{o:010} 00000 n \n"));
+        }
+        table.push_str(&format!("trailer\n<< /Size {count} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"));
+        self.out.write_all(table.as_bytes())?;
+        self.out.flush()?;
+        Ok(self.out)
     }
-    let xref = out.len();
-    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
-    for o in offsets {
-        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
-    }
-    out.extend_from_slice(
-        format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).as_bytes(),
-    );
-    out
 }
 
 fn stream(dict: &str, data: &[u8]) -> Vec<u8> {
@@ -1129,6 +1209,39 @@ mod tests {
         let table = std::str::from_utf8(&p[xref..]).unwrap();
         let first: usize = table.lines().nth(3).unwrap()[..10].parse().unwrap();
         assert!(p[first..].starts_with(b"1 0 obj"));
+    }
+
+    #[test]
+    fn a_pdf_written_a_page_at_a_time_gives_each_page_its_own_size_and_shares_profiles() {
+        let small = vec![10u8; 2 * 3 * 4];
+        let big = vec![200u8; 5 * 4 * 4];
+        let icc = b"a profile".to_vec();
+        let mut w = PdfWriter::new(Vec::new()).unwrap();
+        w.page(&PdfPicture::new(2, 3, &small, 100, None), 72.0, &icc).unwrap();
+        w.page(&PdfPicture::new(5, 4, &big, 60, None), 144.0, &icc).unwrap();
+        w.page(&PdfPicture::new(5, 4, &big, 100, None), 72.0, &[]).unwrap();
+        assert_eq!(w.pages(), 3);
+        let p = w.finish().unwrap();
+        let text = String::from_utf8_lossy(&p);
+        assert!(text.starts_with("%PDF-1.4") && text.trim_end().ends_with("%%EOF"));
+        assert!(text.contains("/Count 3"));
+        // each page its picture's size at its own resolution, in the order given
+        let boxes: Vec<&str> = text.match_indices("/MediaBox [").map(|(i, _)| &text[i + 11..i + 24]).collect();
+        assert_eq!(boxes, ["0 0 2.00 3.00", "0 0 2.50 2.00", "0 0 5.00 4.00"]);
+        // the profile once, for the two pages in it; the third in the device's colours
+        assert_eq!(text.matches("/Alternate /DeviceRGB").count(), 1);
+        assert_eq!(text.matches("/ICCBased").count(), 2);
+        assert!(text.contains("/ColorSpace /DeviceRGB /BitsPerComponent"));
+        assert!(text.contains("/DCTDecode") && text.contains("/FlateDecode"));
+        // every object the cross-reference table names starts where it says
+        let xref: usize = text.rsplit("startxref\n").next().unwrap().lines().next().unwrap().parse().unwrap();
+        let table = std::str::from_utf8(&p[xref..]).unwrap();
+        let entries: Vec<&str> = table.lines().skip(3).take_while(|l| l.ends_with(" n ")).collect();
+        assert_eq!(entries.len(), 2 + 1 + 3 * 4);
+        for (k, line) in entries.iter().enumerate() {
+            let at: usize = line[..10].parse().unwrap();
+            assert!(p[at..].starts_with(format!("{} 0 obj", k + 1).as_bytes()), "{k}");
+        }
     }
 
     /// A small GIF LZW decoder, to check the encoder against.

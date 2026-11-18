@@ -978,3 +978,87 @@ Turn Off	关闭
 Turn off	关闭
 Turn on	开启
 Show	显示
+
+# ---- 上游 0.0.7 新增（可见界面） ----
+Artworks	作品
+new canvas	新建画布
+custom canvas	自定义画布
+rename artwork	重命名作品
+Pair	成对
+No drawing	无绘制
+Someone	某人
+Stranger	陌生人
+Share's formats open	分享支持的格式
+getting ready	正在准备
+new layer	新建图层
+Mask	蒙版
+Plain	普通
+Whole	整体
+Several layers are chosen	已选择多个图层
+save selection	保存选区
+saved selection	已保存的选区
+clear history	清除历史记录
+My brush	我的画笔
+brush libraries	画笔库
+brush library	画笔库
+new palette	新建调色板
+import image	导入图片
+import plugin	导入插件
+import menu	导入菜单
+Classic filtering	经典滤镜
+Improved filtering	改进滤镜
+No filtering	无滤镜
+combine mode	组合模式
+edit source	编辑来源
+brush previews	画笔预览
+clear search	清除搜索
+animation settings	动画设置
+export settings	导出设置
+time-lapse replay	延时录制回放
+The time-lapse can't be read on this device	此设备无法读取这段延时录制
+gradient map	渐变映射
+new gradient	新建渐变
+advanced settings	高级设置
+light settings	灯光设置
+gesture controls	手势控制
+gesture delay	手势延迟
+show environment	显示环境
+touch companion	触控伴侣
+too large	太大
+the video can't be read	无法读取这段视频
+the video wasn't finished	视频未完成
+the video wasn't finished in time	视频未能及时完成
+the video's frames can't be read	无法读取这段视频的帧
+the video's tracks can't be read	无法读取这段视频的轨道
+the video's tracks weren't found in time	未能及时找到视频的轨道
+the writer didn't start	写入器未能启动
+the writer stopped	写入器已停止
+the writer takes no such video	写入器不支持这段视频
+this system lacks a video setting	本系统缺少这项视频设置
+no encoder takes this video	没有编码器支持这段视频
+the system's encoder doesn't take this video	系统编码器不支持这段视频
+the encoder stopped taking frames	编码器已停止接收帧
+the file has no video	这个文件里没有视频
+no video size	没有视频尺寸
+no size fits	没有合适的尺寸
+no pixel buffer for a frame	这一帧没有可用的像素缓冲
+a frame wasn't written	有一帧未能写入
+a frame couldn't be drawn	有一帧无法绘制
+a frame's pixel buffer can't be written	无法写入这一帧的像素缓冲
+says which encoder this machine has	显示这台机器的编码器
+ffmpeg gave no output	ffmpeg 没有输出
+ffmpeg took no input	ffmpeg 没有输入
+no such graphics backend	没有这个图形后端
+the window's surface couldn't be set up	无法建立窗口的绘图表面
+it stopped	已停止
+a page is missing	缺少一个页面
+no pages	没有页面
+not a PDF	不是 PDF 文件
+not a file's path	不是文件路径
+no sRGB colour space	没有 sRGB 色彩空间
+no bitmap to draw the page into	没有可绘制这个页面的位图
+the page's pixels came out short	这个页面的像素不足
+no frame can be read	读不到任何一帧
+a copy couldn't go on the system's clipboard	无法复制到系统剪贴板
+no GPU	没有 GPU
+the PDF is locked with a password	这个 PDF 设了密码

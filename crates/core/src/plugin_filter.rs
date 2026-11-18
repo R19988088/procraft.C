@@ -155,7 +155,8 @@ impl CanvasSession {
 
 #[uniffi::export]
 impl CanvasSession {
-    /// Opens the filter `id` from `plugins` on the current layer, keeping any adjustment open first.
+    /// Opens the filter `id` from `plugins` (as [`Plugins::filters`] has it) on the current layer,
+    /// keeping any adjustment open first.
     /// What to tell if it can't be; nothing if it opened, or if the layer can't be adjusted, as with
     /// [`CanvasSession::adjustment_start`]. Slow, as it saves the artwork (in `saved_in`, the first
     /// time in a session) and compiles the filter: call it off the main thread.
@@ -165,6 +166,8 @@ impl CanvasSession {
             Ok(ready) => ready,
             Err(why) => return Some(why),
         };
+        // (one of several a plugin lists stands and stops with its plugin)
+        let id = ready.plugin.clone();
         let (gpu, first) = {
             let mut st = self.shared.lock();
             (st.gpu.clone(), !std::mem::replace(&mut st.filters.saved, true))
@@ -564,46 +567,77 @@ mod tests {
         }
         for sample in std::fs::read_dir(root).unwrap() {
             let folder = sample.unwrap().path();
-            // the plugins with code are looked at by their own crates
-            if !folder.join("filter.wgsl").exists() {
+            let Ok(manifest) = std::fs::read(folder.join("craft-extension.json")) else { continue };
+            let mut manifest: Value = serde_json::from_slice(&manifest).unwrap();
+            // its one filter, or each it lists
+            let listed = manifest["filters"].as_array().cloned().unwrap_or_default();
+            let paths: Vec<String> = if listed.is_empty() {
+                vec!["filter.wgsl".to_owned()]
+            } else {
+                listed.iter().map(|f| format!("filters/{}.wgsl", f["key"].as_str().unwrap())).collect()
+            };
+            if !folder.join(&paths[0]).exists() {
                 continue;
             }
-            let code = std::fs::read(folder.join("filter.wgsl")).unwrap();
-            let manifest = std::fs::read(folder.join("craft-extension.json")).unwrap();
-            let mut manifest: Value = serde_json::from_slice(&manifest).unwrap();
-            manifest["files"] = json!([{ "path": "filter.wgsl", "sha256": sha256(&code), "size": code.len() }]);
-            let id = manifest["id"].as_str().unwrap().to_owned();
+            let codes: Vec<Vec<u8>> = paths.iter().map(|path| std::fs::read(folder.join(path)).unwrap()).collect();
+            let files: Vec<Value> = paths
+                .iter()
+                .zip(&codes)
+                .map(|(path, code)| json!({ "path": path, "sha256": sha256(code), "size": code.len() }))
+                .collect();
+            manifest["files"] = json!(files);
+            // the code beside a filter is looked at by its own crate: here it holds the filters alone
+            if let Some(object) = manifest.as_object_mut() {
+                object.insert("holds".to_owned(), json!(["filter"]));
+                for field in ["hooks", "actions", "brush_controls", "kinds", "layer_kinds"] {
+                    object.remove(field);
+                }
+                object.insert("permissions".to_owned(), json!([]));
+            }
+            let plugin = manifest["id"].as_str().unwrap().to_owned();
             let dir = store(&format!("sample-{count}"));
             let plugins = Plugins::with_store(dir.clone());
-            assert_eq!(plugins.install(pack(&manifest, &[("filter.wgsl", &code)])), None, "{}", folder.display());
-            let before = layer(&s);
-            assert_eq!(s.plugin_filter_start(Arc::clone(&plugins), id.clone(), None), None, "{id}");
-            let after = layer(&s);
-            assert_eq!(s.adjustment_shown().adjustment, Some(Adjustment::Plugin), "{id}");
-            assert_ne!(before, after, "{id} changed nothing");
-            // and for each control, a draw at each end of it
-            for control in s.adjustment_shown().plugin.unwrap().controls {
-                match control {
-                    PluginControl::Slider { control } => {
-                        s.plugin_filter_slider(control.key.clone(), control.least, true);
-                        layer(&s);
-                        s.plugin_filter_slider(control.key, control.most, true);
-                        layer(&s);
-                    }
-                    PluginControl::Switch { control } => {
-                        s.plugin_filter_switch(control.key, !control.starts);
-                        layer(&s);
-                    }
-                    PluginControl::File { .. } => {}
+            let packed: Vec<(&str, &[u8])> =
+                paths.iter().map(String::as_str).zip(codes.iter().map(Vec::as_slice)).collect();
+            assert_eq!(plugins.install(pack(&manifest, &packed)), None, "{}", folder.display());
+            // each listed under its switch, on
+            for filter in &listed {
+                if let Some(under) = filter["under"].as_str() {
+                    assert!(plugins.set_switch(format!("{plugin}.{under}"), true), "{plugin}.{under}");
                 }
             }
-            assert_eq!(s.adjustment_shown().adjustment, Some(Adjustment::Plugin), "{id} stopped");
-            assert_eq!(s.take_failure(), None, "{id}");
-            assert!(s.adjustment_end(false));
-            assert_eq!(layer(&s), before);
+            let ids: Vec<String> = plugins.filters().into_iter().map(|f| f.id).collect();
+            assert_eq!(ids.len(), paths.len(), "{plugin}");
+            for id in ids {
+                let before = layer(&s);
+                assert_eq!(s.plugin_filter_start(Arc::clone(&plugins), id.clone(), None), None, "{id}");
+                let after = layer(&s);
+                assert_eq!(s.adjustment_shown().adjustment, Some(Adjustment::Plugin), "{id}");
+                assert_ne!(before, after, "{id} changed nothing");
+                // and for each control, a draw at each end of it
+                for control in s.adjustment_shown().plugin.unwrap().controls {
+                    match control {
+                        PluginControl::Slider { control } => {
+                            s.plugin_filter_slider(control.key.clone(), control.least, true);
+                            layer(&s);
+                            s.plugin_filter_slider(control.key, control.most, true);
+                            layer(&s);
+                        }
+                        PluginControl::Switch { control } => {
+                            s.plugin_filter_switch(control.key, !control.starts);
+                            layer(&s);
+                        }
+                        PluginControl::File { .. } => {}
+                    }
+                }
+                assert_eq!(s.adjustment_shown().adjustment, Some(Adjustment::Plugin), "{id} stopped");
+                assert_eq!(s.take_failure(), None, "{id}");
+                assert!(s.adjustment_end(false));
+                assert_eq!(layer(&s), before);
+                count += 1;
+            }
             let _ = std::fs::remove_dir_all(dir);
-            count += 1;
         }
-        assert!(count >= 3, "{count} samples");
+        assert!(count >= 4, "{count} samples");
     }
 }

@@ -257,6 +257,8 @@ fn main() {
         wake: event_loop.create_proxy(),
         started: Instant::now(),
         last_frame: Instant::now(),
+        input_frame: false,
+        gap: Duration::from_millis(15),
         again: None,
         finishing_since: None,
         stroke_sound: stroke_sound::StrokeSound::default(),
@@ -280,6 +282,8 @@ fn main() {
         dropped: std::env::args_os().skip(1).map(std::path::PathBuf::from).filter(|p| p.is_file()).collect(),
         tap_held: None,
         interface_touches: input::InterfaceTouches::default(),
+        modifiers: winit::keyboard::ModifiersState::empty(),
+        maximised_before_full_screen: false,
         closed: false,
     };
     // a panic on the window's thread ends the app: said, rather than the window just vanishing
@@ -306,6 +310,10 @@ struct App {
     /// moving, or a hold to be timed).
     last_frame: Instant,
     again: Option<Instant>,
+    /// Input came that wants a frame sooner than the screen shows another after the last (see
+    /// [`frame_gap`]): drawn once it does. And that gap, as the last frame found it.
+    input_frame: bool,
+    gap: Duration,
     /// Since when a plugin has been finishing a fill.
     finishing_since: Option<Instant>,
     /// The strokes' sound, played while a plugin makes it.
@@ -344,6 +352,10 @@ struct App {
     tap_held: Option<(u64, winit::dpi::PhysicalPosition<f64>, Instant)>,
     /// Which touch the interface follows: a finger on it beside a hand resting on the canvas.
     interface_touches: input::InterfaceTouches,
+    /// The keyboard's modifiers held now, for Alt+Enter.
+    modifiers: winit::keyboard::ModifiersState,
+    /// The window was maximised as it went full screen, and is maximised again as it comes back.
+    maximised_before_full_screen: bool,
     /// The window was closed (the artwork open kept): the app's end needs nothing more.
     closed: bool,
 }
@@ -354,6 +366,39 @@ fn window_icon() -> Option<winit::window::Icon> {
     let rgba = picture.into_rgba8();
     let (width, height) = rgba.dimensions();
     winit::window::Icon::from_rgba(rgba.into_raw(), width, height).ok()
+}
+
+/// Whether `key` pressed with `modifiers` held is the window's full screen key: F11, or off a Mac
+/// Alt+Enter as well (Ctrl with Alt is AltGr, typing).
+fn full_screen_key(key: &winit::keyboard::Key, modifiers: winit::keyboard::ModifiersState) -> bool {
+    use winit::keyboard::{Key, NamedKey};
+    match key {
+        Key::Named(NamedKey::F11) => true,
+        Key::Named(NamedKey::Enter) => {
+            !cfg!(target_os = "macos") && modifiers.alt_key() && !modifiers.control_key() && !modifiers.super_key()
+        }
+        _ => false,
+    }
+}
+
+/// The window fills its screen without its frame, or goes back to a window. On Windows a maximised
+/// window is put back to its own size first and maximised again as it comes back: left maximised,
+/// Windows keeps it to the screen less the task bar, and the task bar's strip shows black.
+fn toggle_full_screen(window: &Window, maximised_before: &mut bool) {
+    if window.fullscreen().is_some() {
+        pen::set_full_screen(false);
+        window.set_fullscreen(None);
+        if std::mem::take(maximised_before) {
+            window.set_maximized(true);
+        }
+        return;
+    }
+    *maximised_before = cfg!(windows) && window.is_maximized();
+    if *maximised_before {
+        window.set_maximized(false);
+    }
+    pen::set_full_screen(true);
+    window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
 }
 
 /// Tap Assistance holds a finger's touch where it landed this long.
@@ -389,6 +434,8 @@ impl ApplicationHandler for App {
                 return;
             }
         };
+        // the file dialogs open over it
+        files::dialogs_over(&window);
         // a pen's lean, which winit's touches leave out (on Wayland the whole pen)
         pen::watch(&window, self.wake.clone());
         // the brushes read while the gallery shows, so the first artwork opens without reading them
@@ -468,17 +515,19 @@ impl ApplicationHandler for App {
         // egui counts every redraw as wanting another; the frames it does want come from its
         // repaint delay, paced in `about_to_wait`
         if response.repaint && event != WindowEvent::RedrawRequested {
-            screen.window.request_redraw();
+            redraw_paced(&screen.window, self.last_frame, self.gap, &mut self.input_frame);
         }
-        // F11: the window fills its screen without its frame (a pen display's whole screen for
-        // the canvas, as the tablet's), or goes back to a window
+        // F11, or Alt+Enter off a Mac: the window fills its screen without its frame (a pen
+        // display's whole screen for the canvas, as the tablet's), or goes back to a window
+        if let WindowEvent::ModifiersChanged(m) = &event {
+            self.modifiers = m.state();
+        }
         if let WindowEvent::KeyboardInput { event: key, .. } = &event
             && key.state.is_pressed()
             && !key.repeat
-            && key.logical_key == winit::keyboard::Key::Named(winit::keyboard::NamedKey::F11)
+            && full_screen_key(&key.logical_key, self.modifiers)
         {
-            let full = screen.window.fullscreen().is_none();
-            screen.window.set_fullscreen(full.then_some(winit::window::Fullscreen::Borderless(None)));
+            toggle_full_screen(&screen.window, &mut self.maximised_before_full_screen);
         }
         match event {
             WindowEvent::CloseRequested => {
@@ -528,7 +577,7 @@ impl ApplicationHandler for App {
                 let canvas = self.ui.canvas_rect;
                 let over = |p: (f32, f32)| blocked || screen.over_interface(p, canvas);
                 if self.input.on_event(&session, &event, response.consumed, over) {
-                    screen.window.request_redraw();
+                    redraw_paced(&screen.window, self.last_frame, self.gap, &mut self.input_frame);
                 }
             }
         }
@@ -552,6 +601,8 @@ impl ApplicationHandler for App {
         // before winit closes the connection the pen is read on
         pen::stop();
         if std::mem::replace(&mut self.closed, true) {
+            // (the brushes kept since, if any, written whole)
+            files::finish_writing();
             return;
         }
         self.hide_while_opening();
@@ -593,8 +644,9 @@ impl ApplicationHandler for App {
         self.sync_projection(event_loop);
         let Some(screen) = self.screen.as_ref() else { return };
         let Some(session) = self.session.as_ref() else {
-            // the gallery: only the interface's own wants
-            match self.again {
+            // the gallery: only the interface's own wants, and input's once a refresh
+            let input = self.input_frame.then(|| self.last_frame + self.gap);
+            match [self.again, input].into_iter().flatten().min() {
                 Some(due) if Instant::now() >= due => screen.window.request_redraw(),
                 Some(due) => {
                     event_loop.set_control_flow(ControlFlow::WaitUntil(due));
@@ -609,12 +661,16 @@ impl ApplicationHandler for App {
         // the touches' waits (a hold, a repeat) run out
         if self.input.tick(session) || !self.input.commands.is_empty() {
             screen.window.request_redraw();
-        } else if let Some(due) =
-            self.again.or_else(|| (session.wants_frame() && !screen.minimised()).then(Instant::now))
-        {
-            // what moves by itself (the selection's bands, a fade) draws once a refresh, not as
-            // fast as frames can be made
-            let due = due.max(self.last_frame + frame_gap(&screen.window));
+        } else if let Some(due) = {
+            // what moves by itself (the selection's bands, a fade), and input that came meanwhile,
+            // draws once a refresh, not as fast as frames can be made
+            let wanted = ((session.wants_frame() || self.input_frame) && !screen.minimised()).then(Instant::now);
+            match (self.again, wanted) {
+                (Some(again), Some(wanted)) => Some(again.min(wanted)),
+                (again, wanted) => again.or(wanted),
+            }
+        } {
+            let due = due.max(self.last_frame + self.gap);
             if Instant::now() >= due {
                 screen.window.request_redraw();
             } else {
@@ -710,6 +766,8 @@ impl App {
             return;
         };
         self.last_frame = Instant::now();
+        self.input_frame = false;
+        self.gap = frame_gap(&screen.window);
         // the canvas made: drawn from now on; a slow one says it is opening
         if self.opening.as_ref().is_some_and(|(_, made)| made.is_finished())
             && let Some((_, made)) = self.opening.take()
@@ -742,7 +800,7 @@ impl App {
         screen.size_interface(self.ui.plugins(), Some(session.as_ref()));
         // the strokes heard while a plugin makes their sound
         self.stroke_sound.follow(Some(&session), self.ui.plugins().makes_stroke_sound());
-        let raw = screen.egui.take_egui_input(&screen.window);
+        let raw = screen.take_input();
         let output = screen.egui.egui_ctx().clone().run_ui(raw, |ui| {
             self.ui.show(ui, &session, &mut self.input);
             // opening: the gallery over it, growing from the artwork's picture
@@ -789,13 +847,9 @@ impl App {
         }
         if std::mem::take(&mut self.ui.keep_brushes) {
             // off the window's thread: a library with many brushes brought in is tens of megabytes
-            // when something in it changed (a brush chosen only writes the choices)
-            let kept = Arc::clone(&session);
-            let thread = std::thread::Builder::new().name("procraft-keep-brushes".to_owned());
-            if let Err(e) = thread.spawn(move || files::keep_brushes(&kept)) {
-                log::warn!("keeping the brushes on a thread of their own: {e}");
-                files::keep_brushes(&session);
-            }
+            // when something in it changed (a brush chosen only writes the choices); waited for as
+            // the app ends
+            files::keep_brushes_meanwhile(&session);
         }
         for action in std::mem::take(&mut self.ui.actions) {
             self.act(action, &session);
@@ -806,9 +860,11 @@ impl App {
     fn gallery_frame(&mut self) {
         let Some(screen) = self.screen.as_mut() else { return };
         self.last_frame = Instant::now();
+        self.input_frame = false;
+        self.gap = frame_gap(&screen.window);
         screen.size_interface(self.ui.plugins(), None);
         self.stroke_sound.follow(None, false);
-        let raw = screen.egui.take_egui_input(&screen.window);
+        let raw = screen.take_input();
         let mut asked = None;
         let (gallery, interface) = (&mut self.gallery, &mut self.ui);
         let closing = self.zoom.as_ref().filter(|z| !z.opening);
@@ -917,8 +973,9 @@ impl App {
             Some(gallery::Asked::Share(list, format)) => {
                 files::share_artworks(&list, format, 100, &mut self.ui.export_card);
             }
-            Some(gallery::Asked::SharePdf(list, quality)) => {
-                files::share_artworks(&list, files::Format::Pdf, quality, &mut self.ui.export_card);
+            // several as one PDF, a page each
+            Some(gallery::Asked::SharePdf(list, quality, group)) => {
+                files::share_pdf(&list, quality, &group, &mut self.ui.export_card);
             }
             Some(gallery::Asked::DragOut(artwork)) => self.drag_out(&artwork),
             // opened (read as Open reads it), then shared
@@ -1131,12 +1188,13 @@ impl App {
             }
             Ok(session) => {
                 let cell = self.gallery.picture_of(&dir);
+                let turns = session.shown_turns();
                 self.open_artwork(Arc::clone(&session), dir);
                 // the gallery zooms into its picture
                 if let (Some(cell), Some(screen)) = (cell, &self.screen) {
                     let size = screen.window.inner_size();
                     let scale = screen.window.scale_factor() as f32 * screen.egui.egui_ctx().zoom_factor();
-                    self.zoom = Some(zoom::Zoom::opening(&session, cell, (size.width, size.height), scale));
+                    self.zoom = Some(zoom::Zoom::opening(&session, cell, turns, (size.width, size.height), scale));
                 }
             }
             Err(e) => files::tell("Can't open the artwork", &e),
@@ -1348,11 +1406,13 @@ impl App {
         let opened = match action {
             Action::Gallery => {
                 if self.leave_artwork() {
-                    // the gallery zooms out of the artwork's picture
+                    // the gallery zooms out of the artwork's picture, as it will show (turned as its
+                    // canvas was left)
+                    let (info, turns) = (session.info(), session.shown_turns());
                     if let (Some(dir), Some(screen)) = (&self.artwork, &self.screen)
-                        && let Some(cell) = self.gallery.picture_of(dir)
+                        && let Some(cell) = self.gallery.picture_as(dir, (info.width, info.height), turns)
                     {
-                        self.zoom = Some(zoom::Zoom::closing(screen.egui.egui_ctx(), session, cell));
+                        self.zoom = Some(zoom::Zoom::closing(screen.egui.egui_ctx(), session, cell, turns));
                     }
                     self.session = None;
                     self.artwork = None;
@@ -1411,10 +1471,24 @@ impl App {
     }
 }
 
-/// The time between the screen's refreshes (a 60 Hz screen's when it can't be told).
+/// The least time between two frames: a tenth under the time between the screen's refreshes (a
+/// 60 Hz screen's when it can't be told), so a frame is ready for each as they drift, as the
+/// tablet's are.
 fn frame_gap(window: &Window) -> Duration {
     let millihertz = window.current_monitor().and_then(|m| m.refresh_rate_millihertz()).filter(|&m| m > 0);
-    Duration::from_secs_f64(1000.0 / f64::from(millihertz.unwrap_or(60_000)))
+    Duration::from_secs_f64(0.9 * 1000.0 / f64::from(millihertz.unwrap_or(60_000)))
+}
+
+/// Asks for a frame as input wants one: at once when the last was `gap` ago or more, else once it
+/// was (`later`, seen to in `about_to_wait`). A mouse or pen reports hundreds of moves a second:
+/// drawn as each came, where the window shows the newest frame without waiting for the screen,
+/// frames were drawn that never showed.
+fn redraw_paced(window: &Window, last_frame: Instant, gap: Duration, later: &mut bool) {
+    if Instant::now() >= last_frame + gap {
+        window.request_redraw();
+    } else {
+        *later = true;
+    }
 }
 
 #[cfg(test)]

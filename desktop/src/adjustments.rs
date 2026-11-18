@@ -110,7 +110,7 @@ pub fn menu(
     actions: &[PluginAction],
     showing_filters: bool,
 ) -> (Rect, Option<MenuRow>) {
-    let screen = ctx.content_rect();
+    let screen = panel::screen(ctx);
     let (left, arrow_x) = panel::place(ctx, MENU_WIDTH, button.center().x);
     let top = screen.top() + pc::BAR_HEIGHT;
     let groups = menu_groups(filters, actions, showing_filters);
@@ -120,7 +120,7 @@ pub fn menu(
     let height = content.min(screen.bottom() - MENU_BOTTOM_MARGIN - top);
     let rect = Rect::from_min_size(pos2(left, top), vec2(MENU_WIDTH, height));
     let mut tapped = None;
-    egui::Area::new(Id::unique("adjustments menu")).fixed_pos(rect.min).order(Order::Foreground).show(ctx, |ui| {
+    panel::area(ctx, Id::unique("adjustments menu"), rect).show(ctx, |ui| {
         ui.allocate_rect(rect, Sense::click());
         panel::frame(ui, look, "adjustments frame", rect, arrow_x, backdrops);
         let body = panel::body(rect);

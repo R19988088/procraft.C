@@ -1,6 +1,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
-//! The stock brushes: the sets and key brushes are there, each draws a stroke of
-//! its own, and the pressure, grain and wet controls do what their names say.
+//! The brushes the app comes with: the stock sets and ours from before (the Legacy set) are there,
+//! each brush draws a stroke of its own, and the pressure, grain and wet controls do what their
+//! names say.
 
 use std::sync::Arc;
 
@@ -67,34 +68,40 @@ fn the_stock_sets_and_key_brushes_are_there() {
     let Some(s) = session() else { return };
     let lib = s.brush_library();
     for (set, least) in [
-        ("Sketching", 6),
-        ("Inking", 6),
-        ("Drawing", 5),
-        ("Painting", 6),
-        ("Watercolour", 5),
-        ("Calligraphy", 5),
-        ("Airbrushing", 5),
-        ("Spray Paint", 4),
-        ("Charcoals", 5),
-        ("Textures", 6),
-        ("Abstract", 5),
+        ("Pencils", 10),
+        ("Pens", 10),
+        ("Inks", 10),
+        ("Basics", 10),
+        ("Sketching", 10),
+        ("Inking", 17),
+        ("Painting", 17),
+        ("Airbrushing", 12),
+        ("Charcoals", 9),
+        ("Water", 8),
+        ("Earth", 8),
+        ("Legacy", 150),
     ] {
         let found = lib.iter().find(|s| s.name == set).unwrap_or_else(|| panic!("set {set}"));
         assert!(found.brushes.len() >= least, "{set}: {} brushes", found.brushes.len());
     }
+    // the stock sets first, ours from before after them
+    assert_eq!(lib.last().map(|s| s.name.as_str()), Some("Legacy"));
     let total: usize = lib.iter().map(|s| s.brushes.len()).sum();
-    assert!(total >= 150, "{total} brushes");
-    // the best known stock brushes, each in its set
+    assert!(total >= 550, "{total} brushes");
+    // the best known brushes, each in its set
     for (set, name) in [
         ("Sketching", "6B Pencil"),
-        ("Inking", "Round Pen"),
+        ("Sketching", "Technical Pencil"),
+        ("Inking", "Technical Pen"),
         ("Painting", "Round Brush"),
         ("Airbrushing", "Soft Airbrush"),
-        ("Charcoals", "Charcoal Stick"),
-        ("Watercolour", "Wet Wash"),
-        ("Calligraphy", "Script Brush"),
-        ("Textures", "Canvas Texture"),
-        ("Spray Paint", "Spray Can"),
+        ("Charcoals", "Vine Charcoal"),
+        ("Legacy", "Round Pen"),
+        ("Legacy", "Charcoal Stick"),
+        ("Legacy", "Wet Wash"),
+        ("Legacy", "Script Brush"),
+        ("Legacy", "Canvas Texture"),
+        ("Legacy", "Spray Can"),
     ] {
         assert!(find(&s, set, name).is_some(), "{name} in {set}");
     }
@@ -120,22 +127,23 @@ fn the_stock_sets_and_key_brushes_are_there() {
 fn the_key_brushes_keep_their_character() {
     let Some(s) = session() else { return };
     // a pencil answers pressure with opacity and grain, not with a hard, clean edge
-    assert!(setting(&s, "Sketching", "6B Pencil", "pressure_opacity").unwrap_or(0.0) >= 0.5);
-    assert!(setting(&s, "Sketching", "6B Pencil", "grain_depth").unwrap_or(0.0) >= 0.5);
+    assert!(setting(&s, "Legacy", "6B Pencil", "pressure_opacity").unwrap_or(0.0) >= 0.5);
+    assert!(setting(&s, "Legacy", "6B Pencil", "grain_depth").unwrap_or(0.0) >= 0.5);
     // an airbrush is soft and answers pressure with opacity, not size
-    assert!(setting(&s, "Airbrushing", "Soft Airbrush", "pressure_opacity").unwrap_or(0.0) >= 0.5);
-    assert_eq!(setting(&s, "Airbrushing", "Soft Airbrush", "pressure_size"), Some(0.0));
+    assert!(setting(&s, "Legacy", "Soft Airbrush", "pressure_opacity").unwrap_or(0.0) >= 0.5);
+    assert_eq!(setting(&s, "Legacy", "Soft Airbrush", "pressure_size"), Some(0.0));
     // an inking pen answers pressure with size and tapers
-    assert!(setting(&s, "Inking", "Studio Ink", "pressure_size").unwrap_or(0.0) >= 0.5);
+    assert!(setting(&s, "Legacy", "Studio Ink", "pressure_size").unwrap_or(0.0) >= 0.5);
     // oil paint mixes wet; charcoal is grain
-    assert!(setting(&s, "Painting", "Oil Paint", "wet_pull").unwrap_or(0.0) >= 0.3);
-    assert!(setting(&s, "Charcoals", "Charcoal Stick", "grain_depth").unwrap_or(0.0) >= 0.5);
+    assert!(setting(&s, "Legacy", "Oil Paint", "wet_pull").unwrap_or(0.0) >= 0.3);
+    assert!(setting(&s, "Legacy", "Charcoal Stick", "grain_depth").unwrap_or(0.0) >= 0.5);
 }
 
 #[test]
 fn pressure_lays_more_paint_for_pencils_and_airbrushes() {
     let Some(s) = session() else { return };
-    for (set, name) in [("Sketching", "6B Pencil"), ("Airbrushing", "Soft Airbrush")] {
+    for (set, name) in [("Legacy", "6B Pencil"), ("Legacy", "Soft Airbrush"), ("Sketching", "6B Pencil")] {
+        s.clear_layer();
         let (light, light_ink) = stroke(&s, set, name, 0.15);
         s.clear_layer();
         let (heavy, heavy_ink) = stroke(&s, set, name, 0.95);
@@ -149,7 +157,7 @@ fn pressure_lays_more_paint_for_pencils_and_airbrushes() {
 fn a_brush_survives_the_round_trip_through_its_file() {
     let Some(s) = session() else { return };
     let lib = s.brush_library();
-    let set = lib.iter().find(|s| s.name == "Sketching").expect("Sketching");
+    let set = lib.iter().find(|s| s.name == "Legacy").expect("Legacy");
     let brush = set.brushes.iter().find(|b| b.name == "6B Pencil").expect("6B Pencil");
     let keys: Vec<String> =
         ["spacing", "hardness", "pressure_size", "pressure_opacity", "grain_depth", "grain_scale", "max_size", "flow"]
@@ -196,7 +204,7 @@ fn a_set_survives_the_round_trip_through_its_file() {
 #[test]
 fn a_studio_setting_reaches_both_the_preview_and_the_canvas() {
     let Some(s) = session() else { return };
-    let (set, index) = find(&s, "Painting", "Round Brush").expect("Round Brush");
+    let (set, index) = find(&s, "Legacy", "Round Brush").expect("Round Brush");
     let preview = |s: &CanvasSession| {
         let p = s.brush_preview(set, index, 240, 60).expect("preview");
         p.rgba.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3))
@@ -210,11 +218,11 @@ fn a_studio_setting_reaches_both_the_preview_and_the_canvas() {
     set_flow(0.05);
     let faint_preview = preview(&s);
     s.clear_layer();
-    let (_, faint) = stroke(&s, "Painting", "Round Brush", 1.0);
+    let (_, faint) = stroke(&s, "Legacy", "Round Brush", 1.0);
     set_flow(1.0);
     let solid_preview = preview(&s);
     s.clear_layer();
-    let (_, solid) = stroke(&s, "Painting", "Round Brush", 1.0);
+    let (_, solid) = stroke(&s, "Legacy", "Round Brush", 1.0);
     assert_ne!(faint_preview, solid_preview, "the studio's change shows in the brush's preview");
     assert!(solid > faint, "the studio's change shows on the canvas: {faint} then {solid}");
 }

@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.layer-fills",
+  "name": "Layer fills",
+  "version": "1.0.0",
+  "holds": ["hooks", "filter"],
+  "publisher": { "name": "ProCraft" },
+  "description": "Fills a layer for you: a grid in the brush's colour, or paper behind the layer's paint.",
+  "compat": { "procraft": { "interface": 5 } },
+  "permissions": ["artwork.read", "artwork.write", "brush", "notice"],
+  "hooks": [],
+  "actions": [
+    { "key": "add", "label": "Add a grid layer", "under": "grid" }
+  ],
+  "controls": [
+    { "key": "grid", "type": "switch", "label": "Grid layer" },
+    {
+      "key": "spacing", "type": "slider", "label": "Spacing", "least": 10, "most": 500, "step": 10, "starts": 100,
+      "unit": " px", "under": "grid"
+    },
+    { "key": "line", "type": "slider", "label": "Line width", "least": 1, "most": 10, "step": 1, "starts": 2, "unit": " px", "under": "grid" },
+    { "key": "paper", "type": "switch", "label": "Paper texture" },
+    {
+      "key": "grain", "type": "slider", "label": "Grain", "least": 0, "most": 1, "step": 0.01, "starts": 0.5,
+      "shown_times": 100, "unit": "%", "live": true, "under": "paper"
+    },
+    {
+      "key": "scale", "type": "slider", "label": "Scale", "least": 1, "most": 16, "step": 0.5, "starts": 3, "unit": " px",
+      "live": true, "under": "paper"
+    },
+    {
+      "key": "warmth", "type": "slider", "label": "Warmth", "least": 0, "most": 1, "step": 0.01, "starts": 0.3,
+      "shown_times": 100, "unit": "%", "live": true, "under": "paper"
+    }
+  ],
+  "filters": [
+    { "key": "paper", "label": "Paper texture", "controls": ["grain", "scale", "warmth"], "under": "paper" }
+  ],
+  "replaces": [
+    {
+      "id": "io.github.artcraftandroid.grid-layer", "switch": "grid",
+      "controls": { "spacing": "spacing", "line": "line" }
+    },
+    { "id": "io.github.artcraftandroid.paper-texture", "switch": "paper" }
+  ]
+}

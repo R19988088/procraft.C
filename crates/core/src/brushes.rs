@@ -26,6 +26,9 @@ static STAMPS: std::sync::Mutex<Option<((Option<u32>, Option<u64>, [u32; 3], usi
 static OUTLINES: std::sync::Mutex<Option<((Option<u32>, Option<u64>, u32, u32), Vec<Vec<f32>>)>> =
     std::sync::Mutex::new(None);
 
+/// Held while a brush's sample stroke is drawn (see [`CanvasSession::brush_preview`]).
+static PREVIEWS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct BrushInfo {
     pub set: u32,
@@ -93,7 +96,7 @@ impl CanvasSession {
             let shape = &st.brush(st.tool).shape;
             let key =
                 (shape.image, shape.source.as_ref().map(|s| s.id), shape.roundness.to_bits(), shape.rotation.to_bits());
-            let pixels = shape.source.as_ref().map(|s| std::sync::Arc::clone(&s.pixels));
+            let pixels = shape.source.as_ref().map(|s| s.pixels.clone());
             (key, pixels)
         };
         let (image, source, roundness, rotation) = key;
@@ -150,7 +153,7 @@ impl CanvasSession {
                 [brush.hardness, shape.roundness, shape.rotation].map(f32::to_bits),
                 side,
             );
-            (key, shape.source.as_ref().map(|s| std::sync::Arc::clone(&s.pixels)))
+            (key, shape.source.as_ref().map(|s| s.pixels.clone()))
         };
         let mut kept = STAMPS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some((k, stamp)) = kept.as_ref()
@@ -362,14 +365,27 @@ impl CanvasSession {
     ) -> Option<ThumbnailImage> {
         let (w, h) = (width.clamp(16, 2048), height.clamp(16, 1024));
         let (cw, ch) = (preview::CANVAS.0 as u32, preview::CANVAS.1 as u32);
+        // a brush a plugin's brush engine draws, while that is on, is drawn by it
+        let hooks = self
+            .shared
+            .lock()
+            .hooks
+            .clone()
+            .filter(|h| brush.engine.as_ref().is_some_and(|e| h.engine(&e.engine).is_some()));
         // the preview it came with, while it is as it came: a blank file preview (some imported
         // brushes ship one) is no preview, so the brush draws its own
-        if let Some((tw, th, rgba)) = brush.thumbnail.as_deref().and_then(crate::brush_files::thumbnail_pixels) {
+        if let Some((tw, th, rgba)) =
+            brush.thumbnail.as_deref().filter(|_| hooks.is_none()).and_then(crate::brush_files::thumbnail_pixels)
+        {
             let (pixels, _) = rgba.as_chunks::<4>();
             if pixels.iter().any(|p| p[3] > 0) {
                 return Some(ThumbnailImage { width: w, height: h, rgba: preview::fit_image(&rgba, (tw, th), w, h) });
             }
         }
+        // one at a time, on the canvas kept for them: drawn side by side, each took a canvas of its
+        // own, its shape and grain arrays made again with it (a library's card asks for a dozen
+        // strokes at once)
+        let _drawing = PREVIEWS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // what it needs taken under the lock; drawn without it, so painting goes on meanwhile
         let (gpu, kept) = {
             let mut st = self.shared.lock();
@@ -386,6 +402,12 @@ impl CanvasSession {
         };
         let layer = doc.current();
         canvas.wipe_layer(layer);
+        if let Some(hooks) = &hooks
+            && let Some(drawn) = self.engine_preview(hooks, &brush, &gpu, &mut canvas, &mut doc)
+        {
+            self.shared.lock().preview.get_or_insert((canvas, doc));
+            return Some(ThumbnailImage { width: w, height: h, rgba: preview::fit(&drawn, w, h) });
+        }
         let mut style = StrokeStyle::for_brush(&brush, StrokeTool::Paint, [1.0, 1.0, 1.0], 1.0, false);
         // it mixes wet only where the brush's preview says to
         if brush.setting("preview_wet_mix") < 0.5 {
@@ -405,9 +427,10 @@ impl CanvasSession {
             self.use_full_sources(&gpu, &mut canvas, &mut second_style, &second);
             let ratio = second.diameter(0.5) / brush.diameter(0.5).max(1e-3);
             let mode = brush.setting("dual_blend").round().max(0.0) as u32;
+            let classic = brush.setting("classic_combine") >= 0.5;
             (!second_style.in_place()).then(|| {
-                let dual =
-                    procraft_gpu::SecondStroke { style: second_style, mode, threshold: second_style.alpha_threshold };
+                let threshold = second_style.alpha_threshold;
+                let dual = procraft_gpu::SecondStroke { style: second_style, mode, threshold, classic };
                 (second, dual, preview::diameter(&brush) * ratio)
             })
         });
@@ -416,19 +439,28 @@ impl CanvasSession {
             None => canvas.begin_stroke(layer, style),
         }
         if stamp_only {
-            // the brush's stamp on its own in the middle, as wide as its preview size of its most
-            // size (a big one reaching past the preview, as there)
-            let side = (brush.setting("preview_size").clamp(0.0, 1.0) * brush.biggest()).max(1.0);
+            // the brush's stamp on its own in the middle, its preview size of the way from its
+            // least size to its most (a big one reaching past the preview, as there)
+            let (most, share) = (brush.biggest(), brush.setting("preview_size").clamp(0.0, 1.0));
+            let least = brush.min_size.clamp(0.0, most);
+            let side = (least + (most - least) * share).max(1.0);
             canvas.add_stamps(&[Stamp::round(Vec2::new(cw as f32 / 2.0, ch as f32 / 2.0), side / 2.0, 1.0)]);
         } else {
             let samples = preview::samples(&brush);
             if let Some((second, _, diameter)) = second {
-                let mut stroke = StrokeBuilder::new(second, diameter, Pointer::Stylus).steady();
+                let tilts = brush.setting("preview_tilt") >= 0.5;
+                let mut stroke = StrokeBuilder::new(second, diameter, Pointer::Stylus).steady().on_pad(tilts);
                 canvas.add_second_stamps(&stroke.add(&samples));
                 canvas.replace_second_stamps(&stroke.finish());
             }
-            let mut stroke = StrokeBuilder::new(brush.clone(), preview::diameter(&brush), Pointer::Stylus).steady();
-            canvas.add_stamps(&stroke.add(&samples));
+            // drawn as the pad draws: the tilt acting only if the brush previews it, the lean moving
+            // no stamps
+            let tilts = brush.setting("preview_tilt") >= 0.5;
+            let mut stroke =
+                StrokeBuilder::new(brush.clone(), preview::diameter(&brush), Pointer::Stylus).steady().on_pad(tilts);
+            // (its first stamps as they turned to the way it goes, so its end lays only the rest)
+            let added = stroke.add(&samples);
+            canvas.add_stamps(&if stroke.take_turned() { stroke.placed_stamps() } else { added });
             canvas.replace_stamps(&stroke.finish());
         }
         canvas.end_stroke();
@@ -439,7 +471,67 @@ impl CanvasSession {
         self.shared.lock().preview.get_or_insert((canvas, doc));
         Some(ThumbnailImage { width: w, height: h, rgba: preview::fit(&rgba?, w, h) })
     }
+
+    /// `brush`'s sample stroke drawn by the brush engine that made it, white, at its preview size,
+    /// on the preview's canvas (its layer wiped): the canvas's pixels; none if the engine doesn't
+    /// draw it.
+    fn engine_preview(
+        &self,
+        hooks: &std::sync::Arc<crate::hooks::Hooks>,
+        brush: &procraft_engine::brush::Brush,
+        gpu: &procraft_gpu::Gpu,
+        canvas: &mut Canvas,
+        doc: &mut Document,
+    ) -> Option<Vec<u8>> {
+        let diameter = preview::diameter(brush);
+        let curve = procraft_engine::brush::SIZE_CURVE;
+        let start = brush.diameter(brush.setting("preview_size").clamp(0.0, 1.0).powf(1.0 / curve));
+        let starting = crate::plugin_brushes::Starting {
+            colour: [1.0; 3],
+            secondary: [0.0; 3],
+            diameter,
+            start_diameter: start,
+            opacity: 1.0,
+            tool: 0,
+            pointer: 1,
+            seed: PREVIEW_SEED,
+            under_at: None,
+            turn: 0.0,
+        };
+        let o = crate::plugin_brushes::engine_stroke(
+            hooks,
+            brush,
+            StrokeTool::Paint,
+            starting,
+            (false, true),
+            canvas,
+            gpu,
+        )?;
+        let layer = doc.current();
+        match o.second {
+            Some(second) => canvas.begin_dual_stroke(layer, o.style, second),
+            None => canvas.begin_stroke(layer, o.style),
+        }
+        let samples = preview::samples(brush);
+        let make =
+            |half| StrokeBuilder::new(brush.clone(), diameter, Pointer::Stylus).steady().with_engine(Box::new(half));
+        let mut first = make(o.first);
+        if o.second.is_some() {
+            let mut second = make(o.second_half);
+            canvas.add_second_stamps(&second.add(&samples));
+            canvas.replace_second_stamps(&second.finish());
+        }
+        canvas.add_stamps(&first.add(&samples));
+        canvas.replace_stamps(&first.finish());
+        canvas.end_stroke();
+        canvas.render(gpu, doc, None);
+        canvas.forget_history();
+        canvas.read_composite(gpu).ok()
+    }
 }
+
+/// What an engine's preview strokes are seeded with: the same each time.
+const PREVIEW_SEED: u32 = 0x5eed_7e57;
 
 #[cfg(test)]
 mod tests {

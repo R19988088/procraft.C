@@ -10,7 +10,16 @@ use crate::Gpu;
 /// The radiance cube's side and levels (the last 2 texels across).
 const CUBE_SIDE: u32 = 256;
 pub(crate) const CUBE_LEVELS: u32 = 8;
+/// In half floats, so bright light keeps its strength (where the GPU draws into them: else 8 bits
+/// a channel, each texel's colour over a multiplier in its alpha, up to `CUBE_RGBM` times white).
 const CUBE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+const CUBE_RGBM: f64 = 16.0;
+
+/// The constants the shaders reading the cube take on `gpu`: how far its 8 bits a channel reach
+/// (0: in half floats).
+pub(crate) fn radiance_constants(gpu: &Gpu) -> [(&'static str, f64); 1] {
+    [("RGBM", if gpu.draws_half_floats() { 0.0 } else { CUBE_RGBM })]
+}
 /// The BRDF table's side and samples per cell.
 const TABLE_SIDE: usize = 64;
 const TABLE_SAMPLES: u32 = 256;
@@ -92,13 +101,14 @@ impl Lighting {
         });
 
         // the radiance cube, level by level and face by face
+        let cube_format = if gpu.draws_half_floats() { CUBE } else { wgpu::TextureFormat::Rgba8Unorm };
         let cube = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("environment radiance"),
             size: wgpu::Extent3d { width: CUBE_SIDE, height: CUBE_SIDE, depth_or_array_layers: 6 },
             mip_level_count: CUBE_LEVELS,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: CUBE,
+            format: cube_format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
@@ -157,9 +167,12 @@ impl Lighting {
             fragment: Some(wgpu::FragmentState {
                 module: &module,
                 entry_point: Some("fs_prefilter"),
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &radiance_constants(gpu),
+                    ..Default::default()
+                },
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: CUBE,
+                    format: cube_format,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],

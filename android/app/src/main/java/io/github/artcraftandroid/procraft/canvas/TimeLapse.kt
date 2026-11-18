@@ -6,6 +6,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
+import io.github.artcraftandroid.procraft.AppLog
 import io.github.artcraftandroid.procraft.core.PackageTimeLapse
 import io.github.artcraftandroid.procraft.core.timeLapseBitsPerPixel
 import io.github.artcraftandroid.procraft.core.timeLapseFps
@@ -55,9 +56,9 @@ class TimeLapse(artwork: File) {
         get() = core.recording()
         set(on) = core.setRecording(on)
 
-    /** Keeps a frame (premultiplied RGBA, [width] × [height]) unless it is the same as the last. */
-    fun record(rgba: ByteArray, width: Int, height: Int) {
-        core.record(rgba, width.toUInt(), height.toUInt())
+    /** Keeps [session]'s canvas as the next frame, unless it is the same as the last; the picture never leaves the core. */
+    fun recordFrom(session: io.github.artcraftandroid.procraft.core.CanvasSession) {
+        session.recordTimeLapse(core)
     }
 
     /** What to tell, once, when the time-lapse couldn't be written (the storage full, say); null otherwise. */
@@ -76,6 +77,14 @@ class TimeLapse(artwork: File) {
     fun frame(i: Int): Bitmap? =
         core.frameFile(i.toUInt())?.let { f -> runCatching { BitmapFactory.decodeFile(f) }.getOrNull() } ?: clipFrame(i)
 
+    /** Whether frame [i] is kept (a picture, or in a video): one that can't be read but is, this device can't decode. */
+    fun kept(i: Int): Boolean = core.frameKept(i.toUInt())
+
+    /** Frames the last video made couldn't read, the one before each shown in its place. */
+    @Volatile
+    var unread = 0
+        private set
+
     private val clipLock = Any()
     /** The videos the frames are in, the one being read, and the frames last read from it (a few at a time, the replay and the export reading them in order): the first one's number and them. */
     private var clips: List<io.github.artcraftandroid.procraft.core.TimeLapseClip>? = null
@@ -83,9 +92,12 @@ class TimeLapse(artwork: File) {
     private var decoded: Pair<Int, List<Bitmap>>? = null
 
     private fun clipFrame(i: Int): Bitmap? = synchronized(clipLock) {
-        decoded?.let { (first, frames) -> frames.getOrNull(i - first)?.let { return it.copy(Bitmap.Config.ARGB_8888, false) } }
-        val all = clips ?: core.clips().also { clips = it }
-        val clip = all.firstOrNull { i >= it.first.toInt() && i - it.first.toInt() < it.frames.toInt() } ?: return null
+        // (a copy that can't be made, memory short with the canvas open: the run let go, the frame read alone)
+        decoded?.let { (first, frames) -> frames.getOrNull(i - first)?.let { b -> b.copy(Bitmap.Config.ARGB_8888, false)?.let { return it } ?: forgetRun() } }
+        val within = { c: io.github.artcraftandroid.procraft.core.TimeLapseClip -> i >= c.first.toInt() && i - c.first.toInt() < c.frames.toInt() }
+        // the videos read again when one isn't there: another may have been made since
+        val clip = (clips ?: core.clips().also { clips = it }).firstOrNull(within)
+            ?: core.clips().also { clips = it }.firstOrNull(within) ?: return null
         val retriever = reading?.takeIf { it.first == clip.path }?.second ?: try {
             reading?.second?.release()
             reading = null
@@ -94,16 +106,38 @@ class TimeLapse(artwork: File) {
                 reading = clip.path to r
             }
         } catch (e: Exception) {
-            android.util.Log.e("ProCraft", "a time-lapse's video", e)
+            AppLog.e("ProCraft", "a time-lapse's video can't be opened here: ${File(clip.path).name}, ${File(clip.path).length()} bytes", e)
             return null
         }
         val at = i - clip.first.toInt()
-        val frames = runCatching { retriever.getFramesAtIndex(at, minOf(CLIP_RUN, clip.frames.toInt() - at)) }
-            .onFailure { android.util.Log.w("ProCraft", "a time-lapse video's frames by number", it) }.getOrNull().orEmpty()
-        if (frames.isEmpty()) return frameAtTime(retriever, at, clip.frames.toInt())
+        // as many as fit in RUN_BYTES (a 4K video's frames are 33 MB each); before Android 9 a
+        // retriever reads no frames by number
+        val frames = if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.P) emptyList() else {
+            val side = { key: Int -> retriever.extractMetadata(key)?.toLongOrNull() ?: 0L }
+            val bytes = side(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH) * side(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT) * 4
+            val together = if (bytes > 0) (RUN_BYTES / bytes).toInt().coerceIn(1, CLIP_RUN) else CLIP_RUN
+            runCatching { retriever.getFramesAtIndex(at, minOf(together, clip.frames.toInt() - at)) }
+                .onFailure { AppLog.w("ProCraft", "a time-lapse video's frames by number", it) }.getOrNull().orEmpty()
+        }
+        if (frames.isEmpty()) return alone(retriever, at, clip.frames.toInt())
         decoded?.second?.forEach { it.recycle() }
         decoded = i to frames
-        frames.first().copy(Bitmap.Config.ARGB_8888, false)
+        frames.first().copy(Bitmap.Config.ARGB_8888, false) ?: run {
+            forgetRun()
+            alone(retriever, at, clip.frames.toInt())
+        }
+    }
+
+    /** Frame [at] of a video of [frames] read by itself: by its number (from Android 9), else by its time. */
+    private fun alone(retriever: android.media.MediaMetadataRetriever, at: Int, frames: Int): Bitmap? =
+        (if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.P) null else {
+            runCatching { retriever.getFrameAtIndex(at) }.onFailure { AppLog.w("ProCraft", "a time-lapse video's frame by number", it) }.getOrNull()
+        }) ?: frameAtTime(retriever, at, frames)
+
+    /** The frames read together let go. */
+    private fun forgetRun() {
+        decoded?.second?.forEach { it.recycle() }
+        decoded = null
     }
 
     /** Frame [at] of a video of [frames] by its time: not every device's retriever goes by frame number. */
@@ -111,7 +145,7 @@ class TimeLapse(artwork: File) {
         val length = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.times(1000)
             ?: (frames * 1_000_000L / FPS)
         retriever.getFrameAtTime(at * length / frames, android.media.MediaMetadataRetriever.OPTION_CLOSEST)
-    }.onFailure { android.util.Log.w("ProCraft", "a time-lapse video's frame by time", it) }.getOrNull()
+    }.onFailure { AppLog.w("ProCraft", "a time-lapse video's frame by time", it) }.getOrNull()
 
     /** The videos read again next time (they changed), and the one being read let go. */
     private fun forgetClips() = synchronized(clipLock) {
@@ -164,6 +198,8 @@ class TimeLapse(artwork: File) {
             plan = core.segmentMade(plan, (made?.first ?: 0).toUInt(), (made?.second ?: 0).toUInt(), made != null)
             if (made == null && plan == null) return null
         }
+        // a video that couldn't be noted (or one gone): the frames out of them are made afresh
+        if (!core.allInVideos()) return null
         dropClipFrames()
         val parts = core.forPackage().segments.map(::File)
         return if (parts.isNotEmpty() && VideoWriter.join(parts, out, FPS.toFloat())) true else null
@@ -171,9 +207,10 @@ class TimeLapse(artwork: File) {
 
     /**
      * The frames [picks] as a video at [out], HEVC or H.264 as [hevc] says, each fitted on white
-     * into [size] (else into the first one's, within the settings' side); its size, or null if
-     * there are none or the encoder fails. [going] as for [export]: the frames after it says false
-     * are left out.
+     * into [size] (else into the first readable one's, within the settings' side); its size, or
+     * null if none can be read or the encoder fails. A frame that can't be read shows the one
+     * before it again (counted in [unread]), so every frame keeps its place. [going] as for
+     * [export]: the frames after it says false are left out.
      */
     private fun encode(
         out: File,
@@ -182,31 +219,39 @@ class TimeLapse(artwork: File) {
         hevc: Boolean = settings.hevc,
         going: (Float) -> Boolean = { true },
     ): Pair<Int, Int>? {
+        unread = 0
         if (picks.isEmpty()) return null
         val video = settings
         val mime = if (hevc) android.media.MediaFormat.MIMETYPE_VIDEO_HEVC else android.media.MediaFormat.MIMETYPE_VIDEO_AVC
         val (w, h) = size ?: run {
-            val first = frame(picks.first()) ?: return null
+            val first = picks.asSequence().take(FIRST_TRIES).firstNotNullOfOrNull { frame(it) } ?: return null
             VideoWriter.fit(first.width, first.height, video.side, mime).also { first.recycle() }
         } ?: return null
-        val frameBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val frameBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.WHITE) }
         val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+        var missed = 0
         try {
             val ok = VideoWriter.write(out, w, h, FPS.toFloat(), picks.size, mime, video.bitsPerPixel) { n, pixels ->
                 if (!going(n / picks.size.toFloat())) return@write false
-                val source = frame(picks[n]) ?: return@write false
-                // fitted on white
-                Canvas(frameBitmap).apply {
-                    drawColor(Color.WHITE)
-                    val s = minOf(w / source.width.toFloat(), h / source.height.toFloat())
-                    val dw = (source.width * s).toInt()
-                    val dh = (source.height * s).toInt()
-                    drawBitmap(source, null, Rect((w - dw) / 2, (h - dh) / 2, (w + dw) / 2, (h + dh) / 2), paint)
+                val source = frame(picks[n])
+                if (source == null) {
+                    missed++
+                } else {
+                    // fitted on white
+                    Canvas(frameBitmap).apply {
+                        drawColor(Color.WHITE)
+                        val s = minOf(w / source.width.toFloat(), h / source.height.toFloat())
+                        val dw = (source.width * s).toInt()
+                        val dh = (source.height * s).toInt()
+                        drawBitmap(source, null, Rect((w - dw) / 2, (h - dh) / 2, (w + dw) / 2, (h + dh) / 2), paint)
+                    }
+                    source.recycle()
                 }
-                source.recycle()
                 frameBitmap.getPixels(pixels, 0, w, 0, 0, w, h)
                 true
             }
+            if (missed > 0) AppLog.w("ProCraft", "$missed of ${picks.size} time-lapse frames couldn't be read: the one before each shows in its place")
+            unread = missed
             return if (ok) w to h else null
         } finally {
             frameBitmap.recycle()
@@ -241,7 +286,7 @@ class TimeLapse(artwork: File) {
         }
         forgetClips()
         if (!readable) {
-            android.util.Log.w("ProCraft", "the time-lapse's videos can't be read here: their pictures stay")
+            AppLog.w("ProCraft", "the time-lapse's videos can't be read here: their pictures stay")
             return
         }
         val gone = core.dropClipFrames()
@@ -262,17 +307,21 @@ class TimeLapse(artwork: File) {
             val retriever = android.media.MediaMetadataRetriever()
             try {
                 retriever.setDataSource(path)
-                frames = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT)?.toIntOrNull() ?: 0
-                // a few at a time: one seek for each run, not each frame
-                var i = 0
-                while (i < frames) {
-                    val run = minOf(DECODE_RUN, frames - i)
-                    val pictures = runCatching { retriever.getFramesAtIndex(i, run) }.getOrNull() ?: break
-                    pictures.forEach { keepFrame(it); it.recycle() }
-                    i += run
+                if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.P) {
+                    frames = keepFramesByTime(retriever)
+                } else {
+                    frames = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT)?.toIntOrNull() ?: 0
+                    // a few at a time: one seek for each run, not each frame
+                    var i = 0
+                    while (i < frames) {
+                        val run = minOf(DECODE_RUN, frames - i)
+                        val pictures = runCatching { retriever.getFramesAtIndex(i, run) }.getOrNull() ?: break
+                        pictures.forEach { keepFrame(it); it.recycle() }
+                        i += run
+                    }
                 }
             } catch (e: Exception) {
-                android.util.Log.e("ProCraft", "a time-lapse's video", e)
+                AppLog.e("ProCraft", "a time-lapse's video", e)
                 frames = 0
             } finally {
                 retriever.release()
@@ -280,6 +329,26 @@ class TimeLapse(artwork: File) {
             core.takeVideo(path, frames.toUInt())
         }
         core.takeEnd()
+    }
+
+    /**
+     * Before Android 9, whose retriever neither counts a video's frames nor reads them by number: the
+     * frames of a package's video read by their times, as long as it lasts at the time-lapse's
+     * rate, each kept as the next frame; how many.
+     */
+    private fun keepFramesByTime(retriever: android.media.MediaMetadataRetriever): Int {
+        val length = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: return 0
+        val count = (length * FPS + 500) / 1000
+        var kept = 0
+        while (kept < count) {
+            val picture = runCatching {
+                retriever.getFrameAtTime(kept * 1_000_000L / FPS, android.media.MediaMetadataRetriever.OPTION_CLOSEST)
+            }.getOrNull() ?: break
+            keepFrame(picture)
+            picture.recycle()
+            kept++
+        }
+        return kept
     }
 
     /** A package video's frame [picture] kept as the next frame. */
@@ -295,5 +364,11 @@ class TimeLapse(artwork: File) {
         /** Frames decoded together from a package's video, and from one the frames are in. */
         private const val DECODE_RUN = 8
         private const val CLIP_RUN = 15
+
+        /** The most a run of frames read together from a video may take, bytes. */
+        private const val RUN_BYTES = 64L shl 20
+
+        /** Frames tried for the first readable one (each can be a slow decode). */
+        private const val FIRST_TRIES = 120
     }
 }

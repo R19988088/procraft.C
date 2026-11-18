@@ -1,9 +1,11 @@
 //! The colour panel floating: its grabber dragged out onto the canvas makes it a window of its
 //! own, 260 wide, moved by its grabber and closed by its Close (the colour button then opens the
 //! panel again). The same colour, mode and Harmony kind as the panel; no swatches, history or
-//! palette under the pickers, the modes as icons under them.
+//! palette under the pickers, the modes as icons under them. Plugins may show it smaller than the
+//! rest of the interface, or as Classic's picker alone.
 
-use egui::{Align2, Color32, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
+use egui::emath::TSTransform;
+use egui::{Align2, Color32, LayerId, Order, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder, Vec2, pos2, vec2};
 use procraft_core::CanvasSession;
 
 use super::{
@@ -19,6 +21,10 @@ pub(super) const WIDTH: f32 = 260.0;
 /// Where the grabber is held from: its middle.
 pub(super) const GRAB: Vec2 = vec2(WIDTH / 2.0, 7.5);
 const TABS: f32 = 52.0;
+/// Classic's picker alone: its top (the grabber), the picker under it, and the hue slider's row.
+const PICKER_TOP: f32 = 30.0;
+const PICKER: f32 = 248.0;
+const HUE_ROW: f32 = 40.0;
 /// Groups and fields: white over the frosted window.
 const GROUP: u32 = 0x0FFFFFFF;
 const FIELD: u32 = 0x0FFFFFFF;
@@ -46,97 +52,123 @@ impl Colours {
         backdrops: &mut Vec<f32>,
     ) -> Option<Rect> {
         let mut at = self.floating?;
-        let height = if self.mode == Mode::Disc { 351.0 } else { 390.0 };
+        let (k, alone) = (self.floating_scale, self.floating_picker_only);
+        let height = if alone {
+            PICKER_TOP + PICKER + if self.hue_ringed() { 0.0 } else { HUE_ROW } + 6.0
+        } else if self.mode == Mode::Disc {
+            351.0
+        } else {
+            390.0
+        };
         // held by its grabber, it follows the pointer until let go
         let (pointer, down) = ctx.input(|i| (i.pointer.interact_pos(), i.pointer.primary_down()));
         if let Some(grab) = self.floating_grab {
             match pointer {
-                Some(p) if down => at = p - grab,
+                Some(p) if down => at = p - grab * k,
                 _ => self.floating_grab = None,
             }
         }
-        // kept on the screen
+        // kept on the screen, and clear of the side bar as the panels are, at its scale
         let screen = ctx.content_rect();
-        at.x = at.x.clamp(screen.left(), (screen.right() - WIDTH).max(screen.left()));
-        at.y = at.y.clamp(screen.top(), (screen.bottom() - height).max(screen.top()));
+        at.x = floating_x(at.x, screen, crate::panel::side_bar_shown_at(ctx), WIDTH * k);
+        at.y = at.y.clamp(screen.top(), (screen.bottom() - height * k).max(screen.top()));
         self.floating = Some(at);
+        // laid out at its size, and drawn (and touched) at its scale from its top-left
         let rect = Rect::from_min_size(at, vec2(WIDTH, height));
+        let transform = TSTransform::from_translation(at.to_vec2())
+            * TSTransform::from_scaling(k)
+            * TSTransform::from_translation(-at.to_vec2());
+        self.floating_transform = transform;
+        let area = egui::Id::unique("floating colours");
+        ctx.set_transform_layer(LayerId::new(Order::Middle, area), transform);
         let before = self.hsv;
         let p3 = colours_in_p3(session.profile());
         // Escape closes it, as its Close does (a menu of its, or the hex keypad, takes it first)
         let mut closed = !self.modal() && crate::ui::escape(ctx);
         let mut hex_row = Rect::NOTHING;
         let mut kind_button = Rect::NOTHING;
-        egui::Area::new(egui::Id::unique("floating colours")).fixed_pos(rect.min).order(egui::Order::Foreground).show(
-            ctx,
-            |ui| {
-                // the canvas under it takes no touch
-                ui.allocate_rect(rect, Sense::click_and_drag());
-                panel::floating_frame(ui, look, "floating colours", rect, backdrops);
-                let grabber = Rect::from_min_size(pos2(rect.center().x - 20.0, rect.top() + 5.5), vec2(40.0, 4.0));
-                ui.painter().rect_filled(grabber, 2, argb(GRABBER));
-                let handle = Rect::from_center_size(pos2(rect.center().x, rect.top() + 15.0), vec2(150.0, 30.0));
-                let held = ui.interact(handle, ui.scope_id().with("floating grabber"), Sense::drag());
-                if held.drag_started()
-                    && let Some(p) = held.interact_pointer_pos()
-                {
-                    self.floating_grab = Some(p - at);
+        // under the panels, which open over it, however it was last touched; kept to the window,
+        // and clipped to it, as the window measures it at its scale
+        let measured = transform.inverse().mul_rect(screen);
+        egui::Area::new(area).fixed_pos(rect.min).order(Order::Middle).constrain_to(measured).show(ctx, |ui| {
+            // the canvas under it takes no touch
+            ui.allocate_rect(rect, Sense::click_and_drag());
+            panel::floating_frame(ui, look, "floating colours", rect, k, backdrops);
+            let grabber = Rect::from_min_size(pos2(rect.center().x - 20.0, rect.top() + 5.5), vec2(40.0, 4.0));
+            ui.painter().rect_filled(grabber, 2, argb(GRABBER));
+            let handle = Rect::from_center_size(pos2(rect.center().x, rect.top() + 15.0), vec2(150.0, 30.0));
+            let held = ui.interact(handle, ui.scope_id().with("floating grabber"), Sense::drag());
+            if held.drag_started()
+                && let Some(p) = held.interact_pointer_pos()
+            {
+                self.floating_grab = Some(p - at);
+            }
+            if alone {
+                // Classic's picker alone, Close over its top right
+                let close = Rect::from_min_size(pos2(at.x + WIDTH - 40.0, at.y), vec2(40.0, 40.0));
+                let square = Rect::from_min_size(pos2(at.x + 6.0, at.y + PICKER_TOP), vec2(PICKER, PICKER));
+                self.model_square(ui, square);
+                if !self.hue_ringed() {
+                    let row = Rect::from_min_size(pos2(at.x + 10.0, square.bottom()), vec2(240.0, HUE_ROW));
+                    self.model_slider(ui, row, "floating hue", 0);
                 }
-                let title = if self.mode == Mode::Palettes { "Palettes" } else { "Colors" };
-                let ink = argb(PANEL_TITLE);
-                text(ui.painter(), pos2(at.x + 18.0, at.y + 24.0), Align2::LEFT_CENTER, title, 24.0, Weight::Bold, ink);
-                let close = Rect::from_min_size(pos2(at.x + 216.0, at.y + 4.0), vec2(40.0, 40.0));
                 close_button(ui, close);
                 closed |= ui.interact(close, ui.scope_id().with("floating close"), Sense::click()).clicked();
-                match self.mode {
-                    Mode::Disc => {
-                        let disc = Rect::from_min_size(pos2(at.x + 10.0, at.y + 53.0), vec2(240.0, 240.0));
-                        self.model_disc(ui, disc);
-                    }
-                    Mode::Classic => {
-                        let square = Rect::from_min_size(pos2(at.x + 6.0, at.y + 50.0), vec2(248.0, 248.0));
-                        self.model_square(ui, square);
+                return;
+            }
+            let title = if self.mode == Mode::Palettes { "Palettes" } else { "Colors" };
+            let ink = argb(PANEL_TITLE);
+            text(ui.painter(), pos2(at.x + 18.0, at.y + 24.0), Align2::LEFT_CENTER, title, 24.0, Weight::Bold, ink);
+            let close = Rect::from_min_size(pos2(at.x + 216.0, at.y + 4.0), vec2(40.0, 40.0));
+            close_button(ui, close);
+            closed |= ui.interact(close, ui.scope_id().with("floating close"), Sense::click()).clicked();
+            match self.mode {
+                Mode::Disc => {
+                    let disc = Rect::from_min_size(pos2(at.x + 10.0, at.y + 53.0), vec2(240.0, 240.0));
+                    self.model_disc(ui, disc);
+                }
+                Mode::Classic => {
+                    let square = Rect::from_min_size(pos2(at.x + 6.0, at.y + 50.0), vec2(248.0, 248.0));
+                    self.model_square(ui, square);
+                    if !self.hue_ringed() {
                         let row = Rect::from_min_size(pos2(at.x + 10.0, at.y + 298.0), vec2(240.0, 40.0));
                         self.model_slider(ui, row, "floating hue", 0);
                     }
-                    Mode::Harmony => {
-                        // the kind (its menu the panel's), the wheel, then the brightness
-                        let label = self.harmony.label();
-                        let at_label = pos2(at.x + 18.0, at.y + 58.0);
-                        let shown =
-                            text(ui.painter(), at_label, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, ink);
-                        kind_button =
-                            Rect::from_min_max(pos2(shown.left(), at.y + 44.0), pos2(shown.right(), at.y + 72.0));
-                        if ui
-                            .interact(kind_button, ui.scope_id().with("floating harmony kind"), Sense::click())
-                            .clicked()
-                        {
-                            self.harmony_menu.open();
-                        }
-                        let wheel = Rect::from_min_size(pos2(at.x + 24.0, at.y + 75.0), vec2(212.0, 212.0));
-                        self.pickers.harmony(ui, &mut self.hsv, wheel, self.harmony, p3);
-                        let row = Rect::from_min_size(pos2(at.x + 10.0, at.y + 298.0), vec2(240.0, 40.0));
-                        self.pickers.harmony_brightness(ui, row, &mut self.hsv, p3);
-                    }
-                    Mode::Value => {
-                        hex_row = value_view(
-                            ui,
-                            (at.x + 10.0, at.y + 48.0),
-                            &mut self.hsv,
-                            &mut self.floating_rgb,
-                            &mut self.hex,
-                            (GROUP, FIELD),
-                        );
-                    }
-                    Mode::Palettes => self.floating_palettes(ui, look, session, rect),
                 }
-                let tabs = Rect::from_min_size(pos2(at.x, rect.bottom() - TABS), vec2(WIDTH, TABS));
-                if let Some(mode) = tabs_row(ui, look, tabs, self.mode) {
-                    self.mode = mode;
-                    self.hex = None;
+                Mode::Harmony => {
+                    // the kind (its menu the panel's), the wheel, then the brightness
+                    let label = self.harmony.label();
+                    let at_label = pos2(at.x + 18.0, at.y + 58.0);
+                    let shown = text(ui.painter(), at_label, Align2::LEFT_CENTER, label, 17.0, Weight::Regular, ink);
+                    kind_button = Rect::from_min_max(pos2(shown.left(), at.y + 44.0), pos2(shown.right(), at.y + 72.0));
+                    if ui.interact(kind_button, ui.scope_id().with("floating harmony kind"), Sense::click()).clicked() {
+                        self.harmony_menu.open();
+                    }
+                    let wheel = Rect::from_min_size(pos2(at.x + 24.0, at.y + 75.0), vec2(212.0, 212.0));
+                    self.pickers.harmony(ui, &mut self.hsv, wheel, self.harmony, p3);
+                    let row = Rect::from_min_size(pos2(at.x + 10.0, at.y + 298.0), vec2(240.0, 40.0));
+                    self.pickers.harmony_brightness(ui, row, &mut self.hsv, p3);
                 }
-            },
-        );
+                Mode::Value => {
+                    hex_row = value_view(
+                        ui,
+                        (at.x + 10.0, at.y + 48.0),
+                        &mut self.hsv,
+                        &mut self.floating_rgb,
+                        &mut self.hex,
+                        (GROUP, FIELD),
+                    );
+                }
+                Mode::Palettes => self.floating_palettes(ui, look, session, rect),
+            }
+            let tabs = Rect::from_min_size(pos2(at.x, rect.bottom() - TABS), vec2(WIDTH, TABS));
+            if let Some(mode) = tabs_row(ui, look, tabs, self.mode) {
+                self.mode = mode;
+                self.hex = None;
+            }
+        });
+        // what opens from it, where it shows
+        let (kind_button, hex_row) = (shown(transform, kind_button), shown(transform, hex_row));
         if self.mode == Mode::Harmony && kind_button != Rect::NOTHING {
             let menu = Rect::from_min_size(
                 pos2(kind_button.left() - 2.0, kind_button.bottom() + 8.0),
@@ -144,7 +176,7 @@ impl Colours {
             );
             self.harmony_menu_in(ctx, look, menu, backdrops);
         }
-        if self.mode == Mode::Palettes {
+        if self.mode == Mode::Palettes && !alone {
             self.palette_menu(ctx, look, backdrops);
         }
         if let Some(rgb) = hex_pad(ctx, look, &mut self.hex, hex_row) {
@@ -159,7 +191,7 @@ impl Colours {
             self.hex = None;
             self.harmony_menu.close();
         }
-        Some(rect)
+        Some(transform * rect)
     }
 
     /// Palettes floating: Compact or Cards, then each palette as a card (the default one ticked, a
@@ -258,8 +290,9 @@ impl Colours {
                 }
             });
         });
-        if let Some(at) = menu {
-            self.palette_menu_for = Some(at);
+        if let Some((n, button)) = menu {
+            // where its button shows
+            self.palette_menu_for = Some((n, self.floating_transform * button));
             self.palette_menu.open();
         }
         if let Some(c) = taken {
@@ -320,4 +353,43 @@ fn floating_tiles(ui: &Ui, n: usize, filled: &[(usize, u32)], at: Rect) -> Optio
         }
     }
     taken
+}
+
+/// `rect` in the floating window as it shows on the window (none stays none).
+fn shown(transform: TSTransform, rect: Rect) -> Rect {
+    if rect == Rect::NOTHING { rect } else { transform * rect }
+}
+
+/// Where the floating window's left edge goes for `x` asked, `width` wide as it shows: on the
+/// `screen`, and clear of the side bar (if it shows, on whichever side) by the gap the panels keep
+/// from it.
+fn floating_x(x: f32, screen: Rect, side_bar: Option<Rect>, width: f32) -> f32 {
+    let (mut left, mut right) = (screen.left(), screen.right());
+    if let Some(bar) = side_bar {
+        if bar.center().x < screen.center().x {
+            left = left.max(bar.right() + crate::panel::POPOVER_GAP);
+        } else {
+            right = right.min(bar.left() - crate::panel::POPOVER_GAP);
+        }
+    }
+    x.clamp(left, (right - width).max(left))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_floating_window_keeps_clear_of_the_side_bar() {
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0));
+        let left_bar = Rect::from_min_size(pos2(0.0, 200.0), vec2(51.0, 400.0));
+        assert_eq!(floating_x(0.0, screen, Some(left_bar), WIDTH), 51.0 + crate::panel::POPOVER_GAP);
+        assert_eq!(floating_x(0.0, screen, None, WIDTH), 0.0);
+        assert_eq!(floating_x(500.0, screen, Some(left_bar), WIDTH), 500.0);
+        let right_bar = Rect::from_min_size(pos2(1149.0, 200.0), vec2(51.0, 400.0));
+        assert_eq!(floating_x(5000.0, screen, Some(right_bar), WIDTH), 1149.0 - crate::panel::POPOVER_GAP - WIDTH);
+        assert_eq!(floating_x(5000.0, screen, None, WIDTH), 1200.0 - WIDTH);
+        // smaller, it goes further right
+        assert_eq!(floating_x(5000.0, screen, None, WIDTH / 2.0), 1200.0 - WIDTH / 2.0);
+    }
 }

@@ -5,7 +5,7 @@
 //! (crop_edit.rs).
 
 use egui::{Align2, Color32, Id, Order, Pos2, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
-use procraft_core::{CanvasSession, CropShown};
+use procraft_core::{CanvasSession, CropReadout, CropShown};
 
 use crate::icons;
 use crate::look::{Look, Themed, Weight, argb, pc, text};
@@ -22,6 +22,11 @@ const ROW_LINE: Themed = Themed(0xFF3A3A3A, 0xFFD6D6D8);
 const INK: Themed = Themed(0xFFD2D2D2, 0xFF3B3B3B);
 const MUTED: u32 = 0xFF8E8E93;
 const TRACK: u32 = 0xFF555555;
+/// The size readout while a corner or side is dragged: its size and corners, and how long it takes
+/// to fade once the touch lifts (seconds).
+const READOUT_SIZE: egui::Vec2 = vec2(148.0, 54.0);
+const READOUT_CORNER: f32 = 8.0;
+const READOUT_FADE: f64 = 0.3;
 /// The settings: 348 wide, 9 from the window's right edge, its arrow 174.5 in.
 const SETTINGS_WIDTH: f32 = 348.0;
 const SETTINGS_HEIGHT: f32 =
@@ -35,6 +40,9 @@ pub struct Crop {
     width: Option<String>,
     height: Option<String>,
     dpi: Option<String>,
+    /// The size readout last shown, and when the drag showing it ended (it fades from then).
+    readout: Option<CropReadout>,
+    readout_gone: Option<f64>,
 }
 
 impl Crop {
@@ -42,6 +50,7 @@ impl Crop {
         session.crop_begin();
         self.open = true;
         self.settings_open = false;
+        (self.readout, self.readout_gone) = (None, None);
     }
 
     /// Shows it while it is open; returns true when it ends.
@@ -74,6 +83,7 @@ impl Crop {
             }
             frame(ui, &shown, ppp);
         });
+        self.size_readout(ctx, &shown, ppp);
         let buttons = [("Cancel", false), ("Settings", self.settings_open), ("Reset", false)];
         let mut ended = false;
         match tool_header::show(ctx, look, "Crop and Resize", &buttons) {
@@ -97,6 +107,49 @@ impl Crop {
             self.settings_open = false;
         }
         ended
+    }
+
+    /// While a corner or side is dragged: its width and height in a small box above the touch,
+    /// beside it away from the frame's middle (the core places it), fading as the touch lifts.
+    fn size_readout(&mut self, ctx: &egui::Context, shown: &CropShown, ppp: f32) {
+        let now = ctx.input(|i| i.time);
+        let alpha = match shown.readout {
+            Some(r) => {
+                self.readout = Some(r);
+                self.readout_gone = None;
+                1.0
+            }
+            None if self.readout.is_none() => return,
+            None => {
+                let gone = *self.readout_gone.get_or_insert(now);
+                let left = 1.0 - (now - gone) / READOUT_FADE;
+                if left <= 0.0 {
+                    self.readout = None;
+                }
+                ctx.request_repaint();
+                left.clamp(0.0, 1.0) as f32
+            }
+        };
+        let Some(r) = self.readout else { return };
+        let rect = Rect::from_min_size(pos2(r.x / ppp, r.y / ppp), READOUT_SIZE);
+        egui::Area::new(Id::unique("crop readout"))
+            .fixed_pos(rect.min)
+            .order(Order::Foreground)
+            .interactable(false)
+            .show(ctx, |ui| {
+                let painter = ui.painter();
+                painter.rect_filled(rect, READOUT_CORNER, argb(POPOVER).gamma_multiply(alpha));
+                let ink = argb(INK).gamma_multiply(alpha);
+                // each row's name from its left half, its value to the right; 8 either side of the
+                // middle
+                let field = rect.shrink2(vec2(10.0, 0.0));
+                for (name, value, y) in [("Width", r.width, rect.top() + 11.0), ("Height", r.height, rect.top() + 43.0)]
+                {
+                    text(painter, pos2(field.left() + 4.0, y), Align2::LEFT_CENTER, name, 13.0, Weight::Bold, ink);
+                    let at = pos2(field.right() - 4.0, y);
+                    text(painter, at, Align2::RIGHT_CENTER, &format!("{value}px"), 13.0, Weight::Regular, ink);
+                }
+            });
     }
 
     /// The settings popover under Settings: the size (aspect locked or not), DPI, resampling,

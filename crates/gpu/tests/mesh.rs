@@ -721,3 +721,112 @@ fn read_texture_r8(gpu: &Gpu, texture: &wgpu::Texture, side: u32) -> Vec<u8> {
     let data = buffer.slice(..).get_mapped_range().unwrap().to_vec();
     (0..side).flat_map(|y| data[(y * row) as usize..(y * row + side) as usize].to_vec()).collect()
 }
+
+/// How far two pictures differ: the most any channel does, and how many channels differ at all.
+fn differ(a: &[u8], b: &[u8]) -> (u8, usize) {
+    assert_eq!(a.len(), b.len());
+    a.iter().zip(b).fold((0, 0), |(most, n), (x, y)| (most.max(x.abs_diff(*y)), n + usize::from(x != y)))
+}
+
+/// A dot stroked on the screen carried onto the near one of two squares (as in
+/// `a_stroke_on_the_screen_paints_the_surface_it_lands_on`), its texture shown on the model: the
+/// texture, the parts of it the stroke's footprint gives, and the model drawn.
+fn painted_model(gpu: &Gpu) -> (Vec<u8>, Option<Vec<procraft_engine::geom::IRect>>, Vec<u8>) {
+    use procraft_engine::document::Document;
+    use procraft_engine::geom::{IRect, Vec2};
+    use procraft_engine::stroke::Stamp;
+    use procraft_gpu::{Canvas, StrokeStyle, StrokeTool};
+    let mesh = read_obj(QUADS, None).unwrap();
+    let mut view = MeshView::new(gpu, &mesh, 64, wgpu::TextureFormat::Rgba8Unorm);
+    view.orbit = Orbit { target: [0.0, 0.0, 0.0], rotation: Orbit::rotation_of(0.3, 0.2), distance: 6.0, fov: 0.9 };
+    let mut screen_doc = Document::new(SIDE, SIDE);
+    let mut screen = Canvas::new(gpu, &screen_doc).unwrap();
+    let style = StrokeStyle { hardness: 0.2, ..StrokeStyle::new(StrokeTool::Paint, [1.0, 0.2, 0.0], 0.9) };
+    screen.begin_stroke(screen_doc.current(), style);
+    let middle = SIDE as f32 / 2.0;
+    let stamps: Vec<Stamp> =
+        (0..8).map(|i| Stamp::round(Vec2::new(middle - 8.0 + 2.0 * i as f32, middle), 6.0, 0.6)).collect();
+    screen.add_stamps(&stamps);
+    screen.render(gpu, &mut screen_doc, None);
+    let bounds = IRect::around(Vec2::new(middle, middle), 20.0);
+    let mut doc = Document::new(64, 64);
+    doc.background_visible = false;
+    let mut texture = Canvas::new(gpu, &doc).unwrap();
+    texture.begin_drawn_stroke(doc.current(), style);
+    let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("project") });
+    let reach =
+        view.project_stroke(gpu, &mut encoder, 0, screen.stroke_view(), bounds, SIDE, SIDE, texture.stroke_target());
+    gpu.queue.submit([encoder.finish()]);
+    let footprint = view.footprint(gpu, texture.stroke_view(), reach);
+    texture.stroke_drawn(reach);
+    texture.end_stroke();
+    texture.render(gpu, &mut doc, None);
+    let laid = texture.read_layer(gpu, doc.current()).unwrap();
+    view.set_base(gpu, 0, [0.0, 0.6, 0.2]);
+    view.set_albedo_view(gpu, 0, texture.composite_view());
+    (laid, footprint, draw(gpu, &mut view))
+}
+
+/// On an old GPU (no float targets, no compute passes: see `Gpu::headless_old`) a stroke is
+/// carried onto a model as on a full one: the distances in floats' bytes, the projected stroke in
+/// 8 bits a channel, its footprint found by a fragment a tile. The texture it lays and the model
+/// shown come out within a step of 8 bits here and there, the footprint the same.
+#[test]
+fn on_an_old_gpu_a_stroke_paints_a_model_as_on_a_full_one() {
+    let (Some(full), Ok(old)) = (gpu(), Gpu::headless_old()) else { return };
+    let (laid, footprint, shown) = painted_model(&full);
+    let (old_laid, old_footprint, old_shown) = painted_model(&old);
+    assert!(laid.chunks(4).any(|p| p[3] > 200), "the stroke lands");
+    let (laid_most, laid_n) = differ(&laid, &old_laid);
+    let (shown_most, shown_n) = differ(&shown, &old_shown);
+    eprintln!(
+        "old GPU against a full one: the texture {laid_most} at most ({laid_n} channels differ), the model {shown_most} ({shown_n})"
+    );
+    assert!(laid_most <= 2 && shown_most <= 2, "{laid_most} {shown_most}");
+    assert!(footprint.as_ref().is_some_and(|f| !f.is_empty()));
+    assert_eq!(footprint, old_footprint);
+    assert_eq!(full.errors(), 0);
+    assert_eq!(old.errors(), 0);
+}
+
+/// On an old GPU the radiance cube is kept in 8 bits a channel, each texel's colour over a
+/// multiplier: a mirror (smooth to rough) still shows light far past white as on a full GPU,
+/// within a step of 8 bits here and there.
+#[test]
+fn on_an_old_gpu_a_mirror_shows_bright_light_as_on_a_full_one() {
+    use procraft_engine::environment::Equirect;
+    use procraft_gpu::Lighting;
+    let (Some(full), Ok(old)) = (gpu(), Gpu::headless_old()) else { return };
+    let square = "v -1 -1 0\nv 1 -1 0\nv 1 1 0\nv -1 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nf 1/1 2/2 3/3 4/4\n";
+    let mesh = read_obj(square, None).unwrap();
+    // a panorama of red light two to six times white, green up to three times, a dim blue
+    let (w, h) = (64u32, 32u32);
+    let pixels = (0..w * h)
+        .map(|i| {
+            let (u, v) = ((i % w) as f32 / w as f32, (i / w) as f32 / h as f32);
+            [2.0 + 4.0 * u, 3.0 * v, 0.05 + 0.4 * (1.0 - u)]
+        })
+        .collect();
+    let panorama = Equirect { width: w, height: h, pixels };
+    let shown = |gpu: &Gpu, roughness: f32| {
+        let mut view = MeshView::new(gpu, &mesh, 4, wgpu::TextureFormat::Rgba8Unorm);
+        view.set_lighting(gpu, Lighting::new(gpu, &panorama));
+        view.set_material(gpu, 0, roughness, 1.0);
+        // a sixth as bright: light past white shows below it
+        view.set_exposure(1.0 / 6.0);
+        view.orbit = Orbit { target: [0.0, 0.0, 0.0], rotation: Orbit::rotation_of(0.3, 0.2), distance: 6.0, fov: 0.9 };
+        draw(gpu, &mut view)
+    };
+    for roughness in [0.0, 0.4, 0.9] {
+        let (on_full, on_old) = (shown(&full, roughness), shown(&old, roughness));
+        let (most, n) = differ(&on_full, &on_old);
+        let mean =
+            on_full.iter().zip(&on_old).map(|(a, b)| f64::from(a.abs_diff(*b))).sum::<f64>() / on_full.len() as f64;
+        eprintln!("roughness {roughness}: {most} at most ({mean:.3} on average), {n} channels differ");
+        // light brighter than white shows (cut at white, a sixth of it would show at most 117)
+        let reddest = on_old.chunks(4).map(|p| p[0]).max().unwrap();
+        assert!(reddest > 125, "roughness {roughness}: {reddest}");
+        assert!(most <= 2 && mean < 0.1, "roughness {roughness}: {most} {mean}");
+    }
+    assert_eq!(old.errors(), 0);
+}

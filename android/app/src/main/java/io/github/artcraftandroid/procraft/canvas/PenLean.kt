@@ -1,5 +1,6 @@
 package io.github.artcraftandroid.procraft.canvas
 
+import android.view.MotionEvent
 import kotlin.math.atan
 import kotlin.math.cos
 import kotlin.math.sin
@@ -25,3 +26,6 @@ internal fun penLean(tilt: Float, orientation: Float): Float {
     if (squareX >= 1f || squareY >= 1f) return tilt
     return atan(sqrt(squareX / (1f - squareX) + squareY / (1f - squareY)))
 }
+
+/** Whether the device [e] came from says how a pen leans: it has a tilt axis. */
+internal fun tiltKnown(e: MotionEvent): Boolean = e.device?.getMotionRange(MotionEvent.AXIS_TILT) != null

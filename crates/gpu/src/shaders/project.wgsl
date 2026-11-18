@@ -19,6 +19,13 @@ struct Proj {
     picture_y: vec4<f32>,
 }
 
+// the distances are kept in 8 bits a channel, each the bytes of a float (on a GPU that can't draw
+// into floats), else as floats
+override DISTANCE_BYTES: bool = false;
+// what's carried is laid into a stroke of 8 bits a channel: its alpha marked within it (a half
+// more, halved), else by 1
+override LAID_HALVED: bool = false;
+
 @group(0) @binding(0) var<uniform> proj: Proj;
 @group(0) @binding(1) var stroke: texture_2d<f32>;
 @group(0) @binding(2) var nearest: texture_2d<f32>;
@@ -46,7 +53,21 @@ fn vs_distance(v: In) -> DistanceOut {
 
 @fragment
 fn fs_distance(i: DistanceOut) -> @location(0) vec4<f32> {
+    if (DISTANCE_BYTES) {
+        let b = bitcast<u32>(i.distance);
+        return vec4<f32>(vec4<u32>(b & 255u, (b >> 8u) & 255u, (b >> 16u) & 255u, b >> 24u)) / 255.0;
+    }
     return vec4<f32>(i.distance, 0.0, 0.0, 1.0);
+}
+
+// the nearest surface's distance at screen pixel `p`
+fn nearest_at(p: vec2<i32>) -> f32 {
+    let held = textureLoad(nearest, p, 0);
+    if (DISTANCE_BYTES) {
+        let b = vec4<u32>(round(held * 255.0));
+        return bitcast<f32>(b.x | (b.y << 8u) | (b.z << 16u) | (b.w << 24u));
+    }
+    return held.r;
 }
 
 struct ProjectOut {
@@ -79,7 +100,7 @@ fn landing(i: ProjectOut) -> vec2<f32> {
         discard;
     }
     // a small share of the distance for precision
-    let front = textureLoad(nearest, vec2<i32>(at), 0).r;
+    let front = nearest_at(vec2<i32>(at));
     if (proj.screen.z < 0.5 && i.screen.w > front * 1.002 + 1e-4) {
         discard;
     }
@@ -141,6 +162,9 @@ fn fs_project_laid(i: ProjectOut) -> @location(0) vec4<f32> {
             discard;
         }
         c = vec4<f32>(c.rgb / c.a, 1.0);
+    }
+    if (LAID_HALVED) {
+        return vec4<f32>(c.rgb, 0.5 * (c.a + 1.0));
     }
     return vec4<f32>(c.rgb, c.a + 1.0);
 }

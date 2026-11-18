@@ -9,3 +9,4 @@
 *.usd binary
 *.hdr binary
 *.procraft-plugin binary
+*.brushset binary

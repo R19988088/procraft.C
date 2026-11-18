@@ -12,6 +12,18 @@ class BrushFileNameTest {
     }
 
     @Test
+    fun anotherAppsFileWaitingForACanvasKeepsItsNameAndEnding() {
+        val kept = pendingBrushFileName(42, "Charcoal_KA.bundle")
+        assertEquals("42-Charcoal_KA.bundle", kept)
+        // read back by the name after the stamp: the ending the brush engines go by
+        assertEquals("Charcoal_KA.bundle", kept.substringAfter('-'))
+        assertEquals("Basic-5 Size.kpp", pendingBrushFileName(7, "Basic-5 Size.kpp").substringAfter('-'))
+        assertEquals("7-水彩 笔.abr", pendingBrushFileName(7, "水彩 笔.abr"))
+        assertEquals("7-a_b.kpp", pendingBrushFileName(7, "a/b.kpp"))
+        assertEquals("7-Imported", pendingBrushFileName(7, "  "))
+    }
+
+    @Test
     fun whatAFileNameCantHoldIsMadeAnUnderscore() {
         assertEquals("a_b_c_.brush", brushFileName("a/b:c?", single = true))
         assertEquals("Brush.brush", brushFileName("   ", single = true))

@@ -6,6 +6,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import io.github.artcraftandroid.procraft.core.InterfacePart
 
 /** Interface colours and sizes. Sizes in dp equal the measured points. */
 object Pc {
@@ -23,6 +24,21 @@ object Pc {
 
     /** A picker plugin's Classic square, while one is on: its picture, and where touches land and the knob sits. */
     var picker by mutableStateOf<ClassicPicker?>(null)
+
+    /** How big each part of the interface shows next to the rest of it, as a plugin says (1: as the rest), in [InterfacePart]'s order. */
+    var partScales by mutableStateOf(List(InterfacePart.entries.size) { 1f })
+
+    /** How big [part] shows next to the rest of the interface. */
+    fun partScale(part: InterfacePart): Float = partScales.getOrElse(part.ordinal) { 1f }
+
+    /** How far down the top bar reaches, as it shows: what hangs from it hangs from there. */
+    val barShown: Dp get() = BarHeight * partScale(InterfacePart.TOP_BAR)
+
+    /** How wide the side bar is, as it shows: what keeps clear of it keeps clear of that. */
+    val sideBarShown: Dp get() = SideBarWidth * partScale(InterfacePart.SIDE_BAR)
+
+    /** A plugin has the floating colour window show Classic's picker alone: no title or mode icons. */
+    var floatingPickerOnly by mutableStateOf(false)
 
     /** The accent a plugin gives the interface, if one does: drawn in place of the interface's blues. */
     var accentGiven by mutableStateOf<Color?>(null)
@@ -240,11 +256,11 @@ object Pc {
      * that clears the top bar; in a shorter window (split screen) just under the top bar, its tracks
      * giving up what it is short of, so that all of it can be reached.
      */
-    fun sideBarFit(height: Dp): SideBarFit {
+    fun sideBarFit(height: Dp, barBottom: Dp = BarHeight): SideBarFit {
         val top = height * SIDE_BAR_CENTRE - SideBarHeight / 2
-        if (top >= BarHeight) return SideBarFit(top, SliderHeight)
+        if (top >= barBottom) return SideBarFit(top, SliderHeight)
         val rest = SideBarHeight - SliderHeight * 2
-        return SideBarFit(BarHeight, ((height - BarHeight - ShortSideBarFoot - rest) / 2).coerceIn(ShortestTrack, SliderHeight))
+        return SideBarFit(barBottom, ((height - barBottom - ShortSideBarFoot - rest) / 2).coerceIn(ShortestTrack, SliderHeight))
     }
 }
 
@@ -282,7 +298,7 @@ object CanvasSpace {
         }
     }
 
-    /** [bitmap], of the canvas's colours, marked with the canvas's space (on Android 9, a copy so marked). */
+    /** [bitmap], of the canvas's colours, marked with the canvas's space (before Android 10, a copy so marked). */
     fun tag(bitmap: android.graphics.Bitmap): android.graphics.Bitmap {
         if (!p3) return bitmap
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
@@ -303,10 +319,14 @@ object CanvasSpace {
 /**
  * A picker plugin's Classic square: [pick] gives the saturation and brightness at a point and [point] where they sit
  * (points 0..1 across and down); [picture] draws it for a hue, a side in pixels, premultiplied RGBA (none if it
- * couldn't be drawn: its plugin goes off).
+ * couldn't be drawn: its plugin goes off). If it picks the hue too, on a ring of its own: [hue] gives the hue a touch
+ * starting at a point picks (none where it picks saturation and brightness), and [huePoint] where a hue's knob sits
+ * (none while the hue slider has the hue).
  */
 class ClassicPicker(
     val pick: (Float, Float) -> List<Float>?,
     val point: (Float, Float) -> List<Float>?,
     val picture: (Float, Int) -> ByteArray?,
+    val hue: (Float, Float) -> Float? = { _, _ -> null },
+    val huePoint: (Float) -> List<Float>? = { null },
 )

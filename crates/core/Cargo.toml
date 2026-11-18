@@ -28,6 +28,8 @@ pollster = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 png = { workspace = true }
+# what plugins hand the app to unpack (see plugin_commands.rs)
+miniz_oxide = { workspace = true }
 # the time-lapse's frames, kept as JPEG; a model's textures, PNG or JPEG
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 # text laid out and drawn alike in both apps: shaping, wrapping and glyphs, and the outline's stroke

@@ -102,7 +102,16 @@ object TextRenderer {
         } else {
             Typeface.create(font.ifEmpty { "sans-serif" }, Typeface.NORMAL)
         }
-        return Typeface.create(base, s.weight, s.italic)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) return Typeface.create(base, s.weight, s.italic)
+        // before Android 9 a typeface is only bold or not (Inter's file has its weight already)
+        val bold = font != INTER && s.weight >= 600
+        val style = when {
+            bold && s.italic -> Typeface.BOLD_ITALIC
+            bold -> Typeface.BOLD
+            s.italic -> Typeface.ITALIC
+            else -> Typeface.NORMAL
+        }
+        return Typeface.create(base, style)
     }
 
     /** The text's box on the canvas, pixels. */

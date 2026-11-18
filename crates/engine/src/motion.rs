@@ -91,6 +91,18 @@ impl Bezier {
     }
 }
 
+/// Slowing to a stop along a quarter sine over `seconds`: how far along it is `t` seconds in
+/// (exactly 1 from its time on).
+pub fn sine_out(t: f32, seconds: f32) -> f32 {
+    if !t.is_finite() || t >= seconds {
+        return 1.0;
+    }
+    if t <= 0.0 {
+        return 0.0;
+    }
+    (t / seconds.max(1e-6) * std::f32::consts::FRAC_PI_2).sin()
+}
+
 /// How far from its end the motion can still be at time `t`, at frequency `w`.
 fn envelope(w: f64, z: f64, t: f64) -> f64 {
     if z < 1.0 {
@@ -105,6 +117,14 @@ fn envelope(w: f64, z: f64, t: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_quarter_sine_starts_quickest_and_ends_still() {
+        assert_eq!(sine_out(0.0, 0.2), 0.0);
+        assert!((sine_out(0.1, 0.2) - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5);
+        assert!(sine_out(0.02, 0.2) > 0.15 && sine_out(0.199, 0.2) > 0.9999);
+        assert_eq!((sine_out(0.2, 0.2), sine_out(5.0, 0.2), sine_out(f32::NAN, 0.2)), (1.0, 1.0, 1.0));
+    }
 
     #[test]
     fn a_spring_starts_still_and_settles_in_its_time() {

@@ -1,7 +1,9 @@
 //! The panels hanging from the top bar, as the Android app's (ui/Popover.kt, ui/AppRoot.kt): a
 //! frosted body with an arrow pointing up at its button, a soft shadow around it, and a header.
 
-use egui::{Align2, Color32, Pos2, Rect, Sense, Ui, pos2};
+use egui::emath::TSTransform;
+use egui::{Align2, Color32, Pos2, Rect, Sense, Ui, Vec2, pos2};
+use procraft_core::InterfacePart;
 use resvg::tiny_skia;
 
 use crate::icons;
@@ -27,33 +29,124 @@ struct SideBarPlace {
     right: bool,
 }
 
+/// How big each part of the interface shows next to the rest of it this frame, as the plugins say
+/// (in [`procraft_core::InterfacePart`]'s order), for what draws a part to read.
+pub fn set_part_scales(ctx: &egui::Context, plugins: &procraft_core::Plugins) {
+    use procraft_core::InterfacePart as P;
+    put_part_scales(
+        ctx,
+        [P::Floating, P::Menus, P::SideBar, P::TopBar, P::Panels].map(|p| plugins.interface_part_scale(p)),
+    );
+}
+
+/// How big each part of the interface shows next to the rest of it this frame, in
+/// [`InterfacePart`]'s order.
+pub fn put_part_scales(ctx: &egui::Context, scales: [f32; 5]) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique("interface part scales"), scales));
+}
+
+/// How big `part` of the interface shows next to the rest of it this frame (1: as the rest).
+pub fn part_scale(ctx: &egui::Context, part: InterfacePart) -> f32 {
+    let scales = ctx.data(|d| d.get_temp::<[f32; 5]>(egui::Id::unique("interface part scales")));
+    scales.and_then(|s| s.get(part as usize).copied()).unwrap_or(1.0)
+}
+
+/// How far down from the window's top the top bar reaches as it shows: what hangs from it hangs
+/// from there.
+pub fn bar_shown(ctx: &egui::Context) -> f32 {
+    pc::BAR_HEIGHT * part_scale(ctx, InterfacePart::TopBar)
+}
+
+/// The panels' own space: each is laid out at its own size, under a top bar of its own height, in
+/// the window as it measures it at that size, and shows at the panels' size from where the top
+/// bar, as it shows, ends at the window's left edge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PanelSpace {
+    /// From a panel's points to the window's.
+    pub to_window: TSTransform,
+    /// The window as a panel measures it: a top bar's height above where the panels hang, the
+    /// room under it, and as wide as the window.
+    pub screen: Rect,
+}
+
+impl PanelSpace {
+    /// In `window`, under a top bar reaching `bar_bottom` down, shown `scale` times as big.
+    pub fn new(window: Rect, bar_bottom: f32, scale: f32) -> PanelSpace {
+        let hang = pos2(window.left(), window.top() + bar_bottom);
+        let to_window = crate::chrome::scaled_from(hang, scale);
+        let measured = Rect::from_min_max(pos2(window.left(), hang.y - pc::BAR_HEIGHT * scale), window.max);
+        PanelSpace { to_window, screen: to_window.inverse().mul_rect(measured) }
+    }
+}
+
+/// A panel is drawn from now on, in `space`; or, with none, no panel is.
+pub fn drawing_panel(ctx: &egui::Context, space: Option<PanelSpace>) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique("panel space"), space));
+}
+
+/// The panels' space while one is drawn.
+fn panel_space(ctx: &egui::Context) -> Option<PanelSpace> {
+    ctx.data(|d| d.get_temp::<Option<PanelSpace>>(egui::Id::unique("panel space"))).flatten()
+}
+
+/// From the points of what is drawn now to the window's: a panel's while one is drawn.
+pub fn to_window(ctx: &egui::Context) -> TSTransform {
+    panel_space(ctx).map_or(TSTransform::IDENTITY, |s| s.to_window)
+}
+
+/// The window as what is drawn now measures it: as a panel does while one is drawn.
+pub fn screen(ctx: &egui::Context) -> Rect {
+    panel_space(ctx).map_or_else(|| ctx.content_rect(), |s| s.screen)
+}
+
+/// Window point `p` (the pointer's, say) where what is drawn now has it.
+pub fn in_panel(ctx: &egui::Context, p: Pos2) -> Pos2 {
+    to_window(ctx).inverse() * p
+}
+
+/// A move of `by` across the window (the pointer's) as what is drawn now has it.
+pub fn in_panel_by(ctx: &egui::Context, by: Vec2) -> Vec2 {
+    by / to_window(ctx).scaling
+}
+
+/// The area a panel at `rect` (arrow included) is drawn in, over the canvas: kept to the window
+/// and clipped to it as the panel measures it.
+pub fn area(ctx: &egui::Context, id: egui::Id, rect: Rect) -> egui::Area {
+    egui::Area::new(id).fixed_pos(rect.min).order(egui::Order::Foreground).constrain_to(screen(ctx))
+}
+
 /// The side bar shows (or not) on the right (or the left), for the panels placed this frame.
 pub fn side_bar_at(ctx: &egui::Context, shown: bool, right: bool) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::unique("side bar place"), SideBarPlace { shown, right }));
 }
 
-/// Where the side bar is this frame, if it shows.
+/// Where the side bar shows this frame, if it shows.
 pub fn side_bar_shown_at(ctx: &egui::Context) -> Option<Rect> {
     let side = ctx.data(|d| d.get_temp::<SideBarPlace>(egui::Id::unique("side bar place")))?;
-    side.shown.then(|| crate::chrome::side_bar_rect(ctx.content_rect(), side.right))
+    let scale = part_scale(ctx, InterfacePart::SideBar);
+    side.shown.then(|| crate::chrome::fit_side_bar(ctx.content_rect(), side.right, scale, bar_shown(ctx)).shown())
 }
 
-/// Where a panel `width` wide goes in the window, hanging from a button centred at `button_x`:
-/// its left edge and its arrow's tip from that edge. It is centred on the button (the tip
-/// `ARROW_SHIFT` right of the button's centre) and kept inside the window, clear of the side bar
-/// on whichever side it is.
+/// Where a panel `width` wide goes, hanging from a button centred at `button_x`: its left edge and
+/// its arrow's tip from that edge, in the panels' space while one is drawn. It shows centred on
+/// the button (the tip `ARROW_SHIFT` right of the button's centre) and inside the window, clear of
+/// the side bar as it shows, on whichever side it is.
 pub fn place(ctx: &egui::Context, width: f32, button_x: f32) -> (f32, f32) {
+    let to_window = to_window(ctx);
+    let (k, x) = (to_window.scaling, to_window.translation.x);
     let screen = ctx.content_rect();
     let side = ctx
         .data(|d| d.get_temp::<SideBarPlace>(egui::Id::unique("side bar place")))
         .unwrap_or(SideBarPlace { shown: true, right: false });
-    let clear = if side.shown { pc::SIDE_BAR_WIDTH + POPOVER_GAP } else { POPOVER_GAP };
+    let side_bar = pc::SIDE_BAR_WIDTH * part_scale(ctx, InterfacePart::SideBar);
+    let clear = if side.shown { side_bar + POPOVER_GAP } else { POPOVER_GAP };
     let (min_left, min_right) = if side.right { (POPOVER_GAP, clear) } else { (clear, POPOVER_GAP) };
-    let tip = button_x + ARROW_SHIFT;
+    // where it shows
+    let (tip, shown) = (button_x * k + x + ARROW_SHIFT, width * k);
     let lo = screen.left() + min_left;
-    let hi = (screen.right() - min_right - width).max(lo);
-    let left = (tip - width / 2.0).clamp(lo, hi);
-    (left, tip - left)
+    let hi = (screen.right() - min_right - shown).max(lo);
+    let left = (tip - shown / 2.0).clamp(lo, hi);
+    ((left - x) / k, (tip - left) / k)
 }
 
 /// A panel's body (below its arrow) for a panel at `rect` (arrow included).
@@ -62,11 +155,17 @@ pub fn body(rect: Rect) -> Rect {
 }
 
 /// Draws a panel at `rect` (its arrow on top, the tip `arrow_x` from its left edge): the shadow
-/// round it, then its frosted body, whose blur goes into `backdrops` (window pixels).
+/// round it, then its frosted body, whose blur goes into `backdrops` (window pixels). Its layer
+/// shows it as the panels' space does, its icons and shapes drawn for that.
 pub fn frame(ui: &Ui, look: &mut Look, slot: &'static str, rect: Rect, arrow_x: f32, backdrops: &mut Vec<f32>) {
+    let to_window = to_window(ui.ctx());
+    ui.ctx().set_transform_layer(ui.layer_id(), to_window);
+    look.set_zoom(ui.layer_id(), to_window.scaling);
     let body = body(rect);
     let ppp = ui.ctx().pixels_per_point();
-    backdrops.extend([body.left(), body.top(), body.right(), body.bottom(), POPOVER_CORNER].map(|v| v * ppp));
+    let shown = to_window.mul_rect(body);
+    let edges = [shown.left(), shown.top(), shown.right(), shown.bottom(), POPOVER_CORNER * to_window.scaling];
+    backdrops.extend(edges.map(|v| v * ppp));
     backdrops.push(1.0);
     // only round the panel: none of it shows through
     let shadow = egui::epaint::Shadow {
@@ -96,10 +195,14 @@ pub fn frame(ui: &Ui, look: &mut Look, slot: &'static str, rect: Rect, arrow_x: 
 }
 
 /// Draws a floating panel at `rect` (no arrow): the shadow round it, then its frosted body, whose
-/// blur goes into `backdrops` (window pixels).
-pub fn floating_frame(ui: &Ui, look: &mut Look, slot: &'static str, rect: Rect, backdrops: &mut Vec<f32>) {
+/// blur goes into `backdrops` (window pixels). Its layer shows it `scale` times as big, from its
+/// top-left, its icons and shapes drawn for that.
+pub fn floating_frame(ui: &Ui, look: &mut Look, slot: &'static str, rect: Rect, scale: f32, backdrops: &mut Vec<f32>) {
+    look.set_zoom(ui.layer_id(), scale);
     let ppp = ui.ctx().pixels_per_point();
-    backdrops.extend([rect.left(), rect.top(), rect.right(), rect.bottom(), POPOVER_CORNER].map(|v| v * ppp));
+    let shown = Rect::from_min_size(rect.min, rect.size() * scale);
+    let edges = [shown.left(), shown.top(), shown.right(), shown.bottom(), POPOVER_CORNER * scale];
+    backdrops.extend(edges.map(|v| v * ppp));
     backdrops.push(1.0);
     let shadow = egui::epaint::Shadow {
         offset: [0, 0],
@@ -319,4 +422,78 @@ pub fn header_title(
 /// A light-on-dark tint for a selected row, or none.
 pub fn row_fill(selected: bool, idle: impl Shade) -> Color32 {
     if selected { argb(pc::ACCENT) } else { argb(idle) }
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::emath::TSTransform;
+    use egui::{Pos2, Rect, pos2, vec2};
+
+    use super::{ARROW_SHIFT, POPOVER_GAP, PanelSpace, drawing_panel, place, put_part_scales, side_bar_at};
+    use crate::look::pc;
+
+    fn near(a: Pos2, b: Pos2) -> bool {
+        (a - b).length() < 1e-3
+    }
+
+    #[test]
+    fn panels_as_big_as_the_rest_are_laid_out_in_the_window_itself() {
+        let window = Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0));
+        let space = PanelSpace::new(window, pc::BAR_HEIGHT, 1.0);
+        assert_eq!((space.to_window, space.screen), (TSTransform::IDENTITY, window));
+        // under a bigger top bar they only hang lower
+        let space = PanelSpace::new(window, pc::BAR_HEIGHT * 1.5, 1.0);
+        assert_eq!(space.to_window, TSTransform::IDENTITY);
+        assert_eq!(space.screen.top() + pc::BAR_HEIGHT, pc::BAR_HEIGHT * 1.5);
+        assert_eq!((space.screen.left(), space.screen.right(), space.screen.bottom()), (0.0, 1200.0, 800.0));
+    }
+
+    #[test]
+    fn panels_bigger_or_smaller_hang_from_the_top_bar_as_it_shows_and_measure_the_window_to_its_edges() {
+        let window = Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0));
+        for (bar, scale) in [(1.0, 1.5), (1.25, 0.5), (0.5, 1.5), (1.5, 0.75)] {
+            let PanelSpace { to_window, screen } = PanelSpace::new(window, pc::BAR_HEIGHT * bar, scale);
+            assert_eq!(to_window.scaling, scale);
+            // a panel's top, under its own top bar, shows where the top bar ends
+            let top = to_window * pos2(screen.left(), screen.top() + pc::BAR_HEIGHT);
+            assert!(near(top, pos2(0.0, pc::BAR_HEIGHT * bar)), "{bar} {scale}: {top:?}");
+            assert!(near(to_window * screen.max, window.max), "{bar} {scale}");
+        }
+    }
+
+    #[test]
+    fn a_panel_bigger_or_smaller_points_at_its_button_inside_the_window_clear_of_the_side_bar_as_it_shows() {
+        let ctx = egui::Context::default();
+        let window = Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0));
+        let raw = egui::RawInput { screen_rect: Some(window), ..Default::default() };
+        let mut output = ctx.run_ui(raw, |ui| {
+            let ctx = ui.ctx();
+            let width = 384.0;
+            for side in [1.0, 1.5] {
+                put_part_scales(ctx, [1.0, 1.0, side, 1.0, 1.0]);
+                for right in [false, true] {
+                    side_bar_at(ctx, true, right);
+                    for scale in [0.5, 1.0, 1.5] {
+                        let space = PanelSpace::new(window, pc::BAR_HEIGHT, scale);
+                        drawing_panel(ctx, Some(space));
+                        for button in [70.0, 600.0, 1150.0] {
+                            let local = (space.to_window.inverse() * pos2(button, 0.0)).x;
+                            let (left, tip) = place(ctx, width, local);
+                            let shown = |x: f32| (space.to_window * pos2(x, 0.0)).x;
+                            let case = format!("{side} {right} {scale} {button}");
+                            let clear = pc::SIDE_BAR_WIDTH * side + POPOVER_GAP;
+                            let (lo, hi) =
+                                if right { (POPOVER_GAP, 1200.0 - clear) } else { (clear, 1200.0 - POPOVER_GAP) };
+                            assert!(shown(left) >= lo - 1e-3 && shown(left + width) <= hi + 1e-3, "{case}");
+                            if button == 600.0 {
+                                assert!((shown(left + tip) - (button + ARROW_SHIFT)).abs() < 1e-3, "{case}");
+                            }
+                        }
+                    }
+                }
+            }
+            drawing_panel(ctx, None);
+        });
+        output.textures_delta.clear();
+    }
 }

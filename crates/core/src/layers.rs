@@ -326,11 +326,17 @@ impl CanvasSession {
 
     /// The visible paint layers with something drawn under window point (`x`, `y`), top first.
     pub fn layers_at(&self, x: f32, y: f32) -> Vec<u64> {
-        let mut guard = self.shared.lock();
-        let st = &mut *guard;
-        let Some((px, py)) = st.window_texel(x, y) else { return Vec::new() };
-        let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return Vec::new() };
-        let Ok(alphas) = canvas.alphas_at(gpu, &mut st.doc, px, py) else { return Vec::new() };
+        // the copy started under the lock, waited for once it is let go: touches and frames go
+        // on while the GPU finishes what it was given before
+        let pending = {
+            let mut guard = self.shared.lock();
+            let st = &mut *guard;
+            let Some((px, py)) = st.window_texel(x, y) else { return Vec::new() };
+            let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else { return Vec::new() };
+            canvas.start_alphas_at(gpu, &mut st.doc, px, py)
+        };
+        let Ok(alphas) = pending.alphas() else { return Vec::new() };
+        let st = self.shared.lock();
         let doc = &st.doc;
         alphas
             .into_iter()
@@ -435,14 +441,24 @@ impl CanvasSession {
         id
     }
 
-    /// Add Frame (New Page with Page Assist): a new empty layer above the current one, as
-    /// [`Self::add_layer`], named "Frame N" ("Page N") by the frames there are with it.
+    /// Add Frame (New Page with Page Assist): a new empty frame above the current one, named
+    /// "Frame N" ("Page N") by the frames there are with it. With a layer inside a group current,
+    /// it goes above that group's frame, at the top level, not into the group.
     pub fn add_frame(&self) -> u64 {
         self.change("new layer", |d| {
             if !d.has_room(1) {
                 return None;
             }
             let pages = d.animation.as_ref().is_some_and(|a| a.pages);
+            // the frame the current layer is drawn in: its outermost group, or itself
+            let mut frame = d.current();
+            for _ in 0..64 {
+                match d.group_of(frame) {
+                    Some(g) => frame = g,
+                    None => break,
+                }
+            }
+            d.set_current(frame);
             let id = d.add_layer();
             let n = procraft_engine::animation::frames(d).len();
             d.rename(id, &format!("{} {n}", if pages { "Page" } else { "Frame" }));
@@ -661,13 +677,44 @@ impl CanvasSession {
         }
     }
 
-    /// Why `adjustment` can't start on the current layer, if it can't: as [`Self::why_blocked`],
-    /// and Liquify turns away a layer whose alpha is locked.
+    /// Why `adjustment` can't start, if it can't: as [`Self::why_blocked`]. Liquify works on
+    /// every layer chosen (those in a chosen group too) and turns them away while the alpha of
+    /// one is locked; the others work on one layer, so a group current or several layers chosen
+    /// say so.
     pub fn why_not_adjusted(&self, adjustment: crate::adjust_menu::Adjustment) -> Option<Blocked> {
         self.why_blocked().or_else(|| {
-            let liquify = adjustment == crate::adjust_menu::Adjustment::Liquify;
-            (liquify && self.layers().iter().any(|l| l.current && l.alpha_lock)).then_some(Blocked::AlphaLocked)
+            if adjustment == crate::adjust_menu::Adjustment::Liquify {
+                self.alpha_locked_chosen().map(|_| Blocked::AlphaLocked)
+            } else {
+                self.why_not_one_layer()
+            }
         })
+    }
+
+    /// Why the current layer can't be copied, or cut (`cut`), if it can't: what is copied is one
+    /// layer's, so a group current or several layers chosen say so; a cut changes the layer, so
+    /// also as [`Self::why_blocked`].
+    pub fn why_not_copied(&self, cut: bool) -> Option<Blocked> {
+        let why = if cut { self.why_blocked() } else { None };
+        why.or_else(|| self.why_not_one_layer())
+    }
+
+    /// The first layer Liquify would work on whose alpha is locked (what it turns away), if any.
+    pub fn alpha_locked_chosen(&self) -> Option<u64> {
+        let st = self.shared.lock();
+        let layers = st.edited_layers();
+        layers.into_iter().find(|id| st.doc.layer(*id).is_some_and(|l| l.alpha_lock)).map(|id| id.0)
+    }
+
+    /// Why what works on one layer at a time can't: several layers are chosen, or a group is
+    /// current.
+    fn why_not_one_layer(&self) -> Option<Blocked> {
+        let st = self.shared.lock();
+        if st.doc.chosen().len() > 1 {
+            Some(Blocked::Several)
+        } else {
+            st.doc.layer(st.doc.current()).is_some_and(|l| l.kind == LayerKind::Group).then_some(Blocked::Group)
+        }
     }
 
     /// Why a change to the current layer would go unseen, if it would (what a hidden alert
@@ -935,6 +982,18 @@ impl CanvasSession {
         Some(ThumbnailImage { width: t.width, height: t.height, rgba: t.rgba })
     }
 
+    /// Records the canvas as `lapse`'s next frame, read back at the size frames are kept (not the
+    /// video's): the picture stays in the core, never crossing to the app and back, so a frame
+    /// after each stroke moves a few MB, not dozens. Whether one was kept (none before the canvas
+    /// exists, while it doesn't record, or when nothing changed since the last).
+    pub fn record_time_lapse(&self, lapse: std::sync::Arc<crate::timelapse::TimeLapse>) -> bool {
+        if !lapse.recording() {
+            return false;
+        }
+        let Some(t) = self.time_lapse_frame(crate::timelapse::FRAME_SIDE) else { return false };
+        lapse.record(t.rgba, t.width, t.height)
+    }
+
     /// Each paint layer's and mask's pixels' version, the queued work done first: a thumbnail
     /// need only be read again when its layer's is new.
     pub fn layer_versions(&self) -> Vec<LayerVersion> {
@@ -1138,6 +1197,37 @@ impl CanvasSession {
     }
 }
 
+impl crate::State {
+    /// The layers an edit of what is chosen works on (a transform, Liquify): with several chosen
+    /// or a group current, every paint layer chosen or in a chosen group; else the current layer.
+    /// Only those that can change: unlocked, shown, and not drawn from data (`also` lets one of
+    /// those in).
+    pub(crate) fn edited_layers_but(&self, also: impl Fn(LayerId) -> bool) -> Vec<LayerId> {
+        let doc = &self.doc;
+        let changes = |l: &procraft_engine::document::Layer| {
+            (!doc.is_locked(l.id) && l.visible && !l.drawn_from_data()) || also(l.id)
+        };
+        let chosen = doc.chosen();
+        let current = doc.current();
+        let group = doc.layer(current).is_some_and(|l| l.kind == LayerKind::Group);
+        if chosen.len() > 1 || group {
+            doc.layers()
+                .iter()
+                .filter(|l| l.kind == LayerKind::Paint && changes(l))
+                .filter(|l| chosen.iter().any(|c| *c == l.id || doc.is_inside(l.id, *c)))
+                .map(|l| l.id)
+                .collect()
+        } else {
+            doc.layer(current).filter(|l| changes(l)).map(|_| current).into_iter().collect()
+        }
+    }
+
+    /// [`State::edited_layers_but`] with none let in.
+    pub(crate) fn edited_layers(&self) -> Vec<LayerId> {
+        self.edited_layers_but(|_| false)
+    }
+}
+
 /// Why the current layer takes no change (see [`CanvasSession::why_blocked`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Blocked {
@@ -1152,9 +1242,11 @@ pub enum Blocked {
     MeshLocked,
     /// A group that doesn't show (as [`Blocked::Hidden`] is a layer).
     GroupHidden,
-    /// A group is current where a stroke or a fill takes a layer
-    /// ([`CanvasSession::why_unpainted`]).
+    /// A group is current where a stroke, a fill, an adjustment or a copy takes a layer
+    /// ([`CanvasSession::why_unpainted`], [`CanvasSession::why_not_adjusted`]).
     Group,
+    /// Several layers are chosen where an adjustment or a copy takes one.
+    Several,
     /// Liquify on a layer whose alpha is locked ([`CanvasSession::why_not_adjusted`]).
     AlphaLocked,
 }

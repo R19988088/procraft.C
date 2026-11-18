@@ -94,12 +94,13 @@ fun ZoomingGallery(vm: CanvasViewModel, overlay: Boolean) {
                     },
                 ),
         ) { GalleryScreen(vm) }
-        // closing, the canvas fades away over its cell
+        // closing, the canvas fades away over its cell (upright, turned as the cell shows it)
         val picture = z.picture
         if (!z.opening && picture != null) {
             Canvas(Modifier.fillMaxSize()) {
-                val size = Size(z.cell.width * place.scale, z.cell.height * place.scale)
-                rotate(Math.toDegrees(place.angle.toDouble()).toFloat(), pivot = place.centre) {
+                val upright = Place.upright(z)
+                val size = Size(upright.width * place.scale, upright.height * place.scale)
+                rotate(Math.toDegrees((place.angle + Place.cellTurn(z)).toDouble()).toFloat(), pivot = place.centre) {
                     scale(place.across, 1f, pivot = place.centre) {
                         drawImage(
                             picture,
@@ -121,10 +122,18 @@ fun ZoomingGallery(vm: CanvasViewModel, overlay: Boolean) {
  */
 private class Place(val centre: Offset, val scale: Float, val angle: Float, val across: Float) {
     companion object {
+        /** How far the cell shows the artwork turned (radians, clockwise). */
+        fun cellTurn(z: CanvasViewModel.GalleryZoom): Float = Math.floorMod(z.turns, 4) * (Math.PI / 2).toFloat()
+
+        /** The cell's size as the artwork is upright: its sides swapped if it shows it on its side. */
+        fun upright(z: CanvasViewModel.GalleryZoom): Size =
+            if (Math.floorMod(z.turns, 2) == 1) Size(z.cell.height, z.cell.width) else Size(z.cell.width, z.cell.height)
+
         fun between(z: CanvasViewModel.GalleryZoom, t: Float): Place {
-            val full = if (z.cell.height > 0f) z.canvas.size.height / z.cell.height else 1f
-            // the shorter way round
-            var angle = z.canvas.angle
+            val upright = upright(z)
+            val full = if (upright.height > 0f) z.canvas.size.height / upright.height else 1f
+            // from the cell's turn to the canvas's, the shorter way round
+            var angle = z.canvas.angle - cellTurn(z)
             while (angle > Math.PI) angle -= (2 * Math.PI).toFloat()
             while (angle < -Math.PI) angle += (2 * Math.PI).toFloat()
             return Place(

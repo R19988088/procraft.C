@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "id": "io.github.artcraftandroid.colordrop-tools",
+  "name": "ColorDrop tools",
+  "version": "1.0.0",
+  "holds": ["hooks"],
+  "publisher": { "name": "ProCraft" },
+  "description": "ColorDrop fills up to the lines on every layer you see, and keeps out of gaps in your lines.",
+  "compat": { "procraft": { "interface": 1 } },
+  "permissions": [],
+  "hooks": ["fill_all_layers", "fill_mask"],
+  "controls": [
+    { "key": "all_layers", "type": "switch", "label": "ColorDrop fills by all layers" },
+    { "key": "gap_closing", "type": "switch", "label": "ColorDrop gap closing" },
+    {
+      "key": "gap", "type": "slider", "label": "Gap", "least": 0, "most": 32, "step": 1, "starts": 0,
+      "unit": " px", "at_least": "Off", "keeps": "fill_gap", "under": "gap_closing"
+    }
+  ],
+  "replaces": [
+    { "id": "io.github.artcraftandroid.fill-all-layers", "switch": "all_layers" },
+    { "id": "io.github.artcraftandroid.gap-closing", "switch": "gap_closing" }
+  ]
+}

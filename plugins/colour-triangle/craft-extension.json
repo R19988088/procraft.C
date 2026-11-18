@@ -2,11 +2,16 @@
   "schema": 1,
   "id": "io.github.artcraftandroid.colour-triangle",
   "name": "Colour triangle",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "holds": ["hooks"],
   "publisher": { "name": "ProCraft" },
-  "description": "The colour panel's Classic tab picks saturation and brightness in a triangle instead of a square.",
-  "compat": { "procraft": { "interface": 2 } },
+  "description": "The colour panel's Classic tab picks saturation and brightness in a triangle instead of a square, with the hue on a ring round it if you like.",
+  "compat": { "procraft": { "interface": 6 } },
   "permissions": [],
-  "hooks": ["picker"]
+  "hooks": ["picker", "floating_picker_only"],
+  "controls": [
+    { "key": "triangle", "type": "switch", "label": "Triangle in Classic", "starts": true },
+    { "key": "ring", "type": "switch", "label": "Hue ring around the triangle", "under": "triangle" },
+    { "key": "picker_only", "type": "switch", "label": "Picker only in the floating window", "under": "triangle" }
+  ]
 }

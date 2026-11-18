@@ -168,6 +168,15 @@ impl LiquifyRun {
         self.moved = false;
     }
 
+    /// Everything going by itself stops, and the brush is as if lifted.
+    pub(crate) fn halt(&mut self) {
+        self.movers.clear();
+        self.last = None;
+        self.force = None;
+        self.velocity = Vec2::new(0.0, 0.0);
+        self.moved = false;
+    }
+
     /// Whether anything is still going by itself.
     pub(crate) fn going(&self) -> bool {
         !self.movers.is_empty()

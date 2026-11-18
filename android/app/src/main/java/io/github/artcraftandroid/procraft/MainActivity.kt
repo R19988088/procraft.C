@@ -17,8 +17,10 @@ import androidx.core.view.WindowInsetsControllerCompat
 import io.github.artcraftandroid.procraft.canvas.CanvasViewModel
 import io.github.artcraftandroid.procraft.canvas.ProjectionPresentation
 import io.github.artcraftandroid.procraft.canvas.PEN_DOUBLE_TAP_KEY
+import io.github.artcraftandroid.procraft.canvas.systemShortcutKeys
 import io.github.artcraftandroid.procraft.canvas.PenKeyAction
 import io.github.artcraftandroid.procraft.canvas.PenDoubleTaps
+import io.github.artcraftandroid.procraft.canvas.keyPress
 import io.github.artcraftandroid.procraft.canvas.penKeyButton
 import kotlinx.coroutines.launch
 import io.github.artcraftandroid.procraft.ui.AppRoot
@@ -32,6 +34,9 @@ private const val TAP_DRIFT_DP = 24f
 class MainActivity : ComponentActivity() {
     private val vm: CanvasViewModel by viewModels()
 
+    /** Hides the system's bars, as the model asks (let go as this activity goes: the model outlives it). */
+    private val barsHider: () -> Unit = { hideSystemBars() }
+
     // Project canvas: the presentation on a second display, and the displays coming and going
     private var projection: ProjectionPresentation? = null
     private val displays by lazy { getSystemService(DisplayManager::class.java) }
@@ -44,15 +49,18 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge(SystemBarStyle.dark(Color.TRANSPARENT), SystemBarStyle.dark(Color.TRANSPARENT))
         super.onCreate(savedInstanceState)
+        // the log's file first, so that what follows is in it
+        AppLog.start(this)
         // text's fonts given to the core, off the main thread
         io.github.artcraftandroid.procraft.canvas.TextRenderer.prepare(assets, java.io.File(filesDir, "fonts"))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) window.isNavigationBarContrastEnforced = false
-        // wide colour, so a Display P3 canvas's colours show as they are around it too
-        if (resources.configuration.isScreenWideColorGamut) window.colorMode = android.content.pm.ActivityInfo.COLOR_MODE_WIDE_COLOR_GAMUT
         hideSystemBars()
+        // a colour dragged down from the top bar puts back the bars the drag showed
+        vm.hideSystemBars = barsHider
         // which graphics backend the app is trying, kept before the model makes the GPU device: a
-        // driver that crashes the app then sends the next start to the next backend
-        io.github.artcraftandroid.procraft.core.setGpuRecordFolder(filesDir.path)
+        // driver that crashes the app then sends the next start to the next backend (one that drew
+        // is trusted until the app or the system is updated)
+        io.github.artcraftandroid.procraft.core.setGpuRecordFolder(filesDir.path, installedBuild())
         // made here, not inside the flow's read-only snapshot, where its setup can't write state
         val model = vm
         // laid out left to right in every language, as the original is: a right-to-left one
@@ -63,7 +71,21 @@ class MainActivity : ComponentActivity() {
             ) { AppRoot(model) }
         }
         lifecycleScope.launch { snapshotFlow { model.projectCanvas }.collect { showProjection() } }
+        // wide colour while a Display P3 canvas is open, so its colours show as they are around it
+        // too; else the default, as the canvas's surface then is: a wide window has had the
+        // interface over the canvas blurred away, or the canvas dulled, on some tablets' screens
+        lifecycleScope.launch {
+            snapshotFlow { model.wideColorWindow }.collect { wide ->
+                window.colorMode = if (wide) android.content.pm.ActivityInfo.COLOR_MODE_WIDE_COLOR_GAMUT else android.content.pm.ActivityInfo.COLOR_MODE_DEFAULT
+            }
+        }
         importOpened(intent)
+    }
+
+    /** The app as installed and the system it runs on, as one text: it differs once either is updated. */
+    private fun installedBuild(): String {
+        val installed = runCatching { packageManager.getPackageInfo(packageName, 0).lastUpdateTime }.getOrDefault(0L)
+        return "$installed ${Build.FINGERPRINT}"
     }
 
     override fun onNewIntent(intent: android.content.Intent) {
@@ -170,7 +192,10 @@ class MainActivity : ComponentActivity() {
 
     private val penDoubleTaps = PenDoubleTaps()
 
-    /** A hardware keyboard's shortcuts on the canvas (keys no text field took). */
+    /**
+     * A hardware keyboard's shortcuts on the canvas, a tablet's express keys' too (keys no text
+     * field took). Ctrl and Meta are both the command key.
+     */
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
         // a pen's double-tap that comes as a key of its own: as its first button, once for each
         if (keyCode == PEN_DOUBLE_TAP_KEY) {
@@ -180,10 +205,18 @@ class MainActivity : ComponentActivity() {
         // a pen's side button that comes as a key
         val penButton = event.device?.let { penKeyButton(keyCode, it.sources or event.source, it.keyboardType, it.name) }
         if (penButton != null && (event.repeatCount > 0 || vm.penKey(penButton))) return true
+        // typing in a text field (a name, the text tool's words): what the field leaves (Ctrl+J,
+        // Alt) is still typing, not the canvas's
+        if (typing()) return super.onKeyDown(keyCode, event)
         if (isAltKey(keyCode) && event.repeatCount == 0 && !event.isCtrlPressed && vm.modifyKey(true)) return true
-        if (event.repeatCount == 0 && vm.keyShortcut(keyCode, event.isCtrlPressed || event.isMetaPressed, event.isShiftPressed, event.isAltPressed)) return true
+        val press = keyPress(keyCode, event.metaState)
+        // held, a key goes on moving the view, if that is what it does
+        if (press != null && vm.keyShortcut(press, repeat = event.repeatCount > 0)) return true
         return super.onKeyDown(keyCode, event)
     }
+
+    /** Whether a text field has the keys: the view with focus edits text (Compose's, while one of its fields is focused). */
+    private fun typing() = currentFocus?.onCheckIsTextEditor() == true
 
     override fun onKeyUp(keyCode: Int, event: android.view.KeyEvent): Boolean {
         // a pen's side button that comes as a key, let go (held to erase, the eraser goes back)
@@ -205,10 +238,7 @@ class MainActivity : ComponentActivity() {
         for (group in vm.plugins.keyShortcutList(false, false)) {
             val items = group.rows.flatMap { row ->
                 row.combos.mapNotNull { c ->
-                    val code = io.github.artcraftandroid.procraft.canvas.keyCodeNamed(c.key) ?: return@mapNotNull null
-                    val modifiers = (if (c.command) android.view.KeyEvent.META_CTRL_ON else 0) or
-                        (if (c.shift) android.view.KeyEvent.META_SHIFT_ON else 0) or
-                        (if (c.alt) android.view.KeyEvent.META_ALT_ON else 0)
+                    val (code, modifiers) = systemShortcutKeys(c.key, c.command, c.shift, c.alt) ?: return@mapNotNull null
                     android.view.KeyboardShortcutInfo(row.does, code, modifiers)
                 }
             }
@@ -216,9 +246,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onDestroy() {
+        if (vm.hideSystemBars === barsHider) vm.hideSystemBars = null
+        super.onDestroy()
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) hideSystemBars()
+        if (!hasFocus) return
+        hideSystemBars()
+        // what another app copied meanwhile (the clipboard can only be looked at with the focus)
+        vm.lookAtSystemClipboard()
     }
 
     /** The canvas uses the whole screen; a swipe from the edge shows the bars for a moment. */

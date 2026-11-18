@@ -386,8 +386,8 @@ impl CanvasSession {
         st.finish_stroke();
         st.settle();
         let current = st.doc.current();
-        let movable = |l: &Layer| !st.doc.is_locked(l.id) && l.visible && !l.drawn_from_data();
-        // with layers picked, every paint layer chosen (those in a chosen group too) moves
+        // with layers picked or a group current, every paint layer chosen (those in a chosen
+        // group too) moves
         let chosen = st.doc.chosen();
         // a plugin's layer alone moves its items as items: those the selection takes
         st.transform_items = None;
@@ -399,18 +399,7 @@ impl CanvasSession {
             }
             st.transform_items = Some((current, ids, false));
         }
-        let movable = |l: &Layer| movable(l) || st.transform_items.as_ref().is_some_and(|(id, ..)| *id == l.id);
-        let targets: Vec<LayerId> = if chosen.len() > 1 {
-            st.doc
-                .layers()
-                .iter()
-                .filter(|l| l.kind == LayerKind::Paint && movable(l))
-                .filter(|l| chosen.iter().any(|c| *c == l.id || st.doc.is_inside(l.id, *c)))
-                .map(|l| l.id)
-                .collect()
-        } else {
-            st.doc.layer(current).filter(|l| movable(l)).map(|_| current).into_iter().collect()
-        };
+        let targets = st.edited_layers_but(|id| st.transform_items.as_ref().is_some_and(|(items, ..)| *items == id));
         if targets.is_empty() {
             st.transform_items = None;
             return None;
@@ -491,6 +480,8 @@ impl CanvasSession {
             "Rasterize the layer to transform it"
         } else if st.selection.is_some() {
             "Nothing is selected on this layer"
+        } else if current.is_some_and(|l| l.kind == LayerKind::Group) {
+            "This group is empty"
         } else {
             "This layer is empty"
         }
@@ -637,23 +628,19 @@ impl CanvasSession {
     }
 
     /// Ends the transform: `commit` keeps it as one undo step, otherwise the layer is put back.
+    /// Kept, it ends the selection too, in the same step (undoing it brings the selection back).
     pub fn transform_end(&self, commit: bool) {
         let mut guard = self.shared.lock();
         let st = &mut *guard;
-        if let Some(t) = st.transform.as_ref() {
-            // a selection moves with what it took
-            let moved = match (commit, st.selection.as_ref()) {
-                (true, Some(mask)) => match t.warp() {
-                    Some(mesh) => Some(mask.warped(&warp::triangles(&mesh, t.source(), MESH_STEPS))),
-                    None => Homography::quad_to_quad(t.content(), t.source()).map(|h| mask.moved(|p| h.apply(p))),
-                },
-                _ => None,
-            };
+        if st.transform.is_some() {
+            st.flush();
+            let steps = |st: &State| st.canvas.as_ref().map_or(0, procraft_gpu::Canvas::steps_made);
+            let before = steps(st);
             st.end_transform(commit);
             st.flush();
-            if let Some(moved) = moved {
-                let before = st.selection.replace(moved);
-                st.record_selection(before, "move");
+            if commit && st.selection.is_some() {
+                let made = st.canvas.as_ref().and_then(procraft_gpu::Canvas::undo_step).filter(|_| steps(st) > before);
+                st.drop_selection_with_step(made);
             }
             st.revision += 1;
             st.scene_back_from_tool();
@@ -669,15 +656,15 @@ impl CanvasSession {
         vec![m.a, m.b, m.c, m.d, m.e, m.f]
     }
 
-    /// The view the canvas opens with in a window of `width` × `height` pixels (as it was left,
-    /// else fitted), as [`CanvasSession::view_matrix`] gives it; once shown, the view it has.
+    /// The view the canvas opens with in a window of `width` × `height` pixels (fitted, turned as
+    /// the gallery shows it), as [`CanvasSession::view_matrix`] gives it; once shown, the view it
+    /// has.
     pub fn opening_view_matrix(&self, width: u32, height: u32) -> Vec<f32> {
         let st = self.shared.lock();
         let window = (width.max(1), height.max(1));
         let view = st.view.unwrap_or_else(|| {
-            st.saved_view.and_then(|v| v.view(window)).unwrap_or_else(|| {
-                procraft_engine::view::View::fit_inside((st.doc.width(), st.doc.height()), window, st.fit_insets)
-            })
+            let canvas = (st.doc.width(), st.doc.height());
+            procraft_engine::view::View::fit_turned(canvas, window, st.fit_insets, i32::from(st.turns))
         });
         let m = view.to_screen();
         vec![m.a, m.b, m.c, m.d, m.e, m.f]

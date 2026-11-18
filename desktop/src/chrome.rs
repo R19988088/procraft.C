@@ -2,8 +2,12 @@
 //! action buttons, the tools, Layers and the colour) and the side bar (brush size, the modify
 //! button, opacity, undo and redo, and a slider's panel while it is dragged).
 
-use egui::{Align2, Color32, Rect, Sense, Stroke, Ui, pos2, vec2};
-use procraft_core::{CanvasInfo, CanvasSession, ToolKind};
+use egui::emath::TSTransform;
+use egui::layers::{PaintList, ShapeIdx};
+use egui::{Align2, Color32, Id, LayerId, Order, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
+use procraft_core::{
+    CanvasInfo, CanvasSession, InterfacePart, SideSliderTap, ToolKind, side_slider_drag_share, side_slider_tap,
+};
 use resvg::tiny_skia;
 
 use crate::icons;
@@ -63,18 +67,27 @@ pub fn frost(glass: &mut Vec<f32>, rect: Rect, corner: f32, ppp: f32) {
 }
 
 /// The bar across the top of the canvas: artwork actions on the left, painting tools on the right.
+/// It shows at the size a plugin gives it: laid out at its own size, as wide as the window is at
+/// that size, and drawn and touched that many times as big from the window's top left. Its
+/// buttons are where they show.
 pub fn top_bar(ui: &mut Ui, look: &mut Look, tool: ToolKind, colour: Color32, brightness: f32, lit: &Lit) -> Bar {
     let mut bar = Bar::default();
     let frame = egui::Frame::NONE.fill(argb(pc::BAR));
-    egui::Panel::top("bar").exact_size(pc::BAR_HEIGHT).frame(frame).show(ui, |ui| {
-        let r = ui.max_rect();
+    let k = crate::panel::part_scale(ui.ctx(), InterfacePart::TopBar);
+    egui::Panel::top("bar").exact_size(pc::BAR_HEIGHT * k).frame(frame).show(ui, |ui| {
+        let shown = ui.max_rect();
+        let r = Rect::from_min_size(shown.min, shown.size() / k);
+        let to_window = scaled_from(r.min, k);
         let ctx = ui.ctx().clone();
+        let first = ctx.graphics(|g| g.get(ui.layer_id()).map_or(ShapeIdx(0), PaintList::next_idx));
+        look.set_zoom(ui.layer_id(), k);
         let (tool_gap, action_gap) = pc::bar_gaps(r.width());
         let cy = r.center().y;
         let button = |x: f32, width: f32| {
             Rect::from_min_size(pos2(x, cy - pc::BAR_BUTTON_HEIGHT / 2.0), vec2(width, pc::BAR_BUTTON_HEIGHT))
         };
         let mut tap = |ui: &Ui, which: BarButton, rect: Rect| {
+            let rect = to_window.mul_rect(rect);
             bar.rects.push((which, rect));
             let response = ui.interact(rect, ui.scope_id().with(which), Sense::click());
             if response.clicked() {
@@ -147,18 +160,73 @@ pub fn top_bar(ui: &mut Ui, look: &mut Look, tool: ToolKind, colour: Color32, br
             // a 44 frame shown as it is, over the 38 tall button
             look.icon(ui, icon, rect.center(), 44.0, mix(argb(pc::BAR_GLYPH), argb(pc::BAR_GLYPH_SELECTED), l));
         }
-        bar.rects.push((BarButton::Colour, colour_rect));
+        bar.rects.push((BarButton::Colour, to_window.mul_rect(colour_rect)));
+        look.set_zoom(ui.layer_id(), 1.0);
+        // what it drew, at its scale, clipped to where it shows
+        if k != 1.0 {
+            ctx.graphics_mut(|g| {
+                let list = g.entry(ui.layer_id());
+                for i in first.0..list.next_idx().0 {
+                    list.mutate_shape(ShapeIdx(i), |shape| {
+                        let clip = shape.clip_rect;
+                        shape.transform(to_window);
+                        shape.clip_rect = clip;
+                    });
+                }
+            });
+        }
     });
     bar
 }
 
-/// Where the side bar is in `window`, against its right edge or its left.
-pub fn side_bar_rect(window: Rect, right: bool) -> Rect {
-    let (top, track_height) = pc::side_bar_fit(window.height());
+/// What shows `k` times as big from `at`: from where it is laid out to where it shows.
+pub fn scaled_from(at: Pos2, k: f32) -> TSTransform {
+    TSTransform::from_translation(at.to_vec2())
+        * TSTransform::from_scaling(k)
+        * TSTransform::from_translation(-at.to_vec2())
+}
+
+/// Where the side bar goes in a window: its top left, its size laid out (its tracks fitted to the
+/// window), how long each track is, and how many times as big it shows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SideBarFit {
+    pub at: Pos2,
+    pub size: Vec2,
+    pub track: f32,
+    pub scale: f32,
+}
+
+impl SideBarFit {
+    /// Where it is laid out: at its own size, from where it shows.
+    pub fn laid_out(self) -> Rect {
+        Rect::from_min_size(self.at, self.size)
+    }
+
+    /// Where it shows.
+    pub fn shown(self) -> Rect {
+        Rect::from_min_size(self.at, self.size * self.scale)
+    }
+
+    /// From where it is laid out to where it shows.
+    pub fn to_window(self) -> TSTransform {
+        scaled_from(self.at, self.scale)
+    }
+}
+
+/// The side bar in `window`, against its right edge or its left, under a top bar reaching
+/// `bar_bottom` down, shown `scale` times as big as the rest: fitted to the window as it measures
+/// the window at its own size.
+pub fn fit_side_bar(window: Rect, right: bool, scale: f32, bar_bottom: f32) -> SideBarFit {
+    let (top, track) = pc::side_bar_fit(window.height() / scale, bar_bottom / scale);
     // shorter tracks bring what is under each up with them
-    let shorter = pc::SLIDER_HEIGHT - track_height;
-    let left = if right { window.right() - pc::SIDE_BAR_WIDTH } else { window.left() };
-    Rect::from_min_size(pos2(left, window.top() + top), vec2(pc::SIDE_BAR_WIDTH, pc::SIDE_BAR_HEIGHT - shorter * 2.0))
+    let shorter = pc::SLIDER_HEIGHT - track;
+    let left = if right { window.right() - pc::SIDE_BAR_WIDTH * scale } else { window.left() };
+    SideBarFit {
+        at: pos2(left, window.top() + top * scale),
+        size: vec2(pc::SIDE_BAR_WIDTH, pc::SIDE_BAR_HEIGHT - shorter * 2.0),
+        track,
+        scale,
+    }
 }
 
 /// The side bar's sliders.
@@ -215,7 +283,9 @@ const SLIDER_PANEL_INK: Themed = Themed(0xFFF0F0F0, 0xFF393939);
 impl SideBar {
     /// The side bar against the window's left edge (the right one, `right`-handed: everything
     /// mirrored but the glyphs); it and a slider's panel add their frost to `backdrops`, and its
-    /// slider tracks their thin glass to `windows` (see [`frost`]).
+    /// slider tracks their thin glass to `windows` (see [`frost`]). It shows at the size a plugin
+    /// gives it, under the top bar as that shows: laid out at its own size, and drawn and touched
+    /// that many times as big from its top left, a slider's panel with it.
     #[allow(clippy::too_many_arguments)]
     pub fn show(
         &mut self,
@@ -231,11 +301,13 @@ impl SideBar {
         let mut taps = SideTaps::default();
         let ctx = ui.ctx().clone();
         let window = ctx.content_rect();
-        let (_, track_height) = pc::side_bar_fit(window.height());
+        let scale = crate::panel::part_scale(&ctx, InterfacePart::SideBar);
+        let fit = fit_side_bar(window, right, scale, crate::panel::bar_shown(&ctx));
+        let track_height = fit.track;
         // shorter tracks bring what is under each up with them
         let shorter = pc::SLIDER_HEIGHT - track_height;
         let opacity_top = OPACITY_TRACK_TOP - shorter;
-        let bar = side_bar_rect(window, right);
+        let (bar, shown, to_window) = (fit.laid_out(), fit.shown(), fit.to_window());
         // a control's left edge in the bar, mirrored on the right
         let x = |left: f32, width: f32| if right { pc::SIDE_BAR_WIDTH - left - width } else { left };
         let at = |l: f32, y: f32, w: f32, h: f32| Rect::from_min_size(bar.min + vec2(x(l, w), y), vec2(w, h));
@@ -247,11 +319,17 @@ impl SideBar {
         } else {
             bar.with_min_x(bar.left() - pc::SIDE_BAR_CORNER)
         };
-        frost(backdrops, past, pc::SIDE_BAR_CORNER, ppp);
+        frost(backdrops, to_window.mul_rect(past), pc::SIDE_BAR_CORNER * scale, ppp);
         for (_, y, _) in tracks {
-            frost(windows, at(SLIDER_LEFT, y, pc::SLIDER_WIDTH, track_height), pc::SLIDER_CORNER, ppp);
+            let track = to_window.mul_rect(at(SLIDER_LEFT, y, pc::SLIDER_WIDTH, track_height));
+            frost(windows, track, pc::SLIDER_CORNER * scale, ppp);
         }
-        egui::Area::new(egui::Id::unique("side bar")).fixed_pos(bar.min).order(egui::Order::Middle).show(&ctx, |ui| {
+        let area = Id::unique("side bar");
+        ctx.set_transform_layer(LayerId::new(Order::Middle, area), to_window);
+        look.set_zoom(LayerId::new(Order::Middle, area), scale);
+        // kept to the window, and clipped to it, as the bar measures it
+        let measured = to_window.inverse().mul_rect(window);
+        egui::Area::new(area).fixed_pos(bar.min).order(Order::Middle).constrain_to(measured).show(&ctx, |ui| {
             ui.set_min_size(bar.size());
             // translucent, with windows where the slider tracks are: they show what is behind
             look.shape(ui, "side bar", (right, track_height.to_bits()), bar, |pixmap, t| {
@@ -323,11 +401,12 @@ impl SideBar {
             let left = x(SLIDER_LEFT + pc::SLIDER_WIDTH + SLIDER_PANEL_GAP, SLIDER_PANEL_SIDE);
             let min = bar.min + vec2(left, y - SLIDER_PANEL_RISE);
             let rect = Rect::from_min_size(min, vec2(SLIDER_PANEL_SIDE, SLIDER_PANEL_SIDE));
-            self.changed |= slider_panel(&ctx, look, session, which, rect, info, backdrops);
+            self.changed |= slider_panel(&ctx, look, session, which, rect, info, to_window, backdrops);
             // kept up, it goes at the next press anywhere but on it and its slider
+            let panel = to_window.mul_rect(rect);
             let pressed_elsewhere = ctx.input(|i| {
                 i.pointer.any_pressed()
-                    && i.pointer.interact_pos().is_some_and(|p| !rect.contains(p) && !bar.contains(p))
+                    && i.pointer.interact_pos().is_some_and(|p| !panel.contains(p) && !shown.contains(p))
             });
             if kept && pressed_elsewhere {
                 self.panel = None;
@@ -338,9 +417,11 @@ impl SideBar {
     }
 
     /// An upright slider moved by dragging anywhere on it: the thumb follows the pointer (not
-    /// jumping to it), 1 at the top. Moved, its panel shows while it moves; held still, it stays
-    /// up. Its notches (saved values) show as marks on the track; a value dragged near one is
-    /// pulled onto it, and a tap on one goes there. On a notch, the thumb shows a blue bar.
+    /// jumping to it), finer the farther out to the side the pointer goes, 1 at the top. Moved,
+    /// its panel shows while it moves; held still or its thumb tapped, it stays up; a tap
+    /// elsewhere on the track takes the thumb there. Its notches (saved values) show as marks on
+    /// the track; a value dragged near one is pulled onto it, and a tap on one goes there. On a
+    /// notch, the thumb shows a blue bar.
     fn slider(&mut self, ui: &Ui, look: &mut Look, session: &CanvasSession, which: Slider, rect: Rect, value: f32) {
         let size = which == Slider::Size;
         let travel = rect.height() - pc::THUMB_HEIGHT - pc::THUMB_INSET * 2.0;
@@ -359,23 +440,22 @@ impl SideBar {
                     self.panel = Some((which, false));
                 }
                 press.moved = true;
-                press.raw = (press.raw - dy / travel).clamp(0.0, 1.0);
+                // the farther out to the side the pointer is, the finer the thumb follows it
+                let across = response.interact_pointer_pos().map_or(0.0, |p| p.x - rect.center().x);
+                press.raw = (press.raw - dy / travel * side_slider_drag_share(across)).clamp(0.0, 1.0);
                 set(session.slider_notch_at(size, press.raw).unwrap_or(press.raw));
             }
         }
-        // a tap on a notch's mark goes to it
+        // a tap on the thumb opens the panel and keeps it up; elsewhere the thumb goes there (or
+        // onto a notch's mark there)
         if response.clicked()
             && let Some(p) = response.interact_pointer_pos()
         {
             let at = 1.0 - (p.y - rect.top() - pc::THUMB_INSET - pc::THUMB_HEIGHT / 2.0) / travel;
             let reach = pc::THUMB_HEIGHT / 2.0 / travel;
-            let notch = session
-                .slider_notches(size)
-                .into_iter()
-                .filter(|n| (n - at).abs() < reach)
-                .min_by(|a, b| (a - at).abs().total_cmp(&(b - at).abs()));
-            if let Some(n) = notch {
-                set(n);
+            match side_slider_tap(at, value, reach, session.slider_notches(size)) {
+                SideSliderTap::Panel => self.panel = Some((which, true)),
+                SideSliderTap::Jump { value } => set(value),
             }
         }
         if !response.is_pointer_button_down_on() && self.pressed.is_some_and(|p| p.which == which) {
@@ -438,7 +518,9 @@ impl SideBar {
 
 /// A slider's panel: its name and value ("Size 8%"), a button saving the value as a notch on the
 /// slider ("+"; "-" takes away the notch it is on), and in the middle the brush's shape (a dot for
-/// a round tip) as it would paint now, its size on the screen (and at its opacity).
+/// a round tip) as it would paint now, its size on the screen (and at its opacity). It shows as
+/// the side bar does, through `to_window`.
+#[allow(clippy::too_many_arguments)]
 fn slider_panel(
     ctx: &egui::Context,
     look: &mut Look,
@@ -446,76 +528,127 @@ fn slider_panel(
     which: Slider,
     rect: Rect,
     info: &CanvasInfo,
+    to_window: TSTransform,
     backdrops: &mut Vec<f32>,
 ) -> bool {
     let mut toggled = false;
-    let ppp = ctx.pixels_per_point();
+    let (ppp, scale) = (ctx.pixels_per_point(), to_window.scaling);
     let corner = 22.0;
-    frost(backdrops, rect, corner, ppp);
-    egui::Area::new(egui::Id::unique("slider panel")).fixed_pos(rect.min).order(egui::Order::Foreground).show(
-        ctx,
-        |ui| {
-            ui.allocate_rect(rect, Sense::hover());
-            let painter = ui.painter();
-            painter.rect_filled(rect, corner, argb(SLIDER_PANEL_FILL));
-            // a hairline rim
-            painter.rect_stroke(rect, corner, Stroke::new(1.0, argb(pc::GLASS_MENU_EDGE)), egui::StrokeKind::Inside);
-            let (name, value) = match which {
-                Slider::Size => ("Size", info.size),
-                Slider::Opacity => ("Opacity", info.opacity),
-            };
-            let shown = format!(" {}%", (value * 100.0).round());
-            let line = pos2(rect.left() + 16.0, rect.top() + 6.0 + 16.0);
-            text_runs(
-                painter,
-                line,
-                Align2::LEFT_CENTER,
-                &[(name, Weight::Bold), (&shown, Weight::Regular)],
-                19.0,
-                argb(SLIDER_PANEL_INK),
-            );
-            let diameter = info.brush_diameter * info.zoom / ppp;
-            let r = (diameter / 2.0).clamp(1.5, (SLIDER_PANEL_SIDE / 2.0 - 8.0).max(1.5));
-            let alpha = if which == Slider::Size { 1.0 } else { info.opacity.clamp(0.02, 1.0) };
-            // the brush's stamp as it paints (soft where it is soft) in a picture its size on the
-            // screen, kept while it stays so
-            let side = ((2.0 * r * ppp).ceil() as usize).max(2);
-            let stamp = session.brush_stamp(side as u32);
-            let key = stamp_key(&stamp, side);
-            let id = egui::Id::unique("size preview stamp");
-            let kept = ctx.data(|d| d.get_temp::<(u64, egui::TextureHandle)>(id)).filter(|(k, _)| *k == key);
-            let texture = kept.map(|(_, t)| t).unwrap_or_else(|| {
-                let pixels = stamp.iter().map(|&a| Color32::from_white_alpha(a)).collect();
-                let picture = egui::ColorImage { size: [side, side], pixels, ..Default::default() };
-                let t = ctx.load_texture("size preview stamp", picture, egui::TextureOptions::LINEAR);
-                ctx.data_mut(|d| d.insert_temp(id, (key, t.clone())));
-                t
-            });
-            let shown = Rect::from_center_size(rect.center(), vec2(2.0 * r, 2.0 * r));
-            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-            painter.image(texture.id(), shown, uv, Color32::WHITE.gamma_multiply(alpha));
-            let size = which == Slider::Size;
-            let value = if size { info.size } else { info.opacity };
-            let on_notch = session.slider_notch_at(size, value).is_some();
-            if on_notch || session.can_save_slider_notch(size) {
-                let button = Rect::from_min_size(rect.min + vec2(150.0, 6.0), vec2(32.0, 32.0));
-                let icon = if on_notch { &icons::NOTCH_REMOVE } else { &icons::NOTCH_ADD };
-                look.icon(ui, icon, button.center(), 24.0, argb(SLIDER_PANEL_INK));
-                if ui.interact(button, ui.scope_id().with("notch"), Sense::click()).clicked() {
-                    session.toggle_slider_notch(size);
-                    toggled = true;
-                }
+    frost(backdrops, to_window.mul_rect(rect), corner * scale, ppp);
+    let area = Id::unique("slider panel");
+    ctx.set_transform_layer(LayerId::new(Order::Foreground, area), to_window);
+    look.set_zoom(LayerId::new(Order::Foreground, area), scale);
+    let measured = to_window.inverse().mul_rect(ctx.content_rect());
+    egui::Area::new(area).fixed_pos(rect.min).order(Order::Foreground).constrain_to(measured).show(ctx, |ui| {
+        ui.allocate_rect(rect, Sense::hover());
+        let painter = ui.painter();
+        painter.rect_filled(rect, corner, argb(SLIDER_PANEL_FILL));
+        // a hairline rim
+        painter.rect_stroke(rect, corner, Stroke::new(1.0, argb(pc::GLASS_MENU_EDGE)), egui::StrokeKind::Inside);
+        let (name, value) = match which {
+            Slider::Size => ("Size", info.size),
+            Slider::Opacity => ("Opacity", info.opacity),
+        };
+        let shown = format!(" {}%", (value * 100.0).round());
+        let line = pos2(rect.left() + 16.0, rect.top() + 6.0 + 16.0);
+        text_runs(
+            painter,
+            line,
+            Align2::LEFT_CENTER,
+            &[(name, Weight::Bold), (&shown, Weight::Regular)],
+            19.0,
+            argb(SLIDER_PANEL_INK),
+        );
+        // its size on the screen, however big the panel shows
+        let diameter = info.brush_diameter * info.zoom / ppp / scale;
+        let r = (diameter / 2.0).clamp(1.5, (SLIDER_PANEL_SIDE / 2.0 - 8.0).max(1.5));
+        let alpha = if which == Slider::Size { 1.0 } else { info.opacity.clamp(0.02, 1.0) };
+        // the brush's stamp as it paints (soft where it is soft) in a picture its size on the
+        // screen, kept while it stays so
+        let side = ((2.0 * r * ppp * scale).ceil() as usize).max(2);
+        let stamp = session.brush_stamp(side as u32);
+        let key = stamp_key(&stamp, side);
+        let id = egui::Id::unique("size preview stamp");
+        let kept = ctx.data(|d| d.get_temp::<(u64, egui::TextureHandle)>(id)).filter(|(k, _)| *k == key);
+        let texture = kept.map(|(_, t)| t).unwrap_or_else(|| {
+            let pixels = stamp.iter().map(|&a| Color32::from_white_alpha(a)).collect();
+            let picture = egui::ColorImage { size: [side, side], pixels, ..Default::default() };
+            let t = ctx.load_texture("size preview stamp", picture, egui::TextureOptions::LINEAR);
+            ctx.data_mut(|d| d.insert_temp(id, (key, t.clone())));
+            t
+        });
+        let shown = Rect::from_center_size(rect.center(), vec2(2.0 * r, 2.0 * r));
+        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        painter.image(texture.id(), shown, uv, Color32::WHITE.gamma_multiply(alpha));
+        let size = which == Slider::Size;
+        let value = if size { info.size } else { info.opacity };
+        let on_notch = session.slider_notch_at(size, value).is_some();
+        if on_notch || session.can_save_slider_notch(size) {
+            let button = Rect::from_min_size(rect.min + vec2(150.0, 6.0), vec2(32.0, 32.0));
+            let icon = if on_notch { &icons::NOTCH_REMOVE } else { &icons::NOTCH_ADD };
+            look.icon(ui, icon, button.center(), 24.0, argb(SLIDER_PANEL_INK));
+            if ui.interact(button, ui.scope_id().with("notch"), Sense::click()).clicked() {
+                session.toggle_slider_notch(size);
+                toggled = true;
             }
-        },
-    );
+        }
+    });
     toggled
 }
 
 /// What a stamp's picture (`side` pixels square) is known by, to make its texture once.
-fn stamp_key(stamp: &[u8], side: usize) -> u64 {
+pub fn stamp_key(stamp: &[u8], side: usize) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     side.hash(&mut h);
     stamp.hash(&mut h);
     h.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::emath::TSTransform;
+    use egui::{Pos2, Rect, pos2, vec2};
+
+    use super::fit_side_bar;
+    use crate::look::pc;
+
+    #[test]
+    fn the_side_bar_as_big_as_the_rest_is_where_it_was_measured() {
+        for (height, right) in [(1133.0, false), (744.0, true), (500.0, false), (500.0, true)] {
+            let window = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, height));
+            let fit = fit_side_bar(window, right, 1.0, pc::BAR_HEIGHT);
+            let (top, track) = pc::side_bar_fit(height, pc::BAR_HEIGHT);
+            let left = if right { 1000.0 - pc::SIDE_BAR_WIDTH } else { 0.0 };
+            let tall = pc::SIDE_BAR_HEIGHT - (pc::SLIDER_HEIGHT - track) * 2.0;
+            let measured = Rect::from_min_size(pos2(left, top), vec2(pc::SIDE_BAR_WIDTH, tall));
+            assert_eq!((fit.laid_out(), fit.shown(), fit.track), (measured, measured, track), "{height}");
+            assert_eq!(fit.to_window(), TSTransform::IDENTITY);
+        }
+    }
+
+    #[test]
+    fn the_side_bar_bigger_or_smaller_keeps_to_its_edge_under_the_top_bar_as_it_shows_and_in_the_window() {
+        for height in (480..1400).step_by(7) {
+            let window = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, height as f32));
+            for (scale, bar) in [(1.5, 1.5), (1.5, 1.0), (0.5, 1.5), (0.75, 0.5), (1.25, 1.25)] {
+                for right in [false, true] {
+                    let fit = fit_side_bar(window, right, scale, pc::BAR_HEIGHT * bar);
+                    let (shown, laid_out) = (fit.shown(), fit.laid_out());
+                    let case = format!("{height} {scale} {bar} {right}");
+                    // drawn at its scale from its top left
+                    let drawn = fit.to_window().mul_rect(laid_out);
+                    assert!(
+                        (drawn.min - shown.min).length() < 1e-3 && (drawn.max - shown.max).length() < 1e-3,
+                        "{case}"
+                    );
+                    assert!((shown.width() - pc::SIDE_BAR_WIDTH * scale).abs() < 1e-3, "{case}");
+                    let edge = if right { window.right() - shown.right() } else { shown.left() - window.left() };
+                    assert!(edge.abs() < 1e-3, "{case}");
+                    assert!(shown.top() >= pc::BAR_HEIGHT * bar - 1e-3, "{case}");
+                    assert!(shown.bottom() <= window.bottom() + 1e-3, "{case}");
+                }
+            }
+        }
+    }
 }

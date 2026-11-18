@@ -7,11 +7,17 @@
 const PIGMENT_GRID: f32 = 32.0;
 const PIGMENT_BANDS: u32 = 10u;
 const PIGMENT_SLICES: f32 = 32.0;
-const PIGMENT_DEPTH: f32 = 320.0;
+// each of the table's two halves holds five bands' 32 slices (an old GPU's 3D textures stop at 256
+// layers, where one of all ten would take 320)
+const PIGMENT_HALF_BANDS: u32 = 5u;
+const PIGMENT_HALF_DEPTH: f32 = 160.0;
 
-// the table, and the sampler the hardware interpolates it with
-@group(0) @binding(9) var pigment_lut: texture_3d<f32>;
-@group(0) @binding(10) var pigment_sampler: sampler;
+// the table in two halves, and the sampler the hardware interpolates it with (12 and 14 for the
+// halves, 13 the sampler: the bindings free in both groups it is read in, the composite's quad
+// group and a smudge's compute group)
+@group(0) @binding(12) var pigment_lut: texture_3d<f32>;
+@group(0) @binding(14) var pigment_lut_b: texture_3d<f32>;
+@group(0) @binding(13) var pigment_sampler: sampler;
 
 // the CIE 1931 matching functions, a band a row
 const CMF: array<vec3<f32>, 38> = array<vec3<f32>, 38>(
@@ -82,8 +88,16 @@ fn pigment_channels(rgb: vec3<f32>) -> array<f32, 40> {
     let z_at = at.z * (PIGMENT_SLICES - 1.0);
     var channels: array<f32, 40>;
     for (var band = 0u; band < PIGMENT_BANDS; band = band + 1u) {
-        let z = (f32(band * 32u) + z_at + 0.5) / PIGMENT_DEPTH;
-        let values = textureSampleLevel(pigment_lut, pigment_sampler, vec3<f32>(xy.x, xy.y, z), 0.0);
+        // half the table it is in, `band` counted within that half
+        let in_b = band >= PIGMENT_HALF_BANDS;
+        let k = band - select(0u, PIGMENT_HALF_BANDS, in_b);
+        let z = (f32(k * 32u) + z_at + 0.5) / PIGMENT_HALF_DEPTH;
+        var values: vec4<f32>;
+        if (in_b) {
+            values = textureSampleLevel(pigment_lut_b, pigment_sampler, vec3<f32>(xy.x, xy.y, z), 0.0);
+        } else {
+            values = textureSampleLevel(pigment_lut, pigment_sampler, vec3<f32>(xy.x, xy.y, z), 0.0);
+        }
         for (var channel = 0u; channel < 4u; channel = channel + 1u) {
             let slot = band * 4u + channel;
             if (slot < 38u) {
