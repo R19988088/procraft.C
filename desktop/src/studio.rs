@@ -3102,7 +3102,7 @@ mod tests {
             open.frame(Vec::new());
             open
         };
-        let heading = "Stroke color jitter";
+        let heading = crate::i18n::say("Stroke color jitter");
         // how far up a pen dragged 200 points up from the heading takes it, the interface told it
         // is on a touch screen first if `told` (egui drags a list only once it has had a touch,
         // from the frame after)
