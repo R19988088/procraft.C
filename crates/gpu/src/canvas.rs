@@ -10301,7 +10301,8 @@ impl Pipelines {
         if let Some(bits) = pigment {
             // five bands' slices a texture, the file already being their bytes
             let half_bytes = (pigment::WIDTH * pigment::HEIGHT * 8) as usize * half as usize;
-            for (texture, half_bits) in [(&pigment_table, &bits[..half_bytes]), (&pigment_table_b, &bits[half_bytes..])] {
+            for (texture, half_bits) in [(&pigment_table, &bits[..half_bytes]), (&pigment_table_b, &bits[half_bytes..])]
+            {
                 queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture,
@@ -10657,16 +10658,16 @@ impl Pipelines {
                         count: None,
                     },
                     sampler_entry(13),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 14,
-                    visibility: wgpu::ShaderStages::FRAGMENT.union(wgpu::ShaderStages::COMPUTE),
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D3,
-                        multisampled: false,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 14,
+                        visibility: wgpu::ShaderStages::FRAGMENT.union(wgpu::ShaderStages::COMPUTE),
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D3,
+                            multisampled: false,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
                 ],
             });
             let smudge_module = module(
@@ -10993,7 +10994,10 @@ impl Pipelines {
                 join(moves),
                 join(mesh),
                 join(thumb),
-                filter_jobs.into_iter().flat_map(|job| join(job)).collect::<HashMap<&'static str, wgpu::RenderPipeline>>(),
+                filter_jobs
+                    .into_iter()
+                    .flat_map(|job| join(job))
+                    .collect::<HashMap<&'static str, wgpu::RenderPipeline>>(),
             )
         });
         let (

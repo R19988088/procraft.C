@@ -490,7 +490,10 @@ impl Canvas {
                     binding: 12,
                     resource: wgpu::BindingResource::TextureView(&self.pipelines.pigment_lut),
                 },
-                wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&self.pipelines.pigment_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::Sampler(&self.pipelines.pigment_sampler),
+                },
                 wgpu::BindGroupEntry {
                     binding: 14,
                     resource: wgpu::BindingResource::TextureView(&self.pipelines.pigment_lut_b),
